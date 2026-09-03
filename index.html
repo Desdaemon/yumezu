@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>yumezu</title>
+    <link data-trunk rel="scss" href="static/index.scss"/>
+    <!-- The world thumbnails, kept at the same relative path the native build reads them from.
+         Built by `just thumbnails`; the app draws the graph without pictures if it is missing. -->
+    <link data-trunk rel="copy-file" href="static/thumbnails.jpg" data-target-path="static"/>
+    <link data-trunk rel="rust" data-bin="yumezu"/>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+  </body>
+</html>

@@ -1,0 +1,51 @@
+[package]
+name = "yumezu"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+members = [
+  ".",
+  "crates/*"
+]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+force_graph_3d.path = "./crates/force_graph_3d"
+log = "0.4.34"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+three-d = { version = "0.20.0", git = "https://github.com/asny/three-d", features = ["egui-gui"] }
+# explicitly depended to override features
+three-d-asset = { version = "0.10", features = ["jpeg", "png", "http-rustls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+winit = "0.30"
+egui_material_icons = "0.6.0"
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+tokio = { version = "1.53.1", features = ["macros"] }
+wasm-bindgen-futures = "0.4"
+wasm-bindgen = "0.2.127"
+console_log = "1.1.0"
+console_error_panic_hook = "0.1.7"
+web-sys = { version = "0.3.104", features = ["Storage"] }
+
+
+[target.'cfg(target_os = "android")'.dependencies]
+# The activity glue behind `android_main`, which winit re-exports rather than being given: see
+# `src/lib.rs`. `android-native-activity` is the framework's own NativeActivity, so the apk needs
+# no Java of its own -- see `android/`.
+winit = { version = "0.30", features = ["android-native-activity"] }
+# `log` reaches nothing on Android without a backend, and logcat is the only place a message can
+# go on a device with no terminal.
+android_logger = "0.15"
+# Opening a link is a Java call here, and these two are how `open_in_browser` places it: the VM
+# and the app's context out of `ndk-context`, the call itself through `jni`. Both are already in
+# the tree underneath the activity glue, which publishes the one and is written against the other.
+jni = "0.22"
+ndk-context = "0.1"

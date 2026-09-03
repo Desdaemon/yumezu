@@ -1,0 +1,8 @@
+/target
+/dist
+/data.json
+/tools/atlas/target
+# Downloaded wiki images, and the atlas packed out of them: both derived, both rebuilt by
+# `just thumbnails`, and the wiki's to distribute rather than this repository's.
+/tools/atlas/cache
+/static/thumbnails.jpg

@@ -1,0 +1,4 @@
+# The force-graph hot loops are written to auto-vectorize. wasm SIMD is not on by default, and
+# without it the browser build runs them one lane at a time.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

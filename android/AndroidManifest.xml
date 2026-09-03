@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The whole of the app that is not Rust. `android.app.NativeActivity` is the framework's own
+     class, so the apk carries no code of its own and needs no dex: see `android:hasCode`.
+     What runs is the library named below, entered at its `android_main`: see `src/lib.rs`. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="dev.yumezu">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- three-d compiles its shaders as GLSL ES 3.00. -->
+    <uses-feature android:glEsVersion="0x00030000" android:required="true" />
+
+    <application
+        android:label="yumezu"
+        android:hasCode="false"
+        android:extractNativeLibs="false">
+        <!-- No action bar, because there is nothing to put in one: the activity's whole view is
+             the native drawing surface. Left in, it is never drawn but is still measured, and the
+             content rect `safe_rect` reads comes back 56dp shorter than the window really is,
+             which parks the panel that far below the status bar it was only meant to clear. -->
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+            android:screenOrientation="user"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density|uiMode">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="yumezu" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

@@ -1,0 +1,12 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  // Matches the renderer clear color, so the page does not flash white before the first frame.
+  background: #08080d;
+}
+
+#canvas {
+  width: 100% !important;
+  height: 100% !important;
+}

@@ -1,0 +1,15 @@
+# Its own workspace on purpose: this is a build-time asset step, and making it a member of the
+# app's workspace would pull an HTTP stack and an image codec into every `cargo check` of the
+# visualization itself.
+[workspace]
+
+[package]
+name = "atlas"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Only the formats the wiki actually serves for world images.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
+reqwest = { version = "0.13", features = ["blocking", "native-tls", "gzip"], default-features = false }
+serde_json = "1"
