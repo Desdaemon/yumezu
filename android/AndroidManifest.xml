@@ -21,7 +21,7 @@
             android:name="android.app.NativeActivity"
             android:exported="true"
             android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
-            android:screenOrientation="user"
+            android:screenOrientation="sensorLandscape"
             android:launchMode="singleTask"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density|uiMode">
             <meta-data

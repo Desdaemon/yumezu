@@ -142,6 +142,23 @@ fn grid(worlds: usize, atlas: &CpuTexture) -> Option<(u32, u32)> {
     Some((columns, rows))
 }
 
+/// A decoded picture as egui holds them, or `None` for one stored in a format it has no pixel
+/// for.
+///
+/// The one place a [`CpuTexture`] is turned into something egui can show, which the atlas needs
+/// for its [`Sheet`] and the map window needs for every map it opens. See [`super::map`].
+pub fn color_image(picture: &CpuTexture) -> Option<egui::ColorImage> {
+    let size = [picture.width as usize, picture.height as usize];
+    match &picture.data {
+        TextureData::RgbU8(pixels) => Some(egui::ColorImage::from_rgb(size, pixels.as_flattened())),
+        TextureData::RgbaU8(pixels) => Some(egui::ColorImage::from_rgba_unmultiplied(
+            size,
+            pixels.as_flattened(),
+        )),
+        _ => None,
+    }
+}
+
 /// The atlas again, as egui holds it: what the sidebar's catalog draws its pictures out of.
 ///
 /// A second upload of the same image, because the two sides own their textures separately — egui
@@ -160,16 +177,9 @@ impl Sheet {
     /// catalog lists releases without pictures.
     pub fn new(egui: &egui::Context, worlds: usize, atlas: &CpuTexture) -> Option<Self> {
         let (columns, rows) = grid(worlds, atlas)?;
-        let size = [atlas.width as usize, atlas.height as usize];
-        let image = match &atlas.data {
-            TextureData::RgbU8(pixels) => egui::ColorImage::from_rgb(size, pixels.as_flattened()),
-            TextureData::RgbaU8(pixels) => {
-                egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_flattened())
-            }
-            _ => {
-                log::warn!("{PATH} is not stored as bytes egui can show");
-                return None;
-            }
+        let Some(image) = color_image(atlas) else {
+            log::warn!("{PATH} is not stored as bytes egui can show");
+            return None;
         };
         Some(Self {
             // Linear, and no mipmaps: the cells are drawn at about their own size, so there is

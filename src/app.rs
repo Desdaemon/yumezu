@@ -1,13 +1,17 @@
 //! See [App::draw] for the main flow.
 
 use egui_material_icons::icons::*;
-use force_graph_3d::{DefaultNodeIdx, Dimensions, ForceGraph, NodeData};
+use force_graph_3d::{
+    DefaultNodeIdx, Dimensions, EdgeData, ForceGraph, NodeData, SimulationParameters,
+};
 use three_d::{FrameInput, FrameInputGenerator, GUI, WindowedContext, egui, renderer::*};
 use winit::{
     application::ApplicationHandler,
     event::{Touch, TouchPhase, WindowEvent},
     window::{CursorIcon, Window},
 };
+
+use world::{Ask, Gate};
 
 /// Side of the cube nodes are scattered over at the start of a layout, in simulation units.
 const SPAWN_EXTENT: f32 = 1000.0;
@@ -18,34 +22,58 @@ const SPAWN_EXTENT: f32 = 1000.0;
 /// front of a camera that measures in tens. This factor is what puts it there.
 ///
 /// The name is about the space, not about the thing in it. Everywhere else in this file a
-/// "world" is one of the game's worlds, which is a node. [`NODE_BASE_RADIUS`] sizes those.
+/// "world" is one of the game's worlds, which is a node. [`NODE_LEAF_RADIUS`] sizes those.
 const SIM_TO_WORLD: f32 = 0.012;
-/// The size of a world with nothing behind it, which is the floor every other node is measured up
-/// from. See [`NODE_HUB_GROWTH`], which moves against it: the two together set the range rather
-/// than either alone.
-const NODE_BASE_RADIUS: f32 = 0.2;
-/// Mass of a world of [`NODE_BASE_RADIUS`]. [`node_mass`] scales every bigger world from it.
-/// The value is the library's own default, restated here because the scale starts from it.
-const NODE_BASE_MASS: f32 = 10.0;
+/// The size of a world with nothing behind it: the smallest node the graph draws, and the radius
+/// every other size and every mass is read against. See [`NODE_HUB_RADIUS`] for the other end of
+/// the scale and [`node_mass`] for the masses.
+const NODE_LEAF_RADIUS: f32 = 1.1;
+/// The size of a world with [`NODE_HUB_DESCENDANTS`] worlds behind it. Together with
+/// [`NODE_LEAF_RADIUS`] these are the two anchors the whole scale is drawn through: a size is the
+/// point between them that a world's descendant count reaches on a logarithmic curve.
+///
+/// Not a cap. The curve passes through this anchor rather than stopping at it, so the origin, with
+/// the whole game behind it, is larger still.
+const NODE_HUB_RADIUS: f32 = 1.7;
+/// Mass of a world of [`NODE_LEAF_RADIUS`], which is the smallest there is. [`node_mass`] scales
+/// every bigger world up from it.
+const NODE_BASE_MASS: f32 = 18.0;
 /// Where the panel's hub-push knob starts, and so the value [`AppEntities::hub_repulsion`] holds
 /// until somebody drags it. It decides how much of a world's size settles how hard the world
 /// pushes. See [`node_mass`].
 ///
 /// At `0.0` every world pushes alike. At `1.0` the push is proportional to the size. The higher
 /// value spaces the hubs generously, and the rest of the layout with them.
-const HUB_REPULSION_DEFAULT: f32 = 0.25;
+const HUB_REPULSION_DEFAULT: f32 = 0.45;
 
-/// The anchor the node sizes are drawn through. A world with [`NODE_HUB_DESCENDANTS`] worlds
-/// behind it is [`NODE_HUB_GROWTH`] times the size of a world with nothing behind it. Every other
-/// size follows from those two on a logarithmic curve. The curve keeps the ranks a player can act
-/// on apart, and the origin, with the whole game behind it, still fits on the same scale.
+const FORCE_CHARGE: f32 = 800.0;
+const SETTLE_AFTER: f32 = 15.0;
+
+/// How many worlds behind a world put it at [`NODE_HUB_RADIUS`]. It is what fixes where on the
+/// descendant counts the far anchor sits, and so how quickly the sizes climb: the curve keeps the
+/// ranks a player can act on apart, and the origin still fits on the same scale.
 ///
-/// The growth fell as the floor rose, so lifting the smallest nodes clear of the vanishing point
-/// left the largest where they were. A range this wide is already as much as the layout can hold
-/// without the hubs eating their neighbours.
+/// The two radii are near each other on purpose. A wider range than this is more than the layout
+/// can hold without the hubs eating their neighbours.
 const NODE_HUB_DESCENDANTS: f32 = 4.0;
-const NODE_HUB_GROWTH: f32 = 3.3;
 const EDGE_RADIUS: f32 = 0.02;
+/// A connection a player can only walk one way is drawn as a run of marching dashes rather than
+/// a solid line, and which way they march is which way it goes. This is how many dashes, fixed
+/// rather than paced by a fixed dash length so that the count is settled when the graph is built
+/// and never moves with the layout: the dashes stretch with the connection instead.
+const EDGE_DASHES: usize = 7;
+/// How much of its own slot a dash fills, the rest of the slot being the gap behind it. Short:
+/// what a reader has to see is a dash moving, and a dash is only seen to move against the gap it
+/// leaves behind.
+const EDGE_DASH_FILL: f32 = 0.25;
+/// How much wider than a solid line a dash is. Wider, because it is so much shorter: a dash as
+/// thin as the line it stands in for reads as a line worn away rather than as a mark travelling
+/// along one.
+const EDGE_DASH_WIDTH: f32 = 1.6;
+/// How fast the dashes march, in slots a second: at `1.0` a dash takes a second to reach where
+/// the dash ahead of it started. The marching carries the direction on its own, so the dashes are
+/// plain lines and nothing about a still frame of them points anywhere.
+const EDGE_DASH_SPEED: f32 = 0.8;
 /// Spacing between depth layers in layered mode, in simulation units.
 ///
 /// Measured against how wide a layer actually settles, rather than picked for looks. The busiest
@@ -55,24 +83,34 @@ const DAG_LEVEL_DISTANCE: f32 = 800.0;
 /// The same spacing in two dimensions, where a layer is a line rather than a plane.
 ///
 /// Wider than [`DAG_LEVEL_DISTANCE`]. A flat layer carries the whole crowd on one line, and it
-/// may also stack either side of that line. The gap has to hold the stack and still read as a gap.
+/// may also stack either side of that line. The gap has to hold the stack and still read as a gap:
+/// this one holds the band the slack below allows, plus about three worlds of clear air.
 ///
-/// Not much wider, though. The gaps multiply over sixteen layers, and a tree taller than it is
-/// wide takes scrolling to read rather than one glance.
-const DAG_LEVEL_DISTANCE_2D: f32 = 1000.0;
+/// Not much wider than it has to be, though. The gaps multiply over sixteen layers, and a tree
+/// taller than it is wide takes scrolling to read rather than one glance.
+const DAG_LEVEL_DISTANCE_2D: f32 = 3000.0;
 /// How far a world may sit from its layer per microstep of slack, in simulation units.
 ///
-/// About two nodes across, which is what makes a microstep worth taking. A step of one node
-/// leaves the worlds it separates touching, and that reads as one clump rather than as a stack.
-const DAG_LEVEL_MICROSTEP: f32 = 60.0;
+/// Two worlds across, which is what makes a microstep worth taking. A step of one world leaves
+/// the worlds it separates touching, and that reads as one clump rather than as a stack.
+///
+/// Read off the node sizes rather than written as a number, because that is what it means. The
+/// sizes have been retuned more than once, and a microstep fixed in simulation units silently
+/// stopped being a step at all: it was worth two worlds when a leaf measured a fifth of a world
+/// unit, and under a third of one world by the time a leaf measured six times that.
+const DAG_LEVEL_MICROSTEP: f32 = 4.0 * NODE_LEAF_RADIUS / SIM_TO_WORLD;
 /// How many [`DAG_LEVEL_MICROSTEP`]s of slack a layer has in two dimensions. This constant is a
 /// count. The microstep it multiplies is a distance. [`Overlay::run`] uses only their product.
 ///
 /// A layer in three dimensions is a plane, and it spreads a crowd across that plane. In two
 /// dimensions a layer is a line. A busy line has nowhere for the overflow but on top of itself,
-/// so it may stack this far either side. Keep the count a fraction of [`DAG_LEVEL_DISTANCE_2D`],
-/// or the layers meet and stop reading as layers.
-const DAG_LEVEL_SLACK_MICROSTEPS_2D: f32 = 6.0;
+/// so it may stack this far either side. Keep the band well under [`DAG_LEVEL_DISTANCE_2D`], or
+/// the layers meet and stop reading as layers.
+///
+/// The count fell as the microstep grew with the worlds, but the band still came out several times
+/// deeper than it was: six steps of a third of a world was room for two worlds, where three steps
+/// of two worlds is room for six.
+const DAG_LEVEL_SLACK_MICROSTEPS_2D: f32 = 3.0;
 /// Force per unit of distance between a grabbed node and the cursor.
 ///
 /// The cursor pulls the node rather than places it, so the graph attached to the node travels
@@ -183,19 +221,20 @@ const CATALOG_THUMBNAIL_HEIGHT: f32 = 34.0;
 /// person has to keep their bearings while the view changes.
 const FRAMING_WINDOW_MS: f32 = 600.0;
 /// Slack left around a framed route, as a fraction of the distance that would touch it to the
-/// window edges.
-const FRAMING_MARGIN: f32 = 1.2;
-/// Smallest sphere the camera will frame, in world units. A route of one world has no extent at
-/// all, and without this the camera would fly into the node.
-const FRAMING_MIN_RADIUS: f32 = 2.0;
+/// window edges. The framed sphere already holds the whole of the pictures on its rim, so this is
+/// breathing room and nothing else: it can sit near one without cutting a world in half.
+const FRAMING_MARGIN: f32 = 1.1;
 
 /// How near the goal the camera has to be to count as arrived, as a fraction of the framed radius
 /// and of the framing distance. The ease is asymptotic, so it needs a floor to stop at.
 const FRAMING_ARRIVAL_TOLERANCE: f32 = 0.01;
 
 mod detail;
+mod download;
 mod fetch;
 mod guide;
+mod map;
+mod store;
 mod thumbnails;
 mod world;
 
@@ -396,9 +435,25 @@ const WALK_SPEED: f32 = 800.0;
 /// Each one carries a world's title, and a long title would otherwise stretch it across the
 /// window.
 const POPUP_WIDTH: f32 = 240.0;
+/// What the chosen UI scale is kept under. See [`store`].
+const UI_SCALE: &str = "ui-scale";
+
+/// How far the UI scale can be taken either way, and where it starts. The far ends are a phone
+/// held at arm's length and a desk monitor read from close up; the middle is the size the system
+/// itself says a point is, which is already right for most screens.
+const UI_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.6..=2.0;
+const UI_SCALE_DEFAULT: f32 = 1.0;
+
 /// How far below and right of the cursor the hover tooltip sits, in egui's points, so that it
 /// names the world under the pointer rather than covering it.
 const TOOLTIP_OFFSET: f32 = 16.0;
+
+/// How much larger than the rest of the interface the rocker's two arrows are drawn.
+///
+/// It is the one control with no words on it and the one a thumb goes for on a phone, where it
+/// stands alone in the corner with nothing beside it to be crowded by. A multiplier rather than a
+/// size, so it is still three times whatever the UI scale has made everything else.
+const ROCKER_SCALE: f32 = 3.0;
 
 /// The on-screen readout: how fast the layout is drawing, and what is selected.
 struct Overlay {
@@ -411,6 +466,19 @@ struct Overlay {
     keyboard: bool,
     /// The controls, named on the first run. See [`guide::Guide`].
     guide: guide::Guide,
+    /// The offer of the phone build, made to the phones reading the page. See
+    /// [`download::Offer`].
+    download: download::Offer,
+    /// The maps of whichever world they were last asked for. See [`map::Maps`].
+    maps: map::Maps,
+    /// What the person has scaled the interface by, on top of whatever the system already says a
+    /// point is worth. Multiplied into the pixel ratio the overlay is laid out and read at, and
+    /// into that alone: the graph is a place rather than an interface, and its distances are the
+    /// screen's own. Remembered between runs under [`UI_SCALE`].
+    ui_scale: f32,
+    /// The scale the store was last written with, so that a drag writes once at the end of itself
+    /// rather than once a frame all the way along it.
+    ui_scale_stored: f32,
 }
 
 /// What the sidebar keeps between frames.
@@ -453,6 +521,8 @@ enum Tab {
 struct Panel {
     dimensions: Dimensions,
     hub_repulsion: f32,
+    /// The scale the settings tab was left at. See [`Overlay::ui_scale`].
+    ui_scale: f32,
     layered: bool,
     /// A world picked out of one of the lists, to be routed to.
     chosen: Option<usize>,
@@ -465,6 +535,11 @@ struct Panel {
     wants_pointer: bool,
     /// Whether the settings tab asked for the controls to be named again.
     guide: bool,
+    /// Whether the framing button was pressed, asking for a route to be framed the other way.
+    refit: bool,
+    /// The world whose maps were asked for, if the button was pressed. See [`map::Maps::toggle`],
+    /// which is what a second press on the same world reaches.
+    mapped: Option<usize>,
 }
 
 /// Everything the panel reads, walked out of [AppEntities] before it is built.
@@ -511,6 +586,14 @@ enum Highlight {
     /// A whole depth at once: every world exactly this many connections from the origin. Asked
     /// for by the rocker in the bottom corner. See [`Panel::rocker`].
     Layer(u32),
+    /// One connection: the two worlds it joins and the line between them, and nothing else.
+    /// Asked for from the ways on a world offers, which is where which ways round it can be
+    /// walked and what it asks of a player are read out. See [`Panel::ways_on`].
+    ///
+    /// Held as the world it was picked from and the world at the far end, in that order. Not as a
+    /// direction: which ways round it can be walked is the connection's own and is read off it,
+    /// and holding it this way round is what keeps the panel on the world the reader is reading.
+    Connection(usize, usize),
 }
 
 impl Highlight {
@@ -519,7 +602,11 @@ impl Highlight {
     /// home of their own for the panel to walk.
     fn world(self) -> Option<usize> {
         match self {
-            Self::Route(world) | Self::Descendants(world) => Some(world),
+            // The world a connection was picked from: the one whose ways on the panel is
+            // listing, so clicking through them leaves the reader where they started.
+            Self::Route(world) | Self::Descendants(world) | Self::Connection(world, _) => {
+                Some(world)
+            }
             Self::Author(_) | Self::Version(_) | Self::Layer(_) => None,
         }
     }
@@ -562,8 +649,16 @@ enum Gesture {
     Orbiting,
 }
 
+/// The worlds and the connections between them, laid out by the simulation.
+///
+/// Each connection carries whether a player can only walk it one way, which is both what decides
+/// how it is drawn and the one thing about it a frame has to know. Its stored direction is the
+/// walkable one, so a one-way connection's dashes march the way the player can go. See
+/// [`AppEntities::march_dashes`].
+type Graph = ForceGraph<(), bool>;
+
 struct AppEntities {
-    graph: ForceGraph,
+    graph: Graph,
     /// Held here rather than beside the camera, so that rebuilding the graph drops the gesture
     /// along with the node index it names.
     gesture: Option<Gesture>,
@@ -573,6 +668,9 @@ struct AppEntities {
     routes: world::Routes,
     /// World names, indexed like the nodes. Only the overlay reads them.
     titles: Vec<String>,
+    /// Per world, the maps the wiki draws of it, in the order it lists them and empty for the
+    /// worlds it draws none of. Only the overlay reads them. See [`map::Maps`].
+    maps: Vec<Vec<world::Map>>,
     /// Everyone credited, and everything each of them made. Busiest first: see
     /// [`world::Dump::authors`], which also settles what [`Highlight::Author`] indexes.
     authors: Vec<world::Author>,
@@ -598,12 +696,21 @@ struct AppEntities {
     /// hovers. See [`AppEntities::track_gesture`].
     cursor: Option<PhysicalPoint>,
     hover: Option<usize>,
+    /// Per world, every connection it has and which ways round it can be walked. The lines are
+    /// built from it, and the panel reads a world's ways on out of it. See [`world::connections`].
+    connections: Vec<Vec<world::Step>>,
     /// Per world, how many other worlds it connects to: the degree of the graph as drawn, which
     /// is what tells a junction from a dead end. Only the overlay reads it.
     degrees: Vec<usize>,
     /// Whether the camera is still easing onto the selected route. Set by a selection and cleared
     /// once the camera arrives, or as soon as the person takes the camera back.
     framing: bool,
+    /// Whether a framed route is framed whole, rather than framed on the world at its end. Off by
+    /// default: the route is read out in the panel, where the whole of it fits however long it is,
+    /// and what the camera is wanted for is the world the reader picked. Held across selections,
+    /// since it is a way of looking rather than a fact about any one route. See
+    /// [`AppEntities::framed`].
+    frame_route: bool,
     /// Connection colors before a selection dims them, so clearing one restores the distance
     /// ramp. See [`edge_colors`].
     edge_colors: Vec<Srgba>,
@@ -622,10 +729,17 @@ struct AppEntities {
     /// sample has arrived, because until then there is nothing to sample: see [`thumbnails`].
     thumbnails: Gm<InstancedMesh, ColorMaterial>,
     edges: Gm<InstancedMesh, ColorMaterial>,
+    /// The dashes that stand in for a solid line on a one-way connection, [`EDGE_DASHES`] of them
+    /// per connection. See [`AppEntities::march_dashes`].
+    dashes: Gm<InstancedMesh, ColorMaterial>,
     /// Kept so each frame can rewrite the transformations while keeping the colors:
     /// `set_instances` replaces the whole [Instances] struct.
     thumbnail_instances: Instances,
+    /// Only the two-way connections: the one-way ones are in `dash_instances` instead. Both are
+    /// filled by walking the graph's edges in the one order it visits them in, so an edge always
+    /// reaches the same slot of whichever of the two it belongs to.
     edge_instances: Instances,
+    dash_instances: Instances,
     /// The thumbnail atlas on its way in, until [`AppEntities::receive_atlas`] takes it.
     atlas: Option<fetch::Pending<Option<CpuTexture>>>,
     /// The same atlas as the sidebar's catalog draws out of. `None` until it arrives, and forever
@@ -634,6 +748,9 @@ struct AppEntities {
     /// Full-size pictures for the worlds the view has come close enough to, over the atlas cells
     /// they stand in for. See [`detail`].
     detail: detail::Detail,
+    /// How far the dashes have marched along their slots, in `0.0..1.0`. Wrapped rather than
+    /// counted up, so it stays exact however long the app runs. See [`AppEntities::march_dashes`].
+    dash_phase: f32,
     /// The rotation that stood the quads square to the camera when their transformations were
     /// last built. Turning the camera has to rebuild them even though nothing in the layout has
     /// moved, and this is what says that it has been turned.
@@ -776,9 +893,9 @@ impl App {
         self.ctx.window = Some(window);
         let window = self.ctx.window.as_ref().unwrap();
         self.ctx.wctx =
-            Some(WindowedContext::from_winit_window(&window, Default::default()).unwrap());
+            Some(WindowedContext::from_winit_window(window, Default::default()).unwrap());
         let ctx = self.ctx.wctx.as_ref().unwrap();
-        self.ctx.fig = Some(FrameInputGenerator::from_winit_window(&window));
+        self.ctx.fig = Some(FrameInputGenerator::from_winit_window(window));
 
         let rng = Rng(0x5eed_1337);
 
@@ -790,21 +907,26 @@ impl App {
         let routes = world::canonical_routes(worlds);
         let deepest = routes.depth.iter().flatten().copied().max().unwrap_or(0);
         let furthest = deepest.max(1) as f32;
-        // Sized by how much of the graph hangs off each world, through the anchor above: a leaf
-        // keeps [`NODE_BASE_RADIUS`]. The logarithm is what carries the depth: a deep world with a
-        // handful of worlds behind it lands within reach of a shallow one with a hundred, because
-        // the size grows with the order of magnitude of what a world leads to rather than with the
-        // count. See [`world::Routes::descendant_counts`].
+        // Sized by how much of the graph hangs off each world, between the two anchors above: a
+        // leaf keeps [`NODE_LEAF_RADIUS`]. The logarithm is what carries the depth: a deep world
+        // with a handful of worlds behind it lands within reach of a shallow one with a hundred,
+        // because the size grows with the order of magnitude of what a world leads to rather than
+        // with the count. See [`world::Routes::descendant_counts`].
         let descendants = routes.descendant_counts();
         let node_radii: Vec<_> = descendants
             .iter()
             .map(|&descendants| {
                 let growth = (1.0 + descendants as f32).ln() / (1.0 + NODE_HUB_DESCENDANTS).ln();
-                NODE_BASE_RADIUS * (1.0 + (NODE_HUB_GROWTH - 1.0) * growth)
+                NODE_LEAF_RADIUS + (NODE_HUB_RADIUS - NODE_LEAF_RADIUS) * growth
             })
             .collect();
 
-        let mut graph = <ForceGraph>::new(Default::default());
+        let mut graph = Graph::new(SimulationParameters {
+            dag_level_distance: Some(DAG_LEVEL_DISTANCE),
+            force_charge: FORCE_CHARGE,
+            settle_after: Some(SETTLE_AFTER),
+            ..Default::default()
+        });
         // Positions come from `scatter` below, so the initial layout and a restart agree.
         let nodes: Vec<_> = routes
             .depth
@@ -820,22 +942,42 @@ impl App {
                 })
             })
             .collect();
-        // A connection between two worlds is usually listed from both ends, and the graph is
-        // directed, so a reciprocal pair would otherwise become two springs pulling the same two
-        // nodes together twice as hard.
-        let mut linked = std::collections::HashSet::new();
-        // Counted off the same pairs the edges are built from, so the panel calls a world a
+        // Every connection as it is drawn and as the panel reads it out: which worlds are joined,
+        // and which ways round each joining can be walked. See [`world::connections`].
+        let connections = world::connections(worlds);
+        // Counted off the same connections the edges are built from, so the panel calls a world a
         // junction on exactly the lines it draws for it.
         let mut degrees = vec![0; worlds.len()];
-        for (from, world) in worlds.iter().enumerate() {
-            for connection in &world.connections {
-                let to = connection.target_id;
-                let pair = (from.min(to), from.max(to));
-                if from != to && linked.insert(pair) {
-                    graph.add_edge(nodes[from], nodes[to], Default::default());
-                    degrees[from] += 1;
-                    degrees[to] += 1;
+        // How many of those lines are drawn as dashes instead, which is what fixes how many dash
+        // instances there are. See [`EDGE_DASHES`].
+        let mut dashed = 0;
+        for (from, steps) in connections.iter().enumerate() {
+            for step in steps {
+                // Once per connection rather than once per world it joins: both of them carry it,
+                // and one line is drawn for it. Two springs on the same two nodes would pull them
+                // together twice as hard.
+                if step.world <= from {
+                    continue;
                 }
+                let to = step.world;
+                // Stored from the end a player can leave, so the dashes march the way they can
+                // walk. A connection walkable both ways, or neither, keeps the dump's own order:
+                // nothing is drawn on it that a direction would mean anything to.
+                let (from, to) = if step.out.is_none() && step.back.is_some() {
+                    (to, from)
+                } else {
+                    (from, to)
+                };
+                dashed += usize::from(step.one_way());
+                graph.add_edge(
+                    nodes[from],
+                    nodes[to],
+                    EdgeData {
+                        user_data: step.one_way(),
+                    },
+                );
+                degrees[from] += 1;
+                degrees[to] += 1;
             }
         }
 
@@ -851,6 +993,7 @@ impl App {
             .collect();
         let edge_colors = edge_colors(&graph, &routes, &descendants, &depth_colors);
         let titles: Vec<String> = worlds.iter().map(|world| world.title.clone()).collect();
+        let maps: Vec<Vec<world::Map>> = worlds.iter().map(world::World::maps).collect();
         // The catalog's own two readings of the dump, built once here: both group every world,
         // which is not work a frame can afford, and both are ordered for the lists they fill.
         let (authors, author_of) = dump.authors();
@@ -862,9 +1005,18 @@ impl App {
             colors: Some(vec![Srgba::WHITE; worlds.len()]),
             ..Default::default()
         };
+        // One instance per solid line, and [`EDGE_DASHES`] of them per one-way one. The colors
+        // are left to the first [`AppEntities::repaint`] below, which is where the same fan-out
+        // has to live anyway.
+        let solid = edge_colors.len() - dashed;
         let edge_instances = Instances {
-            transformations: vec![Mat4::identity(); edge_colors.len()],
-            colors: Some(edge_colors.clone()),
+            transformations: vec![Mat4::identity(); solid],
+            colors: Some(vec![Srgba::WHITE; solid]),
+            ..Default::default()
+        };
+        let dash_instances = Instances {
+            transformations: vec![Mat4::identity(); dashed * EDGE_DASHES],
+            colors: Some(vec![Srgba::WHITE; dashed * EDGE_DASHES]),
             ..Default::default()
         };
         let backdrop = ColorMaterial {
@@ -886,11 +1038,18 @@ impl App {
         // No texture yet: it is the atlas, which is still on its way in. See
         // [`AppEntities::receive_atlas`].
         let thumbnails = Gm::new(
-            InstancedMesh::new(&ctx, &thumbnail_instances, &CpuMesh::square()),
+            InstancedMesh::new(ctx, &thumbnail_instances, &CpuMesh::square()),
             ColorMaterial::default(),
         );
         let edges = Gm::new(
-            InstancedMesh::new(&ctx, &edge_instances, &CpuMesh::cylinder(8)),
+            InstancedMesh::new(ctx, &edge_instances, &CpuMesh::cylinder(8)),
+            ColorMaterial::default(),
+        );
+        // The same shape as a solid line, placed the same way, only shorter: a dash says nothing
+        // by itself, and everything by where it is against the last frame. See
+        // [`AppEntities::march_dashes`].
+        let dashes = Gm::new(
+            InstancedMesh::new(ctx, &dash_instances, &CpuMesh::cylinder(8)),
             ColorMaterial::default(),
         );
 
@@ -902,6 +1061,7 @@ impl App {
             rng,
             routes,
             titles,
+            maps,
             authors,
             author_of,
             versions,
@@ -912,29 +1072,36 @@ impl App {
             cursor: None,
             hover: None,
             framing: false,
+            frame_route: false,
             edge_colors,
             node_radii,
             hub_repulsion: HUB_REPULSION_DEFAULT,
             descendants,
+            connections,
             degrees,
             backdrop,
             thumbnails,
             edges,
+            dashes,
             thumbnail_instances,
             edge_instances,
+            dash_instances,
             atlas: Some(thumbnails::load()),
             sheet: None,
             detail: detail::Detail::new(worlds.iter().map(|world| world.image.clone()).collect()),
+            dash_phase: 0.0,
             // Rebuilt on the first frame either way, because a fresh layout has not settled.
             billboard: Mat4::identity(),
         });
+        // The instance colors have not been written yet, only sized. See above.
+        data.repaint();
         scatter(data);
     }
 
     /// The meat of this module.
     fn draw(&mut self) {
         let ctx = self.ctx.wctx.as_ref().unwrap();
-        let mut frame_input = self.ctx.fig.as_mut().unwrap().generate(&ctx);
+        let mut frame_input = self.ctx.fig.as_mut().unwrap().generate(ctx);
 
         let data = self.data.as_mut().unwrap();
         self.statics.camera.set_viewport(frame_input.viewport);
@@ -1027,6 +1194,8 @@ impl App {
         if stepped || turned {
             data.rebuild_instances(&self.statics.camera);
         }
+        // Whether or not anything else moved: see [`AppEntities::march_dashes`].
+        data.march_dashes((frame_input.elapsed_time as f32 * 1e-3).min(0.05));
         // After the instances, whose colors the full pictures borrow, and every frame rather than
         // only the moved ones: coming in on a node changes nothing in the layout and everything
         // about how much of the atlas the screen is asking for.
@@ -1058,6 +1227,7 @@ impl App {
                 &self.statics.camera,
                 data.edges
                     .into_iter()
+                    .chain(&data.dashes)
                     .chain(data.drawn_thumbnails())
                     .chain(data.detail.drawn()),
                 &[],
@@ -1070,13 +1240,18 @@ impl App {
 impl Overlay {
     fn new(context: &Context) -> Self {
         let gui = GUI::new(context);
-        egui_material_icons::initialize(&gui.context());
+        egui_material_icons::initialize(gui.context());
+        let scale = remembered_scale();
         Self {
             gui,
             fps: 0.0,
             sidebar: Sidebar::default(),
             keyboard: false,
             guide: guide::Guide::new(),
+            download: download::Offer::new(),
+            maps: map::Maps::new(),
+            ui_scale: scale,
+            ui_scale_stored: scale,
         }
     }
 
@@ -1086,30 +1261,36 @@ impl Overlay {
     /// into [PanelData] first, and everything it decides is left on the [Panel] it is handed for
     /// [Overlay::run] to apply.
     fn panel(&mut self, frame_input: &mut FrameInput, data: &AppEntities) -> Panel {
-        let read = PanelData::new(data, self.fps, &self.sidebar, frame_input);
+        let ratio = frame_input.device_pixel_ratio * self.ui_scale;
+        let read = PanelData::new(data, self.fps, &self.sidebar, frame_input, ratio);
         let parameters = data.graph.parameters();
         // Read here and written back after the panel: `parameters_mut` wakes the layout, so
         // touching it every frame would keep the graph from ever settling.
         let mut panel = Panel {
             dimensions: parameters.dimensions,
             hub_repulsion: data.hub_repulsion,
+            ui_scale: self.ui_scale,
             layered: parameters.dag_level_distance.is_some(),
             chosen: None,
             lit: None,
             menu_taken: false,
             wants_pointer: false,
             guide: false,
+            refit: false,
+            mapped: None,
         };
         // Bound out of `self` so the closure borrows this field alone, leaving `self.gui` free
         // for the call it is passed to.
         let sidebar = &mut self.sidebar;
         let guide = &mut self.guide;
-        let insets = safe_insets(frame_input.viewport, frame_input.device_pixel_ratio);
+        let download = &mut self.download;
+        let maps = &mut self.maps;
+        let insets = safe_insets(frame_input.viewport, ratio);
         panel.wants_pointer = self.gui.update(
             &mut frame_input.events,
             frame_input.accumulated_time,
             frame_input.viewport,
-            frame_input.device_pixel_ratio,
+            ratio,
             |ui| {
                 let style = ui.style();
                 // Full height, so the safe area is kept by standing the contents off the panel's
@@ -1138,6 +1319,13 @@ impl Overlay {
                 panel.rocker(ui, &read, insets);
                 panel.menu(ui, &read);
                 panel.tooltip(ui, &read);
+                // Read within the frame that asked, so the window is on screen the moment the
+                // button is let go of rather than the frame after it.
+                if let Some(world) = panel.mapped {
+                    maps.toggle(world, &data.titles[world], &data.maps[world]);
+                }
+                maps.show(ui.ctx(), insets);
+                download.show(ui.ctx(), insets);
                 // Last, so it is drawn over everything it is explaining. Read a frame late when
                 // the settings tab has just asked for it, which is a frame nobody sees.
                 if panel.guide {
@@ -1180,6 +1368,12 @@ impl Overlay {
         if let Some(world) = panel.chosen {
             data.select(Some(Highlight::Route(world)));
         }
+        // Framing again rather than only from here on: the button is pressed to be taken there
+        // now, whether or not the camera had already arrived where it was.
+        if panel.refit {
+            data.frame_route = !data.frame_route;
+            data.framing = true;
+        }
         // [GUI::update] only surrenders the pointer while egui is actively working a widget, so
         // a scroll over the panel reaches the camera as a zoom and a press on a bare label
         // reaches the graph as a selection. Whatever egui wants the pointer for is the panel's.
@@ -1194,6 +1388,14 @@ impl Overlay {
                     _ => (),
                 }
             }
+        }
+
+        // Followed live, so the panel resizes under the hand, but written through only once the
+        // hand is off it: a store is not something to write to every frame of a drag.
+        self.ui_scale = panel.ui_scale;
+        if self.ui_scale != self.ui_scale_stored && !self.gui.context().egui_is_using_pointer() {
+            self.ui_scale_stored = self.ui_scale;
+            store::write(UI_SCALE, Some(&self.ui_scale.to_string()));
         }
 
         if panel.hub_repulsion != data.hub_repulsion {
@@ -1227,7 +1429,13 @@ impl Overlay {
 impl<'a> PanelData<'a> {
     /// Walks out of `data` everything the panel will read, since the closure that builds it can
     /// only borrow `data` immutably and cannot call these methods itself.
-    fn new(data: &'a AppEntities, fps: f32, sidebar: &Sidebar, frame_input: &FrameInput) -> Self {
+    fn new(
+        data: &'a AppEntities,
+        fps: f32,
+        sidebar: &Sidebar,
+        frame_input: &FrameInput,
+        ratio: f32,
+    ) -> Self {
         Self {
             data,
             fps,
@@ -1260,22 +1468,31 @@ impl<'a> PanelData<'a> {
             menu: data
                 .menu
                 .as_ref()
-                .map(|menu| (menu.world, into_points(menu.at, frame_input))),
+                .map(|menu| (menu.world, into_points(menu.at, frame_input, ratio))),
             // Settled after the panel ran last frame, since the pointer is only resolved once the
             // panel has taken its share of the events: a frame behind the cursor, which at this
             // rate is not a frame anybody sees.
             hovered: data
                 .hover
                 .zip(data.cursor)
-                .map(|(world, cursor)| (world, into_points(cursor, frame_input))),
+                .map(|(world, cursor)| (world, into_points(cursor, frame_input, ratio))),
         }
     }
 }
 
+/// The scale an earlier run was left at, or the default. A value written by a version that
+/// allowed a different range is brought back inside this one rather than thrown away.
+fn remembered_scale() -> f32 {
+    store::read(UI_SCALE)
+        .and_then(|scale| scale.parse().ok())
+        .map_or(UI_SCALE_DEFAULT, |scale: f32| {
+            scale.clamp(*UI_SCALE_RANGE.start(), *UI_SCALE_RANGE.end())
+        })
+}
+
 /// A window position in physical pixels, counted from the bottom, into egui's points counted from
 /// the top: the same conversion the integration puts every pointer event through.
-fn into_points(at: PhysicalPoint, frame_input: &FrameInput) -> egui::Pos2 {
-    let ratio = frame_input.device_pixel_ratio;
+fn into_points(at: PhysicalPoint, frame_input: &FrameInput, ratio: f32) -> egui::Pos2 {
     egui::pos2(
         at.x / ratio,
         (frame_input.viewport.height as f32 - at.y) / ratio,
@@ -1334,10 +1551,7 @@ impl Panel {
                 .on_hover_text("Separate worlds into layers of depths");
         });
         ui.separator();
-        egui::TextEdit::singleline(search)
-            .prefix(ICON_SEARCH)
-            .suffix(ICON_CANCEL)
-            .show(ui);
+        search_box(ui, search, "Search worlds");
         for &world in &read.candidates {
             if ui
                 .selectable_label(
@@ -1351,6 +1565,53 @@ impl Panel {
         }
         ui.separator();
         self.selection(ui, read);
+    }
+
+    /// Every way on from a world: its connections, each with which ways round it can be walked
+    /// and what it asks, and each a click away from being lit on its own.
+    ///
+    /// All but one of them. The step back to the world the route came through is left out: the
+    /// route above already names it, and it is the one way on a reader following a route has
+    /// just come from.
+    fn forward_connections(&mut self, ui: &mut egui::Ui, read: &PanelData, world: usize) {
+        let data = read.data;
+        let parent = data.routes.parents[world];
+        let ways: Vec<_> = data.connections[world]
+            .iter()
+            .filter(|step| Some(step.world) != parent)
+            .collect();
+        if ways.is_empty() {
+            ui.label("No forward connections.");
+            return;
+        }
+        ui.label(format!("{} forward connections", ways.len()));
+        for step in ways {
+            let lit = Highlight::Connection(world, step.world);
+            // What the way it can be walked asks, which for a two-way connection is the way out:
+            // a reader looking at the ways on from a world is looking at leaving it.
+            let asks = step
+                .out
+                .as_ref()
+                .or(step.back.as_ref())
+                .map(world::Ask::asks_emoji)
+                .unwrap_or_default();
+            let title = &data.titles[step.world];
+            ui.horizontal(|ui| {
+                ui.label(step.arrow());
+                if ui
+                    .selectable_label(read.selected == Some(lit), title)
+                    .on_hover_text(walk_of(step))
+                    .clicked()
+                {
+                    if read.selected == Some(lit) {
+                        self.lit = Some(Some(Highlight::Route(world)));
+                    } else {
+                        self.lit = Some(Some(lit));
+                    }
+                }
+                ui.label(asks);
+            });
+        }
     }
 
     /// Who made the worlds: everyone the wiki credits, busiest first, and how much each of them
@@ -1444,11 +1705,63 @@ impl Panel {
         });
     }
 
+    /// Names the selected world and how it sits in the graph: who made it, what it touches and what
+    /// hangs off it.
+    fn world_info(&mut self, ui: &mut egui::Ui, data: &AppEntities, world: usize) {
+        let mut lit = None;
+        ui.horizontal(|ui| {
+            ui.strong(&data.titles[world]);
+            if ui.button(ICON_OPEN_IN_NEW).clicked() {
+                open_in_browser(&world::wiki_url(&data.titles[world]));
+            }
+            // Only where there is one to show: a few hundred worlds have never been drawn, and a
+            // button that opened an empty window on them would say nothing this does not.
+            if !data.maps[world].is_empty()
+                && ui
+                    .button(ICON_MAP)
+                    .on_hover_text("Show the wiki's map of this world")
+                    .clicked()
+            {
+                self.mapped = Some(world);
+            }
+            if let Some(parent) = data.routes.parents[world]
+                && ui.button(ICON_ARROW_UPWARD).clicked()
+            {
+                lit = Some(Highlight::Connection(parent, world));
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("by");
+            if ui
+                .link(&data.authors[data.author_of[world]].name)
+                .on_hover_text("Show every world by this author")
+                .clicked()
+            {
+                lit = Some(Highlight::Author(data.author_of[world]));
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label(format!("{} connections,", data.degrees[world]));
+            if data.descendants[world] > 0
+                && ui
+                    .link(format!("{} descendants", data.descendants[world]))
+                    .clicked()
+            {
+                lit = Some(Highlight::Descendants(world));
+            } else if data.descendants[world] == 0 {
+                ui.label("dead end");
+            }
+        });
+        self.lit = self.lit.or(lit.map(Some));
+    }
+
     /// The knobs: set once and then left alone, which is why they are not in the way of the
     /// reading tabs.
     fn settings(&mut self, ui: &mut egui::Ui) {
         ui.add(egui::Slider::new(&mut self.hub_repulsion, 0.0..=1.0).text("hub push"))
             .on_hover_text("The higher the value, the harder bigger worlds' repulsion force is");
+        ui.add(egui::Slider::new(&mut self.ui_scale, UI_SCALE_RANGE).text("UI scale"))
+            .on_hover_text("How large the panel and its text are drawn");
         // The way back to a panel that was dismissed for good, so ticking that box is not a
         // door that locks behind the person who ticked it.
         self.guide |= ui.button("Show controls").clicked();
@@ -1465,18 +1778,50 @@ impl Panel {
                 );
             }
             Some(Highlight::Route(world)) => {
-                self.lit = self.lit.or(world_info(ui, data, world).map(Some));
-                ui.label(format!(
-                    "{} connections from the origin",
-                    read.route.len() - 1
-                ));
+                self.world_info(ui, data, world);
+                self.forward_connections(ui, read, world);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "{} connections from the origin",
+                        read.route.len() - 1
+                    ));
+                    let (icon, hint) = match data.frame_route {
+                        true => (ICON_ZOOM_IN, "Zoom in on world"),
+                        false => (ICON_ZOOM_OUT, "Zoom out to route"),
+                    };
+                    self.refit |= ui.button(icon).on_hover_text(hint).clicked();
+                });
                 // Origin first, so the list reads in the order it is walked.
                 for (step, &world) in read.route.iter().rev().enumerate() {
                     ui.monospace(format!("{step:>2}  {}", data.titles[world]));
                 }
             }
+            // The connection is the subject, but the world it is walked from is still what the
+            // ways on are listed for: picking another of them from here is picking a second way
+            // out of the same world, not a step onward from the first.
+            Some(Highlight::Connection(at, far)) => {
+                self.world_info(ui, data, at);
+                let step = data.connections[at]
+                    .iter()
+                    .find(|step| step.world == far)
+                    .expect("a lit connection is one of its own world's connections");
+                self.forward_connections(ui, read, at);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(step.arrow());
+                    if ui
+                        .link(&data.titles[far])
+                        .on_hover_text("Trace the route to this world")
+                        .clicked()
+                    {
+                        self.chosen = Some(far);
+                    }
+                });
+                ui.label(walk_of(step));
+            }
             Some(Highlight::Descendants(world)) => {
-                self.lit = self.lit.or(world_info(ui, data, world).map(Some));
+                self.world_info(ui, data, world);
                 ui.label(format!(
                     "{} worlds are reached through it",
                     data.descendants[world]
@@ -1500,6 +1845,8 @@ impl Panel {
                         self.chosen = Some(world);
                     }
                 }
+                ui.separator();
+                self.forward_connections(ui, read, world);
             }
             // The author is the subject here, not the world that named them, so that world's own
             // information gives way to their whole body of work.
@@ -1568,6 +1915,14 @@ impl Panel {
             )
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    // Scaled rather than sized: the arrows and the padding around them are grown
+                    // together, so the buttons keep their shape and still follow the UI scale.
+                    let style = ui.style_mut();
+                    for font in style.text_styles.values_mut() {
+                        font.size *= ROCKER_SCALE;
+                    }
+                    style.spacing.button_padding *= ROCKER_SCALE;
+                    style.spacing.item_spacing *= ROCKER_SCALE;
                     ui.vertical_centered(|ui| {
                         if ui
                             .add_enabled(lit != Some(0), egui::Button::new(ICON_KEYBOARD_ARROW_UP))
@@ -1636,6 +1991,7 @@ impl Panel {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(POPUP_WIDTH);
                     ui.label(&read.data.titles[world]);
+                    ui.label(&read.data.authors[read.data.author_of[world]].name);
                 });
             });
     }
@@ -2029,6 +2385,7 @@ impl AppEntities {
             Some(Highlight::Author(author)) => self.authors[author].worlds.clone(),
             Some(Highlight::Version(version)) => self.versions[version].worlds.clone(),
             Some(Highlight::Layer(depth)) => self.layer(depth),
+            Some(Highlight::Connection(at, far)) => vec![at, far],
         }
     }
 
@@ -2087,13 +2444,29 @@ impl AppEntities {
         notable
     }
 
-    /// The sphere that holds every world the selection lights. `None` with nothing selected.
+    /// The worlds a framing move has to bring into view. Everything the selection lights, except
+    /// a route the reader has not asked to see whole: that is framed on the world at its end,
+    /// which is what was picked and what the panel is reading. See [`Self::frame_route`].
+    fn framed(&self) -> Vec<usize> {
+        match self.selected {
+            Some(Highlight::Route(world)) if !self.frame_route => vec![world],
+            _ => self.highlighted(),
+        }
+    }
+
+    /// The sphere that holds every world a framing move has to bring into view, pictures and all.
+    /// `None` with nothing selected.
     ///
     /// Centred on the middle of their bounding box rather than on their average, so a route that
     /// piles up near the origin and reaches out with a few steps is still framed around what it
     /// spans instead of around where most of it sits.
+    ///
+    /// The reach counts each world's own radius, not just where it sits, so the sphere holds the
+    /// thumbnails rather than the points they hang on. That is what a lone world is framed by -
+    /// its picture, at the size the graph draws it - and what keeps a hub on the rim of a group
+    /// whole instead of clipped by the window edge.
     fn highlight_bounds(&self) -> Option<Bounds> {
-        let highlighted = self.highlighted();
+        let highlighted = self.framed();
         if highlighted.is_empty() {
             return None;
         }
@@ -2101,29 +2474,31 @@ impl AppEntities {
         for node in highlighted {
             on_route[node] = true;
         }
+        // Paired with the radius, since both ends of the reach below need the two together.
         let mut positions = Vec::new();
         self.graph.visit_nodes(|node| {
-            if on_route[node.index().index()] {
-                positions.push(world_pos(node.position()));
+            let world = node.index().index();
+            if on_route[world] {
+                positions.push((world_pos(node.position()), self.node_radii[world]));
             }
         });
 
-        let fold = |f: fn(f32, f32) -> f32| {
-            positions
-                .iter()
-                .copied()
-                .reduce(|a, b| vec3(f(a.x, b.x), f(a.y, b.y), f(a.z, b.z)))
-                .unwrap()
-        };
-        let center = (fold(f32::min) + fold(f32::max)) * 0.5;
+        let low = positions
+            .iter()
+            .map(|&(position, radius)| position - vec3(radius, radius, radius))
+            .reduce(|a, b| vec3(a.x.min(b.x), a.y.min(b.y), a.z.min(b.z)))
+            .unwrap();
+        let high = positions
+            .iter()
+            .map(|&(position, radius)| position + vec3(radius, radius, radius))
+            .reduce(|a, b| vec3(a.x.max(b.x), a.y.max(b.y), a.z.max(b.z)))
+            .unwrap();
+        let center = (low + high) * 0.5;
         let radius = positions
             .iter()
-            .map(|p| (p - center).magnitude())
+            .map(|&(position, radius)| (position - center).magnitude() + radius)
             .fold(0.0, f32::max);
-        Some(Bounds {
-            center,
-            radius: radius.max(FRAMING_MIN_RADIUS),
-        })
+        Some(Bounds { center, radius })
     }
 
     /// The worlds whose titles match `needle`, best first, at most [`SEARCH_CANDIDATES`] of them.
@@ -2187,19 +2562,31 @@ impl AppEntities {
         }
 
         let (routes, on_route) = (&self.routes.parents, &on_route);
-        let (colors, base) = (
+        let (solid, dashed, base) = (
             self.edge_instances.colors.as_mut().unwrap(),
+            self.dash_instances.colors.as_mut().unwrap(),
             &self.edge_colors,
         );
-        // The same order [`Self::rebuild_instances`] writes the transformations in.
-        let mut edge = 0;
-        self.graph.visit_edges(|a, b, _| {
+        // The same order, and the same split between the two, that [`Self::rebuild_instances`] and
+        // [`Self::march_dashes`] write the transformations in.
+        let (mut edge, mut line, mut dash) = (0, 0, 0);
+        self.graph.visit_edges(|a, b, data| {
             let (a, b) = (a.index().index(), b.index().index());
             // Whether this edge is a canonical step: the move from one of its ends to that
             // end's own parent.
             let step = routes[a] == Some(b) || routes[b] == Some(a);
-            colors[edge] = match self.selected {
+            let color = match self.selected {
                 None => base[edge],
+                // The one line it is about, and nothing else: not even the step home from either
+                // of its ends, which is a different way through the graph than the one the reader
+                // asked to see.
+                Some(Highlight::Connection(at, far)) => {
+                    if (a, b) == (at, far) || (a, b) == (far, at) {
+                        ROUTE_COLOR
+                    } else {
+                        dim(base[edge])
+                    }
+                }
                 // A layer is a shell rather than a walk, so what is worth seeing across it is
                 // where it is stitched to itself, not the step each of its worlds takes home.
                 // Both ends being lit is the whole test, which for a layer already means both
@@ -2214,11 +2601,21 @@ impl AppEntities {
                 Some(_) if step && on_route[a] && on_route[b] => ROUTE_COLOR,
                 Some(_) => dim(base[edge]),
             };
+            // A one-way connection wears its color across every one of its arrowheads, so it reads
+            // as the one line it stands for.
+            if data.user_data {
+                dashed[dash..dash + EDGE_DASHES].fill(color);
+                dash += EDGE_DASHES;
+            } else {
+                solid[line] = color;
+                line += 1;
+            }
             edge += 1;
         });
 
         self.thumbnails.set_instances(&self.thumbnail_instances);
         self.edges.set_instances(&self.edge_instances);
+        self.dashes.set_instances(&self.dash_instances);
     }
 
     /// Rewrites the instance transformations from the current node positions and the direction
@@ -2240,7 +2637,12 @@ impl AppEntities {
         });
         let edges = &mut self.edge_instances.transformations;
         edges.clear();
-        self.graph.visit_edges(|a, b, _| {
+        self.graph.visit_edges(|a, b, data| {
+            // The one-way connections are not lines at all: [`Self::march_dashes`] has them, and
+            // rebuilds them every frame rather than only the frames the layout moves in.
+            if data.user_data {
+                return;
+            }
             let (from, to) = (world_pos(a.position()), world_pos(b.position()));
             let dir = to - from;
             edges.push(
@@ -2252,6 +2654,62 @@ impl AppEntities {
         self.thumbnails.set_instances(&self.thumbnail_instances);
         self.edges.set_instances(&self.edge_instances);
         self.billboard = billboard;
+    }
+
+    /// Walks the dashes of every one-way connection one step further along it and rebuilds them
+    /// where they now stand.
+    ///
+    /// Every frame, unlike the rest of the geometry: the marching is the whole point of them, and
+    /// a settled layout is exactly when it has to carry on regardless.
+    fn march_dashes(&mut self, dt: f32) {
+        // Kept inside a single slot: past the end of one, every dash stands where the dash ahead
+        // of it stood, so the run is unchanged and the phase can simply start over.
+        self.dash_phase = (self.dash_phase + dt * EDGE_DASH_SPEED).fract();
+        let phase = self.dash_phase;
+        let radii = &self.node_radii;
+        let dashes = &mut self.dash_instances.transformations;
+        dashes.clear();
+        self.graph.visit_edges(|a, b, data| {
+            if !data.user_data {
+                return;
+            }
+            let (from, to) = (world_pos(a.position()), world_pos(b.position()));
+            let dir = to - from;
+            let along = rotation_matrix_from_dir_to_dir(vec3(1.0, 0.0, 0.0), dir.normalize());
+            // The run stops at the pictures rather than running under them: a dash that reached a
+            // world's own place would stand inside its quad and show through it. Held off by the
+            // half-width, which is the furthest a quad ever reaches from the world it draws, so a
+            // dash clears it whichever way the billboard has been turned. See
+            // [`Self::rebuild_instances`], which draws the quads that wide.
+            let clear = |node: usize| radii[node] * thumbnails::ASPECT;
+            let start = clear(a.index().index());
+            let span = dir.magnitude() - start - clear(b.index().index());
+            // Two worlds closer together than their own pictures leave nothing to draw a run in.
+            // Collapsed rather than skipped: the count of dashes is fixed when the graph is built,
+            // and the colors are written against it. See [`EDGE_DASHES`].
+            if span <= 0.0 {
+                dashes.extend(std::iter::repeat_n(Mat4::from_scale(0.0), EDGE_DASHES));
+                return;
+            }
+            // Evenly spaced dashes, each filling the front of its own slot: the gap behind it is
+            // both what makes the run read as dashed and what a dash marching off the far end
+            // comes back on into at the near one. The dashes are placed along a run one dash
+            // shorter than the span, so the leading one ends where the span does rather than
+            // reaching past it into the picture the whole point was to keep clear of.
+            let radius = EDGE_RADIUS * EDGE_DASH_WIDTH;
+            let run = span / (1.0 + EDGE_DASH_FILL / EDGE_DASHES as f32);
+            let length = run * EDGE_DASH_FILL / EDGE_DASHES as f32;
+            let unit = dir / dir.magnitude();
+            for dash in 0..EDGE_DASHES {
+                let at = ((dash as f32 + phase) / EDGE_DASHES as f32).fract();
+                dashes.push(
+                    Mat4::from_translation(from + unit * (start + run * at))
+                        * along
+                        * Mat4::from_nonuniform_scale(length, radius, radius),
+                );
+            }
+        });
+        self.dashes.set_instances(&self.dash_instances);
     }
 
     /// Takes the thumbnail atlas once it has arrived, points the thumbnail quads at their own
@@ -2431,39 +2889,67 @@ fn fade(color: egui::Color32, opacity: u8) -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(r, g, b, (a as u16 * opacity as u16 / 255) as u8)
 }
 
-/// Names the selected world and how it sits in the graph: who made it, what it touches and what
-/// hangs off it.
-fn world_info(ui: &mut egui::Ui, data: &AppEntities, world: usize) -> Option<Highlight> {
-    let mut lit = None;
-    ui.horizontal(|ui| {
-        ui.strong(&data.titles[world]);
-        if ui.button(ICON_OPEN_IN_NEW).clicked() {
-            open_in_browser(&world::wiki_url(&data.titles[world]));
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.label("by");
-        if ui
-            .link(&data.authors[data.author_of[world]].name)
-            .on_hover_text("Show every world by this author")
-            .clicked()
-        {
-            lit = Some(Highlight::Author(data.author_of[world]));
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.label(format!("{} connections,", data.degrees[world]));
-        if data.descendants[world] > 0
-            && ui
-                .link(format!("{} descendants", data.descendants[world]))
-                .clicked()
-        {
-            lit = Some(Highlight::Descendants(world));
-        } else if data.descendants[world] == 0 {
-            ui.label("dead end");
-        }
-    });
-    lit
+/// What a connection can be walked, in a sentence: which ways round, and what each way asks.
+///
+/// The two directions are named apart, because a connection can be free one way and locked the
+/// other, and a reader deciding whether to walk it needs the way they are about to walk.
+fn walk_of(step: &world::Step) -> String {
+    let asks = |ask: &world::Ask| match ask.asks() {
+        asks if asks.is_empty() => String::from("freely"),
+        asks => asks,
+    };
+    match (step.out.as_ref(), step.back.as_ref()) {
+        (
+            Some(Ask {
+                gate: Gate::Free, ..
+            }),
+            Some(Ask {
+                gate: Gate::Free, ..
+            }),
+        ) => "No restrictions.".to_string(),
+        (
+            Some(Ask {
+                gate: Gate::DeadEnd,
+                ..
+            }),
+            _,
+        ) => "Connected via isolated section only.".to_string(),
+        (
+            Some(Ask {
+                gate: Gate::Isolated,
+                ..
+            }),
+            _,
+        ) => "Connects to isolated section.".to_string(),
+        (
+            Some(Ask {
+                gate: Gate::Locked, ..
+            }),
+            _,
+        ) => "Unlockable from opposite entrance.".to_string(),
+        (
+            _,
+            Some(Ask {
+                gate: Gate::Locked, ..
+            }),
+        ) => "Unlocks access to this area from opposite entrance.".to_string(),
+        (Some(out), Some(back)) => format!("From here: {}\nTo here: {}.", asks(out), asks(back)),
+        (
+            Some(Ask {
+                gate: Gate::Free, ..
+            }),
+            None,
+        ) => String::from("One-way."),
+        (Some(out), None) => format!("From here only: {}", asks(out)),
+        (
+            None,
+            Some(Ask {
+                gate: Gate::Free, ..
+            }),
+        ) => String::from("No entry from here."),
+        (None, Some(back)) => format!("To here only: {}", asks(back)),
+        (None, None) => String::from("Currently inaccessible."),
+    }
 }
 
 /// Swallows the left-button motion [OrbitControl] would turn the camera with.
@@ -2485,16 +2971,22 @@ fn lock_rotation(events: &mut [Event]) {
 }
 
 /// How hard a world of a given radius pushes its neighbours away, with `hub_repulsion` mixing
-/// between one mass for everything and a mass proportional to the size.
+/// between one mass for everything and the mass a solid ball of that radius would have.
 ///
 /// At zero every world repels alike, and the sizes are drawn on top of a layout that was spaced
-/// for the smallest of them, so the hubs sit over their neighbours. At one the mass is
-/// proportional to the radius, which is the setting that scales: a pair's repulsion is capped, so
-/// the pair pushes at that ceiling out to the distance where the falloff drops it below, and that
-/// distance works out as the square root of the product of the two masses. It is also the setting
-/// that pushes hardest, hence the knob.
+/// for the smallest of them, so the hubs sit over their neighbours. At one the mass goes with the
+/// cube of the radius, as a ball's does.
+///
+/// The cube is chosen for the room it makes, not for the physics: nothing here integrates a mass
+/// as inertia, and the nodes are flat quads rather than balls. What the mass settles is a
+/// distance. A pair's repulsion is capped, so the pair pushes at that ceiling out to the distance
+/// where the falloff drops it below, and that distance works out as the square root of the product
+/// of the two masses. Cubed, that is the radii themselves to the power of one and a half, which
+/// opens the hubs out well past the width of the pictures on them - the point of the setting. A
+/// mass proportional to the radius instead would hold each pair at about the sum of its radii,
+/// which is the least that keeps the pictures apart and no more.
 fn node_mass(radius: f32, hub_repulsion: f32) -> f32 {
-    NODE_BASE_MASS * (1.0 + hub_repulsion * (radius / NODE_BASE_RADIUS - 1.0))
+    NODE_BASE_MASS * (1.0 + hub_repulsion * ((radius / NODE_LEAF_RADIUS).powi(3) - 1.0))
 }
 
 /// The rotation that stands a node's quad square to the camera.
@@ -2851,7 +3343,7 @@ fn scaled(color: Srgba, brightness: f32) -> Srgba {
 /// is nobody's route home — a shortcut across the tree — is taken as walked from its shallower
 /// end, which is the direction a player meets it in anyway.
 fn edge_colors(
-    graph: &ForceGraph,
+    graph: &Graph,
     routes: &world::Routes,
     descendants: &[u32],
     depth_colors: &[Srgba],

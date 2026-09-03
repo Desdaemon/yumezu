@@ -176,11 +176,13 @@ fn quad(context: &Context, picture: &CpuTexture) -> Gm<Mesh, ColorMaterial> {
     )
 }
 
-/// Starts loading one world's picture from the wiki. See [`fetch`].
+/// Starts loading one picture from the wiki. See [`fetch`].
 ///
-/// `None` for anything that cannot be had or read, which is not fatal: the world keeps the atlas
-/// cell it already had, a little soft.
-fn load(url: String) -> fetch::Pending<Option<CpuTexture>> {
+/// `None` for anything that cannot be had or read, which is not fatal anywhere it is called from:
+/// a world keeps the atlas cell it already had, a little soft, and a map says it has no picture.
+/// The map window loads through here too — the wiki serves both from the same edge, and it is
+/// [`ORIGIN`] and the decoder that make the difference between a picture and a challenge page.
+pub fn load(url: String) -> fetch::Pending<Option<CpuTexture>> {
     fetch::spawn(async move {
         let bytes = match download(&url).await {
             Ok(bytes) => bytes,

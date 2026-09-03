@@ -4,6 +4,10 @@
 //! only the fields the visualization draws are deserialized; serde skips the rest without
 //! allocating for it.
 
+use egui_material_icons::{
+    MaterialIcon,
+    icons::{ICON_ARROW_BACK, ICON_ARROW_FORWARD, ICON_ARROW_RANGE, ICON_BLOCK},
+};
 use serde::Deserialize;
 
 /// The dump is embedded rather than fetched: it is a fixed asset of this demo, and compiling it
@@ -37,7 +41,45 @@ pub struct World {
     /// the wiki does not date. See [`Dump::versions`].
     #[serde(rename = "verAdded")]
     added: Option<String>,
+    /// Where the wiki serves this world's maps from, and what it captions each of them, both as
+    /// the `|`-separated lists the dump publishes. Read together and never apart: see
+    /// [`World::maps`].
+    #[serde(rename = "mapUrl")]
+    map_url: Option<String>,
+    #[serde(rename = "mapLabel")]
+    map_label: Option<String>,
     pub connections: Vec<Connection>,
+}
+
+/// One of the maps the wiki draws of a world.
+pub struct Map {
+    /// The wiki's own caption for it, which is a sentence ("Map of Blood World") rather than a
+    /// name: a world with several maps is where it earns its keep, because that is where the
+    /// caption is the only thing saying which part of the world each one covers.
+    pub label: String,
+    /// Where the picture is served from, at the size the wiki holds it.
+    pub url: String,
+}
+
+impl World {
+    /// The maps the wiki has of this world, in the order it lists them. Empty for the few hundred
+    /// worlds it has drawn none of.
+    ///
+    /// The two lists are published in step, but they are walked together rather than trusted to
+    /// be: a map the wiki left uncaptioned is one this would otherwise panic on.
+    pub fn maps(&self) -> Vec<Map> {
+        let (Some(urls), Some(labels)) = (&self.map_url, &self.map_label) else {
+            return Vec::new();
+        };
+        urls.split('|')
+            .zip(labels.split('|'))
+            .filter(|(url, _)| !url.is_empty())
+            .map(|(url, label)| Map {
+                label: label.to_owned(),
+                url: url.to_owned(),
+            })
+            .collect()
+    }
 }
 
 /// One release, as the dump's own version history lists it.
@@ -75,6 +117,86 @@ pub struct Connection {
     /// bitfield the wiki publishes. See [`Gate`] and [`flag`].
     #[serde(rename = "type")]
     pub flags: u16,
+    /// The wiki's own words for whichever of the demands it writes words for, keyed by the flag
+    /// that makes the demand: the effects to be wearing, the odds, the season, or the sentence a
+    /// locked condition is written out as. Most connections demand nothing and carry none. See
+    /// [`Connection::ask`].
+    #[serde(rename = "typeParams", default)]
+    params: std::collections::HashMap<u16, TypeParams>,
+}
+
+/// The wiki's words for one demand. It publishes a Japanese rendering beside the English, which
+/// nothing here reads, so serde skips it.
+#[derive(Deserialize)]
+struct TypeParams {
+    params: Option<String>,
+}
+
+impl Connection {
+    /// What this listing asks of a player walking it: the condition, and the wiki's words for it
+    /// where it has any.
+    fn ask(&self) -> Ask {
+        let gate = Gate::of(self.flags);
+        Ask {
+            gate,
+            detail: gate
+                .worded()
+                .and_then(|flag| self.params.get(&flag))
+                .and_then(|words| words.params.clone())
+                .filter(|words| !words.is_empty()),
+        }
+    }
+}
+
+/// What a connection asks of a player walking it one way.
+///
+/// The condition on its own is what a route is ordered by; the words are what a reader is told.
+/// See [`Gate`] and [`Ask::asks`].
+#[derive(Clone)]
+pub struct Ask {
+    pub gate: Gate,
+    /// The wiki's words for the condition. `None` where it writes none, and always for a
+    /// direction that is inferred rather than listed: nothing was written about a listing that
+    /// does not exist. See [`walkable_steps`].
+    detail: Option<String>,
+}
+
+impl Ask {
+    /// What it asks, in the words the panel names it by: the wiki's own where it has any, and the
+    /// bare name of the condition otherwise. Empty for a connection that asks nothing.
+    pub fn asks(&self) -> String {
+        let Some(detail) = self.detail.as_deref() else {
+            return self.gate.asks().to_owned();
+        };
+        match self.gate {
+            // Listed as the wiki lists them, comma separated, rather than joined into a sentence:
+            // the wiki does not say whether one of them is enough or all of them are needed, and
+            // an "and" or an "or" here would be this program saying which.
+            Gate::Effect => format!("needs {}", detail.replace(',', ", ")),
+            Gate::Chance => format!("{detail} chance"),
+            Gate::Seasonal => format!("in {detail}"),
+            Gate::LockedCondition => detail.to_owned(),
+            _ => self.gate.asks().to_owned(),
+        }
+    }
+    pub fn asks_emoji(&self) -> &'static str {
+        match self.gate {
+            Gate::Free => "",
+            Gate::Effect => "✨",
+            Gate::Chance => "🍀",
+            Gate::Locked => "🔒",
+            Gate::LockedCondition => "🔐",
+            Gate::DeadEnd => "↩",
+            Gate::Isolated => "🚩",
+            Gate::Seasonal => match self.detail.as_deref() {
+                Some("Spring") => "🌸",
+                Some("Summer") => "☀",
+                Some("Fall") => "🍂",
+                Some("Winter") => "❄",
+                _ => "🗓",
+            },
+        }
+    }
 }
 
 /// The connection flags this module reads, from the wiki's own `ConnType`.
@@ -89,9 +211,9 @@ pub mod flag {
     /// This side opens a connection the far side reports as [`LOCKED`].
     pub const UNLOCK: u16 = 1 << 2;
     pub const LOCKED: u16 = 1 << 3;
-    /// Leads somewhere with no way onward.
+    /// Accessible only from isolated section: the far side of a [`DEAD_END`].
     pub const DEAD_END: u16 = 1 << 4;
-    /// Comes from somewhere with no way onward: the far side of a [`DEAD_END`].
+    /// Leads somewhere with no way onward.
     pub const ISOLATED: u16 = 1 << 5;
     pub const EFFECT: u16 = 1 << 6;
     pub const CHANCE: u16 = 1 << 7;
@@ -112,14 +234,17 @@ pub enum Gate {
     Effect,
     Chance,
     Seasonal,
+    /// Unlocked from opposite entrance.
     Locked,
     /// Also where a shortcut comes out. The reference only ever admits [`flag::EXIT_POINT`]
     /// together with the whole locked group, so it belongs at that group's strictest end rather
     /// than beside [`Gate::Locked`], which would let a route through it sooner than the reference
     /// would.
     LockedCondition,
-    /// Somewhere with no way onward, which is the last thing the reference will route through.
+    /// Leads to an isolated section of the destination.
     DeadEnd,
+    /// Opposite of DeadEnd, return to said world is only accessible from isolated section.
+    Isolated,
 }
 
 impl Gate {
@@ -129,7 +254,8 @@ impl Gate {
     /// meet together, so the route is only as free as its strictest one.
     fn of(flags: u16) -> Gate {
         [
-            (flag::DEAD_END | flag::ISOLATED, Gate::DeadEnd),
+            (flag::DEAD_END, Gate::DeadEnd),
+            (flag::ISOLATED, Gate::Isolated),
             (
                 flag::LOCKED_CONDITION | flag::EXIT_POINT,
                 Gate::LockedCondition,
@@ -143,14 +269,161 @@ impl Gate {
         .find(|(flag, _)| flags & flag != 0)
         .map_or(Gate::Free, |(_, gate)| gate)
     }
+
+    /// Which flag's `typeParams` carries the wiki's words for this condition, if any does.
+    ///
+    /// The dump writes words for exactly these four. The rest of the conditions are the whole of
+    /// what they say, and [`Gate::asks`] is all there is to read out for them.
+    fn worded(self) -> Option<u16> {
+        match self {
+            Gate::Effect => Some(flag::EFFECT),
+            Gate::Chance => Some(flag::CHANCE),
+            Gate::Seasonal => Some(flag::SEASONAL),
+            Gate::LockedCondition => Some(flag::LOCKED_CONDITION),
+            Gate::Free | Gate::Locked | Gate::DeadEnd | Gate::Isolated => None,
+        }
+    }
+
+    /// What the condition is called where the wiki writes no words of its own for it. Empty for
+    /// one that asks nothing, which is most of them: a row with nothing after the title is a way
+    /// a player can simply walk.
+    fn asks(self) -> &'static str {
+        match self {
+            Gate::Free => "",
+            Gate::Effect => "needs an effect",
+            Gate::Chance => "by chance",
+            Gate::Seasonal => "seasonal",
+            Gate::Locked => "unlocked from opposite entrance",
+            Gate::LockedCondition => "locked, conditional",
+            Gate::DeadEnd => "only from isolated section",
+            Gate::Isolated => "leads to isolated section",
+        }
+    }
 }
+
+/// One connection of a world, from that world's side of it: the world at the far end, and what it
+/// asks in each of the two directions.
+///
+/// A direction with no gate at all is a direction there is no way to walk, which is what makes a
+/// connection one-way. See [`connections`].
+pub struct Step {
+    pub world: usize,
+    /// What it asks of a player walking there. `None` where there is no way there.
+    pub out: Option<Ask>,
+    /// What it asks of a player walking back. `None` where there is no way back.
+    pub back: Option<Ask>,
+}
+
+impl Step {
+    /// Which way a player can walk it, as the arrow the panel draws before a title: both ways,
+    /// only there, only back, or — for the connection the dump lists but neither side can walk —
+    /// no way at all.
+    pub fn arrow(&self) -> MaterialIcon {
+        match (self.out.is_some(), self.back.is_some()) {
+            (true, true) => ICON_ARROW_RANGE,
+            (true, false) => ICON_ARROW_FORWARD,
+            (false, true) => ICON_ARROW_BACK,
+            (false, false) => ICON_BLOCK,
+        }
+    }
+
+    /// Whether it can be walked one way and not the other, which is what the drawing draws as
+    /// marching dashes.
+    pub fn one_way(&self) -> bool {
+        self.out.is_some() != self.back.is_some()
+    }
+}
+
+/// Per world, every world it is joined to, each with what the connection asks in either direction.
+///
+/// One entry per connection rather than one per listing: a connection is nearly always listed by
+/// both of the worlds it joins, and it is still the one connection, so each of them carries it
+/// once. A world's own listings come first, in the dump's order, and the connections only the far
+/// side lists follow them.
+///
+/// Both the lines the visualization draws and the ways on it offers a reader are read from here,
+/// so the panel names a connection one-way on exactly the connections drawn that way.
+pub fn connections(worlds: &[World]) -> Vec<Vec<Step>> {
+    let gates: std::collections::HashMap<_, _> = walkable_steps(worlds)
+        .into_iter()
+        .enumerate()
+        .flat_map(|(from, steps)| steps.into_iter().map(move |(to, ask)| ((from, to), ask)))
+        .collect();
+
+    let mut joined: Vec<Vec<usize>> = vec![Vec::new(); worlds.len()];
+    for (from, world) in worlds.iter().enumerate() {
+        for connection in &world.connections {
+            let to = connection.target_id;
+            // A world connected to itself is no way anywhere, and the graph draws no line for it.
+            if to != from && !joined[from].contains(&to) {
+                joined[from].push(to);
+            }
+        }
+    }
+    // The same connections again from the far side, for the world that did not list them itself.
+    for (from, world) in worlds.iter().enumerate() {
+        for connection in &world.connections {
+            let to = connection.target_id;
+            if to != from && !joined[to].contains(&from) {
+                joined[to].push(from);
+            }
+        }
+    }
+
+    joined
+        .into_iter()
+        .enumerate()
+        .map(|(from, joined)| {
+            joined
+                .into_iter()
+                .map(|to| Step {
+                    world: to,
+                    out: gates.get(&(from, to)).cloned(),
+                    back: gates.get(&(to, from)).cloned(),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Where the wiki serves its pictures from, and the path the page asks for them under instead.
+///
+/// The page cannot ask the wiki directly. Its edge answers a request from another origin with a
+/// challenge page rather than a picture, and the browser sets `Origin` itself and refuses to let
+/// the header `detail::ORIGIN` carries stand in for it -- so the one thing that gets the native
+/// build its pictures is the one thing a page may not do. Asking this host instead makes the
+/// request same-origin, and the host is expected to proxy it on to the wiki.
+///
+/// A relative path, so it is whichever host served the page: see `download::URL` for the same
+/// arrangement. The native and Android builds send the header themselves and reach the wiki
+/// directly, so they keep the dump's own addresses and this does not exist for them.
+#[cfg(target_family = "wasm")]
+const WIKI_IMAGES: &str = "https://yume.wiki/images/";
+#[cfg(target_family = "wasm")]
+const PROXIED_IMAGES: &str = "/img/";
 
 /// Parses the embedded dump.
 ///
 /// Panics on a malformed dump: it is a compile-time asset, so a failure here is a broken build
 /// rather than something the running app could recover from.
 pub fn load() -> Dump {
-    serde_json::from_str::<Dump>(DATA).expect("data.json is not the expected world dump")
+    #[allow(unused_mut)]
+    let mut dump =
+        serde_json::from_str::<Dump>(DATA).expect("data.json is not the expected world dump");
+    // Every picture address the app fetches at runtime passes through here, and only here: the
+    // world's own and its maps'. See [`WIKI_IMAGES`]. The atlas tool reads `data.json` itself and
+    // is not touched by this, which is right -- it runs at build time and has no page to be on.
+    #[cfg(target_family = "wasm")]
+    for world in &mut dump.worlds {
+        world.image = world.image.replace(WIKI_IMAGES, PROXIED_IMAGES);
+        if let Some(urls) = &mut world.map_url {
+            // Rewritten whole rather than entry by entry: every address in the `|`-separated list
+            // carries the same prefix, and a label list is never in this field. See
+            // [`World::maps`].
+            *urls = urls.replace(WIKI_IMAGES, PROXIED_IMAGES);
+        }
+    }
+    dump
 }
 
 /// How a release is named across the two halves of the dump, which do not spell it identically:
@@ -348,8 +621,8 @@ impl Routes {
 /// takes the mildest condition available. That ordering is why the depth this reports is the
 /// higher, honest one: a locked or chance-gated shortcut no longer makes a world look shallow.
 ///
-/// Directed, unlike the lines the visualization draws. A connection the player can only walk one
-/// way is still a single line on screen, but it is not a way in, so it cannot carry a route.
+/// Directed, like the lines the visualization draws. A connection the player can only walk one
+/// way is drawn as a run of marching dashes, and it is not a way in, so it cannot carry a route.
 pub fn canonical_routes(worlds: &[World]) -> Routes {
     let mut routes = Routes {
         parents: vec![None; worlds.len()],
@@ -371,9 +644,14 @@ pub fn canonical_routes(worlds: &[World]) -> Routes {
         }
         routes.depth[world] = Some(depth);
         routes.parents[world] = (world != 0).then_some(parent);
-        for &(next, step) in &steps[world] {
-            if routes.depth[next].is_none() {
-                queue.push(std::cmp::Reverse((gate.max(step), depth + 1, next, world)));
+        for (next, step) in &steps[world] {
+            if routes.depth[*next].is_none() {
+                queue.push(std::cmp::Reverse((
+                    gate.max(step.gate),
+                    depth + 1,
+                    *next,
+                    world,
+                )));
             }
         }
     }
@@ -386,7 +664,10 @@ pub fn canonical_routes(worlds: &[World]) -> Routes {
 /// and those two listings are the two directions. Where only one side lists it, the other
 /// direction is inferred the way the wiki's own path finder infers it: [`flag::ONE_WAY`] means
 /// there is no way back, and [`flag::UNLOCK`] means the way back is [`Gate::Locked`].
-fn walkable_steps(worlds: &[World]) -> Vec<Vec<(usize, Gate)>> {
+///
+/// The routes walk it directly, and [`connections`] is the same thing read pairwise, so a line
+/// drawn as one-way is one-way on exactly the steps a route is denied.
+fn walkable_steps(worlds: &[World]) -> Vec<Vec<(usize, Ask)>> {
     let listed: std::collections::HashSet<_> = worlds
         .iter()
         .enumerate()
@@ -406,7 +687,7 @@ fn walkable_steps(worlds: &[World]) -> Vec<Vec<(usize, Gate)>> {
                 continue;
             }
             if flags & flag::NO_ENTRY == 0 {
-                steps[from].push((to, Gate::of(flags)));
+                steps[from].push((to, connection.ask()));
             }
             if !listed.contains(&(to, from)) && flags & flag::ONE_WAY == 0 {
                 let gate = if flags & flag::UNLOCK != 0 {
@@ -414,7 +695,8 @@ fn walkable_steps(worlds: &[World]) -> Vec<Vec<(usize, Gate)>> {
                 } else {
                     Gate::Free
                 };
-                steps[to].push((from, gate));
+                // No words: the wiki wrote none for a direction it did not list at all.
+                steps[to].push((from, Ask { gate, detail: None }));
             }
         }
     }
@@ -423,6 +705,47 @@ fn walkable_steps(worlds: &[World]) -> Vec<Vec<(usize, Gate)>> {
 
 #[cfg(test)]
 mod tests {
+    /// A connection is one connection however many of its two worlds list it: both of them carry
+    /// it, and they agree on which ways round it can be walked.
+    #[test]
+    fn a_connection_reads_the_same_from_either_end() {
+        let worlds = super::load().worlds;
+        let connections = super::connections(&worlds);
+        for (from, steps) in connections.iter().enumerate() {
+            for step in steps {
+                let far = connections[step.world]
+                    .iter()
+                    .find(|far| far.world == from)
+                    .expect("the world at the far end carries it too");
+                assert_eq!(step.out.is_some(), far.back.is_some());
+                assert_eq!(step.back.is_some(), far.out.is_some());
+                assert_eq!(step.one_way(), far.one_way());
+            }
+        }
+    }
+
+    /// A condition is read out in the wiki's own words for it, not in the bare name of the
+    /// condition, wherever the wiki writes any.
+    #[test]
+    fn a_condition_is_read_out_in_the_wikis_own_words() {
+        let worlds = super::load().worlds;
+        let connections = super::connections(&worlds);
+        let asks: Vec<String> = connections
+            .iter()
+            .flatten()
+            .filter_map(|step| step.out.as_ref())
+            .map(super::Ask::asks)
+            .collect();
+        let any = |wanted: &str| asks.iter().any(|asks| asks.contains(wanted));
+        assert!(any(" chance"), "no odds are read out");
+        assert!(any("in Winter"), "no season is read out");
+        assert!(
+            asks.iter()
+                .any(|asks| asks.starts_with("needs ") && asks != "needs an effect"),
+            "no effect is named"
+        );
+    }
+
     /// The dump is embedded at compile time, so a shape change breaks the visualization silently
     /// otherwise: this proves it still parses and still carries a connected world graph.
     #[test]
