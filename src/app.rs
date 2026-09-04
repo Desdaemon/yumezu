@@ -283,32 +283,6 @@ struct AppStatics {
     walk: Walk,
 }
 
-/// Where the camera stands, as the three vectors [`Camera::new_perspective`] is given.
-///
-/// Read out by the settings tab so a view found by hand can be pasted back into [`App::new`] as
-/// the one the app opens on.
-#[derive(Clone, Copy)]
-struct Pose {
-    position: Vec3,
-    target: Vec3,
-    up: Vec3,
-}
-
-impl std::fmt::Display for Pose {
-    /// The three lines of [`App::new`] these belong on, in the order they are written there and
-    /// ready to be pasted over them.
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        for vector in [self.position, self.target, self.up] {
-            writeln!(
-                f,
-                "vec3({:.1}, {:.1}, {:.1}),",
-                vector.x, vector.y, vector.z
-            )?;
-        }
-        Ok(())
-    }
-}
-
 /// The WASD keys, held down.
 ///
 /// A key says only that it went down or came up, and walking has to carry on between the two, so
@@ -574,8 +548,6 @@ struct Panel {
 struct PanelData<'a> {
     data: &'a AppEntities,
     fps: f32,
-    /// Where the camera stands, for the settings tab to read out. See [`Pose`].
-    // pose: Pose,
     /// The route home from what is lit, origin last.
     route: Vec<usize>,
     /// The worlds worth naming among the descendants of what is lit.
@@ -1811,25 +1783,6 @@ impl Panel {
         {
             open_in_browser("https://explorer.yumemiru.dev/android");
         }
-
-        #[cfg(false)]
-        {
-            ui.separator();
-            // Written the way [`App::new`] wants it, so the view the person has flown to can be read
-            // off here and pasted straight over the three vectors the app opens on. See [`Pose`].
-            let pose = read.pose.to_string();
-            ui.horizontal(|ui| {
-                ui.label("Camera");
-                if ui
-                    .button(ICON_CONTENT_COPY)
-                    .on_hover_text("Copy the three vectors App::new takes")
-                    .clicked()
-                {
-                    ui.ctx().copy_text(pose.clone());
-                }
-            });
-            ui.monospace(pose.trim_end());
-        }
     }
 
     /// What is lit, read out: the route to it, what hangs off it, or the author it is credited to.
@@ -2154,15 +2107,6 @@ impl AppStatics {
         if cursor != self.cursor {
             self.cursor = cursor;
             window.set_cursor(cursor);
-        }
-    }
-
-    /// Where the camera stands right now. See [`Pose`].
-    fn pose(&self) -> Pose {
-        Pose {
-            position: self.camera.position(),
-            target: self.camera.target(),
-            up: self.camera.up(),
         }
     }
 

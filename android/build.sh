@@ -65,16 +65,37 @@ cp "$ROOT/static/thumbnails.jpg" "$OUT/staging/assets/static/" 2>/dev/null \
 (cd "$OUT/staging" && zip -q -X -Z store "$OUT/unaligned.apk" "lib/$ABI/libyumezu.so")
 "$TOOLS/zipalign" -f -p 4 "$OUT/unaligned.apk" "$OUT/yumezu.apk"
 
-# The same throwaway key the SDK's own tooling signs debug builds with. Enough to install; not
-# enough to publish.
-readonly KEYSTORE=$HOME/.android/debug.keystore
-if [[ ! -f $KEYSTORE ]]; then
-    mkdir -p "$(dirname "$KEYSTORE")"
-    keytool -genkeypair -keystore "$KEYSTORE" -storepass android -keypass android \
-        -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" \
-        -keyalg RSA -keysize 2048 -validity 10000
+# Signing. The release key is `android/production.jks`, which is gitignored and is not in a fresh
+# clone -- mint it with
+#
+#   keytool -genkeypair -v -keystore android/production.jks -alias yumezu \
+#       -keyalg RSA -keysize 4096 -validity 10000
+#
+# which asks for a password and for the name to put in the certificate. Keep both, and back the
+# file up outside this directory: an apk signed with a different key is a different app to
+# Android and to the Play Store, and cannot upgrade one already installed. The password comes
+# from YUMEZU_KEYSTORE_PASS if that is set, and otherwise apksigner asks for it at the terminal,
+# so the secret need not be written into a shell profile or the shell's history.
+#
+# Until that file exists the build falls back to the same throwaway key the SDK's own tooling
+# signs debug builds with: enough to install on your own device, not enough to publish.
+readonly RELEASE_KEY=${YUMEZU_KEYSTORE:-$ROOT/android/production.jks}
+if [[ -f $RELEASE_KEY ]]; then
+    pass=()
+    [[ -z ${YUMEZU_KEYSTORE_PASS:-} ]] || pass=(--ks-pass "pass:$YUMEZU_KEYSTORE_PASS")
+    "$TOOLS/apksigner" sign --ks "$RELEASE_KEY" \
+        --ks-key-alias "${YUMEZU_KEY_ALIAS:-yumezu}" "${pass[@]}" "$OUT/yumezu.apk"
+else
+    echo "WARNING: no RELEASE_KEY; signing with the debug key" >&2
+    readonly KEYSTORE=$HOME/.android/debug.keystore
+    if [[ ! -f $KEYSTORE ]]; then
+        mkdir -p "$(dirname "$KEYSTORE")"
+        keytool -genkeypair -keystore "$KEYSTORE" -storepass android -keypass android \
+            -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" \
+            -keyalg RSA -keysize 2048 -validity 10000
+    fi
+    "$TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android \
+        --ks-key-alias androiddebugkey "$OUT/yumezu.apk"
 fi
-"$TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android \
-    --ks-key-alias androiddebugkey "$OUT/yumezu.apk"
 
 echo "$OUT/yumezu.apk"
