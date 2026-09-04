@@ -8,7 +8,7 @@
 //! carried alongside the atlas to say which picture belongs to which world. What the two sides do
 //! have to agree on is [`CELL`], and [`cells`] checks that they still do rather than trusting it.
 
-use three_d::{egui, renderer::*};
+use three_d::renderer::*;
 
 use super::fetch;
 

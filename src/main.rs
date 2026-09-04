@@ -4,6 +4,11 @@ use winit::platform::web::EventLoopExtWebSys;
 #[path = "app.rs"]
 pub(crate) mod app;
 
+// The one module named from the crate root rather than through `app`. [`app::i18n::t`] writes
+// `$crate::i18n`, and the two targets of this crate have two different roots -- the binary's is
+// this file, the library's is `lib.rs` -- so each of them names it here for the macro to find.
+pub(crate) use app::i18n;
+
 /// The native entry point. The other two platforms build the event loop differently and call
 /// [`run`] themselves: the page from `lib.rs`'s `start`, the phone from its `android_main`.
 #[allow(unused)]

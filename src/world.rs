@@ -10,6 +10,8 @@ use egui_material_icons::{
 };
 use serde::Deserialize;
 
+use super::i18n::t;
+
 /// The dump is embedded rather than fetched: it is a fixed asset of this demo, and compiling it
 /// in keeps startup synchronous on both native and wasm, where the app has no async path.
 const DATA: &str = include_str!("../data.json");
@@ -27,8 +29,12 @@ pub struct Dump {
 
 #[derive(Deserialize)]
 pub struct World {
-    /// Shown in the overlay for the selected world and for every step of its route.
+    /// As the wiki's English pages name it, which is also what its page is at: see [`wiki_url`].
     pub title: String,
+    /// As the game itself names it, which the dump publishes for all but a few dozen worlds. What
+    /// the overlay shows while the app is speaking Japanese: see [`Title`].
+    #[serde(rename = "titleJP")]
+    title_jp: Option<String>,
     /// Who made the world, as the wiki credits them. The overlay names them, and lights every
     /// world of theirs when the name is clicked.
     pub author: String,
@@ -51,6 +57,46 @@ pub struct World {
     pub connections: Vec<Connection>,
 }
 
+/// A world's name, in each of the languages the dump publishes one in.
+///
+/// Both are kept rather than the one being shown, because they are not read for the same thing:
+/// the wiki's own pages are named in English, so that is the one an address is built out of
+/// whatever is on screen, and a reader may know a world by either.
+pub struct Title {
+    /// The English name. Always there, and always what [`wiki_url`] is given.
+    pub en: String,
+    /// The Japanese name, for the worlds the dump has one for.
+    jp: Option<String>,
+}
+
+impl Title {
+    /// The name to show: the Japanese one while the app speaks Japanese and the dump has it, and
+    /// the English one otherwise.
+    ///
+    /// Read rather than stored, so choosing a language renames every world on screen without
+    /// anything having to be rebuilt.
+    pub fn show(&self) -> &str {
+        match &self.jp {
+            Some(jp) if super::i18n::speaking_japanese() => jp,
+            _ => &self.en,
+        }
+    }
+
+    /// Where `needle` falls in this name, and how much name is left over, for whichever of the
+    /// names it fits best. `None` for a name it appears in neither of.
+    ///
+    /// Both names, whichever one is being shown: a reader who knows a world by one of them should
+    /// not have to be reading in the other language to find it. `needle` is expected already
+    /// lowercased, since one is matched against every world.
+    pub fn find(&self, needle: &str) -> Option<(usize, usize)> {
+        [Some(self.en.as_str()), self.jp.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter_map(|name| Some((name.to_lowercase().find(needle)?, name.len())))
+            .min()
+    }
+}
+
 /// One of the maps the wiki draws of a world.
 pub struct Map {
     /// The wiki's own caption for it, which is a sentence ("Map of Blood World") rather than a
@@ -62,6 +108,14 @@ pub struct Map {
 }
 
 impl World {
+    /// Its name, in every language the dump gives one.
+    pub fn titles(&self) -> Title {
+        Title {
+            en: self.title.clone(),
+            jp: self.title_jp.clone(),
+        }
+    }
+
     /// The maps the wiki has of this world, in the order it lists them. Empty for the few hundred
     /// worlds it has drawn none of.
     ///
@@ -125,8 +179,10 @@ pub struct Connection {
     params: std::collections::HashMap<u16, TypeParams>,
 }
 
-/// The wiki's words for one demand. It publishes a Japanese rendering beside the English, which
-/// nothing here reads, so serde skips it.
+/// The wiki's words for one demand.
+///
+/// It publishes a Japanese rendering beside the English, but only ever for the seasons, and those
+/// are four fixed words this app names for itself: see `gate-seasonal-detail`. So serde skips it.
 #[derive(Deserialize)]
 struct TypeParams {
     params: Option<String>,
@@ -166,17 +222,18 @@ impl Ask {
     /// bare name of the condition otherwise. Empty for a connection that asks nothing.
     pub fn asks(&self) -> String {
         let Some(detail) = self.detail.as_deref() else {
-            return self.gate.asks().to_owned();
+            return self.gate.asks();
         };
         match self.gate {
             // Listed as the wiki lists them, comma separated, rather than joined into a sentence:
             // the wiki does not say whether one of them is enough or all of them are needed, and
             // an "and" or an "or" here would be this program saying which.
-            Gate::Effect => format!("needs {}", detail.replace(',', ", ")),
-            Gate::Chance => format!("{detail} chance"),
-            Gate::Seasonal => format!("in {detail}"),
+            Gate::Effect => t!("gate-effect-detail", effects = detail.replace(',', ", ")),
+            Gate::Chance => t!("gate-chance-detail", chance = detail),
+            Gate::Seasonal => t!("gate-seasonal-detail", season = detail),
+            // The wiki's own sentence, which it writes in English and publishes no Japanese for.
             Gate::LockedCondition => detail.to_owned(),
-            _ => self.gate.asks().to_owned(),
+            _ => self.gate.asks(),
         }
     }
     pub fn asks_emoji(&self) -> &'static str {
@@ -287,16 +344,16 @@ impl Gate {
     /// What the condition is called where the wiki writes no words of its own for it. Empty for
     /// one that asks nothing, which is most of them: a row with nothing after the title is a way
     /// a player can simply walk.
-    fn asks(self) -> &'static str {
+    fn asks(self) -> String {
         match self {
-            Gate::Free => "",
-            Gate::Effect => "needs an effect",
-            Gate::Chance => "by chance",
-            Gate::Seasonal => "seasonal",
-            Gate::Locked => "unlocked from opposite entrance",
-            Gate::LockedCondition => "locked, conditional",
-            Gate::DeadEnd => "only from isolated section",
-            Gate::Isolated => "leads to isolated section",
+            Gate::Free => String::new(),
+            Gate::Effect => t!("gate-effect"),
+            Gate::Chance => t!("gate-chance"),
+            Gate::Seasonal => t!("gate-seasonal"),
+            Gate::Locked => t!("gate-locked"),
+            Gate::LockedCondition => t!("gate-locked-condition"),
+            Gate::DeadEnd => t!("gate-dead-end"),
+            Gate::Isolated => t!("gate-isolated"),
         }
     }
 }
@@ -572,6 +629,12 @@ pub fn wiki_url(title: &str) -> String {
     url
 }
 
+pub fn yume2kki_t_url(title: &str) -> String {
+    let mut url = String::from("https://wikiwiki.jp/yume2kki-t/");
+    append_encoded(title, &mut url);
+    url
+}
+
 pub fn author_url(author: &str) -> String {
     let mut url = String::from("https://yume.wiki/Category:");
     append_encoded(author, &mut url);
@@ -748,6 +811,9 @@ mod tests {
     /// condition, wherever the wiki writes any.
     #[test]
     fn a_condition_is_read_out_in_the_wikis_own_words() {
+        // The words below are the English ones, and a test is read out in whatever language the
+        // machine running it is set to unless it says otherwise.
+        crate::i18n::speak_english();
         let worlds = super::load().worlds;
         let connections = super::connections(&worlds);
         let asks: Vec<String> = connections

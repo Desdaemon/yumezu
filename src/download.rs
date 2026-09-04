@@ -9,7 +9,8 @@
 //! is nothing to say, and [`on_android_browser`] is what tells them apart.
 
 use egui_material_icons::icons::{ICON_ANDROID, ICON_CLOSE};
-use three_d::egui;
+
+use super::i18n::t;
 
 /// Where the apk is served from. Relative to the page, so it is whichever host served the page.
 const URL: &str = "/android";
@@ -50,7 +51,11 @@ impl Offer {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         if ui
-                            .button(format!("{}  Get the Android app", ICON_ANDROID.codepoint))
+                            .button(format!(
+                                "{}  {}",
+                                ICON_ANDROID.codepoint,
+                                t!("download-android")
+                            ))
                             .clicked()
                         {
                             super::open_in_browser(URL);
@@ -60,7 +65,7 @@ impl Offer {
                         }
                         if ui
                             .button(ICON_CLOSE)
-                            .on_hover_text("Don't show this again")
+                            .on_hover_text(t!("dont-show-again"))
                             .clicked()
                         {
                             self.dismiss();

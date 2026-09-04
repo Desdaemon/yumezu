@@ -32,23 +32,58 @@ force_graph_3d.path = "./crates/force_graph_3d"
 log = "0.4.34"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-three-d = { version = "0.20.0", git = "https://github.com/asny/three-d", features = ["egui-gui"] }
+three-d = { version = "0.20.0", git = "https://github.com/asny/three-d" }
 # explicitly depended to override features
 three-d-asset = { version = "0.10", features = ["jpeg", "png", "http-rustls"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 winit = "0.30"
 egui_material_icons = "0.6.0"
+# What the app says is kept in `locales/` rather than written out where it is read, because
+# half of what it says is a count of something and the languages disagree about how a count is
+# said. See `src/i18n.rs`.
+fluent-bundle = "0.16"
+# Only to parse and compare language tags, which is what settles the language a run opens in.
+unic-langid = "0.9"
+# What the device asks to be spoken to in, which is what a run with nothing chosen yet opens in.
+# One crate for all four platforms, each of which keeps it somewhere else entirely.
+sys-locale = "0.3"
+# The overlay's input and its painter, which `three_d` also bundles as its `GUI` -- but its own
+# pairing builds egui's input out of `three_d` events and throws egui's `PlatformOutput` away, so
+# there is nowhere for an input method to be allowed, shown or placed. These two are what `eframe`
+# is built out of, and `src/gui.rs` is the little that stands between them. Pinned to what
+# `three_d` already resolves: egui 0.34 and winit 0.30.
+egui = "0.34"
+egui-winit = { version = "0.34", default-features = false }
+egui_glow = { version = "0.34", default-features = false }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
+# The one way to the Japanese face off a device that already has one, asked for by which glyphs a
+# family covers rather than by a name this app would have to guess per platform. There is nothing
+# for it to look at on the page, which downloads a face instead: see `src/japanese.rs`.
+fontique = { version = "0.11", default-features = false, features = ["system"] }
+# Paste into the search box. Left off the page build, where `arboard` underneath it has no
+# platform to speak to -- see `src/text_agent.rs`, which gets a paste for free from the element it
+# already keeps.
+egui-winit = { version = "0.34", default-features = false, features = ["clipboard"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
+# The page keeps the reader's languages on `navigator`, which is only reachable through js.
+sys-locale = { version = "0.3", features = ["js"] }
 tokio = { version = "1.53.1", features = ["macros"] }
 wasm-bindgen-futures = "0.4"
 wasm-bindgen = "0.2.127"
 console_log = "1.1.0"
 console_error_panic_hook = "0.1.7"
-web-sys = { version = "0.3.104", features = ["Location", "Navigator", "Storage", "Window"] }
+# Everything past the first four is the hidden text element of `src/text_agent.rs`: the element
+# itself, the style that parks it under the caret, and the composition events that are the only
+# report a browser makes of a word being built up before it is committed.
+web-sys = { version = "0.3.104", features = [
+  "Location", "Navigator", "Storage", "Window",
+  "CompositionEvent", "CssStyleDeclaration", "Document", "DomRect", "Element", "Event",
+  "EventTarget", "HtmlCanvasElement", "HtmlElement", "HtmlInputElement", "InputEvent",
+  "KeyboardEvent", "Node",
+] }
 
 
 [target.'cfg(target_os = "android")'.dependencies]

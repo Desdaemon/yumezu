@@ -4,6 +4,9 @@
 #[path = "main.rs"]
 mod entry;
 
+// See the same line in `main.rs`, which is the other root [`i18n::t`] has to resolve against.
+pub(crate) use entry::i18n;
+
 // Entry point for wasm
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -35,8 +38,8 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
 
-    main::app::use_android_app(app.clone());
-    main::run(
+    entry::app::use_android_app(app.clone());
+    entry::run(
         winit::event_loop::EventLoop::builder()
             .with_android_app(app)
             .build()

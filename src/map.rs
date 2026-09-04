@@ -13,9 +13,9 @@
 //! under the caption it publishes them with.
 
 use egui_material_icons::icons::{ICON_CLOSE_FULLSCREEN, ICON_FIT_SCREEN, ICON_OPEN_IN_FULL};
-use three_d::{egui, renderer::CpuTexture};
+use three_d::renderer::CpuTexture;
 
-use super::{detail, fetch, thumbnails, world};
+use super::{detail, fetch, i18n::t, thumbnails, world};
 
 /// The window's own id, which is fixed rather than taken from the title.
 ///
@@ -191,7 +191,7 @@ impl Open {
     /// asked to be taken to or out of the whole screen.
     fn show(&mut self, ui: &mut egui::Ui, full: bool) -> bool {
         if self.sheets.is_empty() {
-            ui.label("The wiki draws no map of this world.");
+            ui.label(t!("map-none"));
             return false;
         }
         // Bound out of `self` so the row borrows the sheets and the choice separately: one is read
@@ -214,11 +214,11 @@ impl Open {
             }
             refit = ui
                 .button(ICON_FIT_SCREEN)
-                .on_hover_text("Fit the whole map in the window")
+                .on_hover_text(t!("map-fit"))
                 .clicked();
             let (icon, hint) = match full {
-                true => (ICON_CLOSE_FULLSCREEN, "Put the window back where it was"),
-                false => (ICON_OPEN_IN_FULL, "Fill the screen with the window"),
+                true => (ICON_CLOSE_FULLSCREEN, t!("map-restore")),
+                false => (ICON_OPEN_IN_FULL, t!("map-maximize")),
             };
             resize = ui.button(icon).on_hover_text(hint).clicked();
         });
@@ -257,7 +257,7 @@ impl Sheet {
                 ui.spinner();
             }
             Picture::Missing => {
-                ui.weak("Map image not available.");
+                ui.weak(t!("map-missing"));
             }
             Picture::Ready(texture) => {
                 let size = texture.size_vec2();

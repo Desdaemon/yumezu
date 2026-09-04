@@ -1,14 +1,11 @@
 //! See [App::draw] for the main flow.
 
+use egui::special_emojis::GITHUB;
 use egui_material_icons::icons::*;
 use force_graph_3d::{
     DefaultNodeIdx, Dimensions, EdgeData, ForceGraph, NodeData, SimulationParameters,
 };
-use three_d::{
-    FrameInput, FrameInputGenerator, GUI, WindowedContext,
-    egui::{self, special_emojis::GITHUB},
-    renderer::*,
-};
+use three_d::{FrameInput, FrameInputGenerator, WindowedContext, renderer::*};
 use winit::{
     application::ApplicationHandler,
     event::{Touch, TouchPhase, WindowEvent},
@@ -234,11 +231,25 @@ const FRAMING_ARRIVAL_TOLERANCE: f32 = 0.01;
 mod detail;
 mod download;
 mod fetch;
+/// The overlay's input and painter, in place of `three_d`'s own. See [`gui::Gui`].
+mod gui;
 mod guide;
+/// Everything this app says. Re-exported from the crate root so that [`i18n::t`] resolves the
+/// same in both of this crate's targets: see `main.rs`.
+pub(crate) mod i18n;
+mod japanese;
 mod map;
 mod store;
+/// The page's input method, which no layer underneath this app provides. See
+/// [`text_agent::TextAgent`].
+#[cfg(target_family = "wasm")]
+mod text_agent;
 mod thumbnails;
 mod world;
+
+use i18n::t;
+
+use crate::i18n::speaking_japanese;
 
 /// The handle the activity glue passed to `android_main`, which is the only way to reach anything
 /// the framework owns and is handed out exactly once, before any of this runs. Kept here because
@@ -459,7 +470,7 @@ const ROCKER_SCALE: f32 = 3.0;
 
 /// The on-screen readout: how fast the layout is drawing, and what is selected.
 struct Overlay {
-    gui: GUI,
+    gui: gui::Gui,
     /// Exponentially smoothed frame rate, over [FPS_WINDOW_MS].
     fps: f32,
     /// What the sidebar was left showing and holding. See [`Sidebar`].
@@ -473,6 +484,9 @@ struct Overlay {
     download: download::Offer,
     /// The maps of whichever world they were last asked for. See [`map::Maps`].
     maps: map::Maps,
+    /// The face Japanese is drawn with, which is not one of egui's own and is only got hold of if
+    /// this run ever asks for Japanese. See [`japanese::Japanese`].
+    japanese: japanese::Japanese,
     /// What the person has scaled the interface by, on top of whatever the system already says a
     /// point is worth. Multiplied into the pixel ratio the overlay is laid out and read at, and
     /// into that alone: the graph is a place rather than an interface, and its distances are the
@@ -542,6 +556,9 @@ struct Panel {
     /// The world whose maps were asked for, if the button was pressed. See [`map::Maps::toggle`],
     /// which is what a second press on the same world reaches.
     mapped: Option<usize>,
+    /// The language the picker was left set to, if it was changed. Applied after the frame, so a
+    /// frame is drawn in one language throughout. See [`Panel::language`], which sets it.
+    language: Option<i18n::Language>,
 }
 
 /// Everything the panel reads, walked out of [AppEntities] before it is built.
@@ -663,8 +680,9 @@ struct AppEntities {
     rng: Rng,
     /// The canonical route back to the origin world, per world. See [`world::canonical_routes`].
     routes: world::Routes,
-    /// World names, indexed like the nodes. Only the overlay reads them.
-    titles: Vec<String>,
+    /// World names, indexed like the nodes, each in every language the dump gives one. Only the
+    /// overlay reads them. See [`world::Title`], which is what settles which name is shown.
+    titles: Vec<world::Title>,
     /// Per world, the maps the wiki draws of it, in the order it lists them and empty for the
     /// worlds it draws none of. Only the overlay reads them. See [`map::Maps`].
     maps: Vec<Vec<world::Map>>,
@@ -801,21 +819,25 @@ impl ApplicationHandler for App {
                 .with_inner_size(winit::dpi::LogicalSize::new(1280, 720))
                 .with_prevent_default(true)
         };
-        self.reset(event_loop.create_window(window_builder).unwrap());
+        self.reset(
+            event_loop,
+            event_loop.create_window(window_builder).unwrap(),
+        );
     }
-    /// Android takes the drawing surface back whenever the app leaves the screen, and everything
-    /// built on it -- the context, the meshes, the atlas -- dies with it. So it is all let go of
-    /// here and built again by [`Self::resumed`], which is the same path a first start takes and
-    /// therefore costs a fresh layout. The other platforms never call this.
+    /// Only a phone ever calls this. See [`App::release`].
     fn suspended(&mut self, _: &winit::event_loop::ActiveEventLoop) {
-        // In this order: the meshes and the overlay have to give their buffers back while the
-        // context that holds them is still there, and the context has to let the surface go
-        // before the window it was made against.
-        self.data = None;
-        self.overlay = None;
-        self.ctx.fig = None;
-        self.ctx.wctx = None;
-        self.ctx.window = None;
+        self.release();
+    }
+    /// The last call the loop makes, and the only chance to let go of anything while the loop is
+    /// still there to let go of it against.
+    ///
+    /// Everything held here outlives `run_app` otherwise -- the app is a local of [`super::run`]
+    /// and the loop is not -- and two of the things held here cannot be let go of after it. The
+    /// meshes and the overlay's painter free buffers of a graphics context that is gone by then,
+    /// and the clipboard is a second Wayland connection built on the display the loop owns, torn
+    /// down on a thread of its own that reaches a freed display and takes the process with it.
+    fn exiting(&mut self, _: &winit::event_loop::ActiveEventLoop) {
+        self.release();
     }
     fn window_event(
         &mut self,
@@ -829,6 +851,13 @@ impl ApplicationHandler for App {
             return;
         };
         fig.handle_winit_window_event(&event);
+        // Offered to the overlay as well, and to the scene either way: what the panel took is
+        // settled after it has been laid out, not here. See [`Overlay::run`].
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay
+                .gui
+                .on_window_event(self.ctx.window.as_ref().unwrap(), &event);
+        }
         match event {
             WindowEvent::Resized(physical_size) => {
                 self.ctx.wctx.as_ref().unwrap().resize(physical_size);
@@ -860,6 +889,26 @@ impl ApplicationHandler for App {
 }
 
 impl App {
+    /// Lets go of everything built on the window, in the order the pieces were built in.
+    ///
+    /// The meshes and the overlay have to give their buffers back while the context that holds
+    /// them is still there, and the context has to let the surface go before the window it was
+    /// made against. Called on the way out by [`App::exiting`], and on a phone by
+    /// [`App::suspended`] as well: Android takes the drawing surface back whenever the app leaves
+    /// the screen, and everything built on it dies with it, so it is all built again by
+    /// [`App::resumed`] -- the same path a first start takes, and therefore a fresh layout.
+    fn release(&mut self) {
+        self.data = None;
+        // The painter holds buffers of the context's, and a dropped [`gui::Gui`] does not give
+        // them back on its own.
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.gui.destroy();
+        }
+        self.overlay = None;
+        self.ctx.fig = None;
+        self.ctx.wctx = None;
+        self.ctx.window = None;
+    }
     pub fn new() -> Self {
         let camera = Camera::new_perspective(
             Viewport::new_at_origo(1, 1),
@@ -887,7 +936,7 @@ impl App {
             overlay: None,
         }
     }
-    fn reset(&mut self, window: Window) {
+    fn reset(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, window: Window) {
         self.ctx.window = Some(window);
         let window = self.ctx.window.as_ref().unwrap();
         self.ctx.wctx =
@@ -990,7 +1039,7 @@ impl App {
             })
             .collect();
         let edge_colors = edge_colors(&graph, &routes, &descendants, &depth_colors);
-        let titles: Vec<String> = worlds.iter().map(|world| world.title.clone()).collect();
+        let titles: Vec<world::Title> = worlds.iter().map(world::World::titles).collect();
         let maps: Vec<Vec<world::Map>> = worlds.iter().map(world::World::maps).collect();
         // The catalog's own two readings of the dump, built once here: both group every world,
         // which is not work a frame can afford, and both are ordered for the lists they fill.
@@ -1051,7 +1100,11 @@ impl App {
             ColorMaterial::default(),
         );
 
-        self.overlay = Some(Overlay::new(ctx));
+        self.overlay = Some(Overlay::new(
+            event_loop,
+            self.ctx.window.as_ref().unwrap(),
+            ctx,
+        ));
 
         let data = self.data.insert(AppEntities {
             graph,
@@ -1100,11 +1153,17 @@ impl App {
     fn draw(&mut self) {
         let ctx = self.ctx.wctx.as_ref().unwrap();
         let mut frame_input = self.ctx.fig.as_mut().unwrap().generate(ctx);
+        let window = self.ctx.window.as_ref().unwrap();
 
         let data = self.data.as_mut().unwrap();
         self.statics.camera.set_viewport(frame_input.viewport);
         // egui marks what it uses as handled, so a click on the panel must not also reach the graph behind it.
-        if self.overlay.as_mut().unwrap().run(&mut frame_input, data) {
+        if self
+            .overlay
+            .as_mut()
+            .unwrap()
+            .run(window, &mut frame_input, data)
+        {
             // Repulsion acts along the offset between two nodes, so a layout flattened onto the
             // plane has no depth for the forces to reinflate: leaving two dimensions has to
             // reseed the axis. Cheaper to restart the whole layout than to special-case it.
@@ -1228,14 +1287,22 @@ impl App {
                     .chain(data.detail.drawn()),
                 &[],
             )
-            .write(|| self.overlay.as_ref().unwrap().gui.render())
+            // Over the scene, into the same target, which is what makes it an overlay.
+            .write::<std::convert::Infallible>(|| {
+                self.overlay.as_mut().unwrap().gui.paint(window);
+                Ok(())
+            })
             .unwrap();
     }
 }
 
 impl Overlay {
-    fn new(context: &Context) -> Self {
-        let gui = GUI::new(context);
+    fn new(
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        window: &Window,
+        context: &Context,
+    ) -> Self {
+        let gui = gui::Gui::new(event_loop, window, context);
         egui_material_icons::initialize(gui.context());
         let scale = remembered_scale();
         Self {
@@ -1246,6 +1313,7 @@ impl Overlay {
             guide: guide::Guide::new(),
             download: download::Offer::new(),
             maps: map::Maps::new(),
+            japanese: japanese::Japanese::new(),
             ui_scale: scale,
             ui_scale_stored: scale,
         }
@@ -1256,7 +1324,16 @@ impl Overlay {
     /// The closure can only borrow `data` immutably, so everything the panel reads is walked out
     /// into [PanelData] first, and everything it decides is left on the [Panel] it is handed for
     /// [Overlay::run] to apply.
-    fn panel(&mut self, frame_input: &mut FrameInput, data: &AppEntities) -> Panel {
+    fn panel(
+        &mut self,
+        window: &Window,
+        frame_input: &mut FrameInput,
+        data: &AppEntities,
+    ) -> Panel {
+        // egui's own way of being asked for a bigger interface: it multiplies whatever the window
+        // says a point is worth, which is exactly what this scale means. So the panel is laid out
+        // and read at the product, and the graph behind it at the window's ratio alone.
+        self.gui.context().set_zoom_factor(self.ui_scale);
         let ratio = frame_input.device_pixel_ratio * self.ui_scale;
         let read = PanelData::new(data, self.fps, &self.sidebar, frame_input, ratio);
         let parameters = data.graph.parameters();
@@ -1274,6 +1351,7 @@ impl Overlay {
             guide: false,
             refit: false,
             mapped: None,
+            language: None,
         };
         // Bound out of `self` so the closure borrows this field alone, leaving `self.gui` free
         // for the call it is passed to.
@@ -1282,54 +1360,52 @@ impl Overlay {
         let download = &mut self.download;
         let maps = &mut self.maps;
         let insets = safe_insets(frame_input.viewport, ratio);
-        panel.wants_pointer = self.gui.update(
-            &mut frame_input.events,
-            frame_input.accumulated_time,
-            frame_input.viewport,
-            ratio,
-            |ui| {
-                let style = ui.style();
-                // Full height, so the safe area is kept by standing the contents off the panel's
-                // own edges rather than by shrinking the panel: a sidebar that stopped short of
-                // the status bar would leave a stripe of its own colour above it.
-                let frame = egui::Frame::side_top_panel(style)
-                    .inner_margin(egui::Margin {
-                        left: insets.left + PANEL_MARGIN,
-                        right: PANEL_MARGIN,
-                        top: insets.top + PANEL_MARGIN,
-                        bottom: insets.bottom + PANEL_MARGIN,
-                    })
-                    // The graph carries on behind the sidebar rather than stopping at it: see
-                    // [`SIDEBAR_OPACITY`]. The style's own panel colour, only thinned, so the
-                    // sidebar stays the same colour it would otherwise have been.
-                    .fill(fade(style.visuals.panel_fill, SIDEBAR_OPACITY));
-                match sidebar.closed {
-                    false => {
-                        egui::Panel::left("yumezu")
-                            .frame(frame)
-                            .default_size(SIDEBAR_WIDTH)
-                            .show_inside(ui, |ui| panel.window(ui, &read, sidebar));
-                    }
-                    true => sidebar_opener(ui, sidebar, insets),
+        self.gui.run(window, |ui| {
+            let style = ui.style();
+            // Full height, so the safe area is kept by standing the contents off the panel's
+            // own edges rather than by shrinking the panel: a sidebar that stopped short of
+            // the status bar would leave a stripe of its own colour above it.
+            let frame = egui::Frame::side_top_panel(style)
+                .inner_margin(egui::Margin {
+                    left: insets.left + PANEL_MARGIN,
+                    right: PANEL_MARGIN,
+                    top: insets.top + PANEL_MARGIN,
+                    bottom: insets.bottom + PANEL_MARGIN,
+                })
+                // The graph carries on behind the sidebar rather than stopping at it: see
+                // [`SIDEBAR_OPACITY`]. The style's own panel colour, only thinned, so the
+                // sidebar stays the same colour it would otherwise have been.
+                .fill(fade(style.visuals.panel_fill, SIDEBAR_OPACITY));
+            match sidebar.closed {
+                false => {
+                    egui::Panel::left("yumezu")
+                        .frame(frame)
+                        .default_size(SIDEBAR_WIDTH)
+                        .show_inside(ui, |ui| panel.window(ui, &read, sidebar));
                 }
-                panel.rocker(ui, &read, insets);
-                panel.menu(ui, &read);
-                panel.tooltip(ui, &read);
-                // Read within the frame that asked, so the window is on screen the moment the
-                // button is let go of rather than the frame after it.
-                if let Some(world) = panel.mapped {
-                    maps.toggle(world, &data.titles[world], &data.maps[world]);
-                }
-                maps.show(ui.ctx(), insets);
-                download.show(ui.ctx(), insets);
-                // Last, so it is drawn over everything it is explaining. Read a frame late when
-                // the settings tab has just asked for it, which is a frame nobody sees.
-                if panel.guide {
-                    guide.reopen();
-                }
-                guide.show(ui.ctx());
-            },
-        );
+                true => sidebar_opener(ui, sidebar, insets),
+            }
+            panel.rocker(ui, &read, insets);
+            panel.menu(ui, &read);
+            panel.tooltip(ui, &read);
+            // Read within the frame that asked, so the window is on screen the moment the
+            // button is let go of rather than the frame after it.
+            if let Some(world) = panel.mapped {
+                maps.toggle(world, data.titles[world].show(), &data.maps[world]);
+            }
+            maps.show(ui.ctx(), insets);
+            download.show(ui.ctx(), insets);
+            // Last, so it is drawn over everything it is explaining. Read a frame late when
+            // the settings tab has just asked for it, which is a frame nobody sees.
+            if panel.guide {
+                guide.reopen();
+            }
+            guide.show(ui.ctx());
+        });
+        // What `three_d`'s `GUI` used to return from its own update. Asked of egui after the
+        // frame, which is the only point at which it knows what was laid out under the pointer.
+        panel.wants_pointer = self.gui.context().egui_wants_pointer_input()
+            || self.gui.context().egui_wants_keyboard_input();
         // Asked after the frame, which is when egui knows whether anything it drew took the
         // focus that typing would go to.
         track_keyboard(
@@ -1344,12 +1420,25 @@ impl Overlay {
     /// The panel owns the layout mode, so this both reads the parameters and writes back what the
     /// controls were left at. Returns whether the dimension changed, which is the one switch the
     /// caller has to follow up on.
-    fn run(&mut self, frame_input: &mut FrameInput, data: &mut AppEntities) -> bool {
+    fn run(
+        &mut self,
+        window: &Window,
+        frame_input: &mut FrameInput,
+        data: &mut AppEntities,
+    ) -> bool {
         // Guard the very first frame, which reports no elapsed time at all.
         let elapsed = (frame_input.elapsed_time as f32).max(1e-3);
         self.fps += (1000.0 / elapsed - self.fps) * (elapsed / FPS_WINDOW_MS).min(1.0);
 
-        let panel = self.panel(frame_input, data);
+        let panel = self.panel(window, frame_input, data);
+        if let Some(language) = panel.language {
+            i18n::speak(language);
+        }
+        // Asked every frame, and answered on the first one that is in Japanese: the face it needs
+        // is neither compiled in nor here yet. Cloned because the face is installed on the
+        // context while the field that installs it is borrowed.
+        let context = self.gui.context().clone();
+        self.japanese.serve(&context);
         // Set by the panel too, and by the selections applied out here.
         let mut menu_taken = panel.menu_taken;
         if let Some(selection) = panel.lit {
@@ -1504,15 +1593,15 @@ impl Panel {
     /// person has read.
     fn window(&mut self, ui: &mut egui::Ui, read: &PanelData, sidebar: &mut Sidebar) {
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut sidebar.tab, Tab::Worlds, "Worlds");
-            ui.selectable_value(&mut sidebar.tab, Tab::Authors, "Authors");
-            ui.selectable_value(&mut sidebar.tab, Tab::Versions, "Versions");
+            ui.selectable_value(&mut sidebar.tab, Tab::Worlds, t!("tab-worlds"));
+            ui.selectable_value(&mut sidebar.tab, Tab::Authors, t!("tab-authors"));
+            ui.selectable_value(&mut sidebar.tab, Tab::Versions, t!("tab-versions"));
             ui.selectable_value(&mut sidebar.tab, Tab::Settings, ICON_SETTINGS);
             // Against the far edge of the row, so it is nowhere near the tabs it is not one of.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button(ICON_CHEVRON_LEFT)
-                    .on_hover_text("Hide the sidebar")
+                    .on_hover_text(t!("hide-sidebar"))
                     .clicked()
                 {
                     sidebar.closed = true;
@@ -1535,26 +1624,26 @@ impl Panel {
     /// the current selection has to say for itself.
     fn graph(&mut self, ui: &mut egui::Ui, read: &PanelData, search: &mut String) {
         let data = read.data;
-        ui.label(format!("{:.0} fps", read.fps));
-        ui.label(format!(
-            "{} worlds, {} connections",
-            data.titles.len(),
-            data.graph.edge_count()
+        ui.label(t!("fps", fps = format!("{:.0}", read.fps)));
+        ui.label(t!(
+            "graph-size",
+            worlds = data.titles.len(),
+            connections = data.graph.edge_count()
         ));
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.dimensions, Dimensions::Two, "2D");
-            ui.selectable_value(&mut self.dimensions, Dimensions::Three, "3D");
+            ui.selectable_value(&mut self.dimensions, Dimensions::Two, t!("dimensions-2d"));
+            ui.selectable_value(&mut self.dimensions, Dimensions::Three, t!("dimensions-3d"));
             ui.separator();
-            ui.checkbox(&mut self.layered, "layered")
-                .on_hover_text("Separate worlds into layers of depths");
+            ui.checkbox(&mut self.layered, t!("layered"))
+                .on_hover_text(t!("layered-hint"));
         });
         ui.separator();
-        search_box(ui, search, "Search worlds");
+        search_box(ui, search, "worlds", t!("search-worlds"));
         for &world in &read.candidates {
             if ui
                 .selectable_label(
                     read.selected.and_then(Highlight::world) == Some(world),
-                    &data.titles[world],
+                    data.titles[world].show(),
                 )
                 .clicked()
             {
@@ -1579,10 +1668,10 @@ impl Panel {
             .filter(|step| Some(step.world) != parent)
             .collect();
         if ways.is_empty() {
-            ui.label("No forward connections.");
+            ui.label(t!("no-forward-connections"));
             return;
         }
-        ui.label(format!("{} forward connections", ways.len()));
+        ui.label(t!("forward-connections", count = ways.len()));
         for step in ways {
             let lit = Highlight::Connection(world, step.world);
             // What the way it can be walked asks, which for a two-way connection is the way out:
@@ -1593,7 +1682,7 @@ impl Panel {
                 .or(step.back.as_ref())
                 .map(world::Ask::asks_emoji)
                 .unwrap_or_default();
-            let title = &data.titles[step.world];
+            let title = data.titles[step.world].show();
             ui.horizontal(|ui| {
                 ui.label(step.arrow());
                 if ui
@@ -1616,7 +1705,7 @@ impl Panel {
     /// is behind. Clicking a name lights their whole body of work.
     fn authors(&mut self, ui: &mut egui::Ui, read: &PanelData, search: &mut String) {
         let data = read.data;
-        search_box(ui, search, "Search authors");
+        search_box(ui, search, "authors", t!("search-authors"));
         ui.label(showing(read.authors.len(), data.authors.len(), "authors"));
         ui.separator();
         for &author in &read.authors {
@@ -1624,7 +1713,7 @@ impl Panel {
             if ui
                 .selectable_label(
                     read.selected == Some(Highlight::Author(author)),
-                    format!("{}  ({})", by.name, by.worlds.len()),
+                    t!("author-row", name = &by.name, worlds = by.worlds.len()),
                 )
                 .clicked()
             {
@@ -1639,7 +1728,7 @@ impl Panel {
     /// down the history as by name, and the pictures are what make it worth reading down.
     fn versions(&mut self, ui: &mut egui::Ui, read: &PanelData, search: &mut String) {
         let data = read.data;
-        search_box(ui, search, "Search versions");
+        search_box(ui, search, "versions", t!("search-versions"));
         ui.label(showing(
             read.versions.len(),
             data.versions.len(),
@@ -1666,17 +1755,19 @@ impl Panel {
             if ui
                 .selectable_label(
                     lit,
-                    format!(
-                        "{}  ({}{}{})",
-                        release.name,
-                        worlds(release.worlds.len()),
-                        if release.released.is_empty() {
-                            ""
-                        } else {
-                            ", "
-                        },
-                        release.released,
-                    ),
+                    match release.released.is_empty() {
+                        true => t!(
+                            "version-row",
+                            name = &release.name,
+                            worlds = worlds(release.worlds.len())
+                        ),
+                        false => t!(
+                            "version-row-dated",
+                            name = &release.name,
+                            worlds = worlds(release.worlds.len()),
+                            released = &release.released
+                        ),
+                    },
                 )
                 .clicked()
             {
@@ -1693,7 +1784,7 @@ impl Panel {
                                 .picture(world, CATALOG_THUMBNAIL_HEIGHT)
                                 .sense(egui::Sense::click()),
                         )
-                        .on_hover_text(&data.titles[world])
+                        .on_hover_text(data.titles[world].show())
                         .clicked()
                     {
                         self.chosen = Some(world);
@@ -1708,46 +1799,63 @@ impl Panel {
     fn world_info(&mut self, ui: &mut egui::Ui, data: &AppEntities, world: usize) {
         let mut lit = None;
         ui.horizontal(|ui| {
-            ui.strong(&data.titles[world]);
-            if ui.button(ICON_OPEN_IN_NEW).clicked() {
-                open_in_browser(&world::wiki_url(&data.titles[world]));
+            ui.strong(data.titles[world].show());
+            if ui
+                .button(ICON_OPEN_IN_NEW)
+                .on_hover_text(t!("menu-open-wiki"))
+                .clicked()
+            {
+                if speaking_japanese() {
+                    open_in_browser(&world::yume2kki_t_url(data.titles[world].show()));
+                } else {
+                    open_in_browser(&world::wiki_url(&data.titles[world].en));
+                }
             }
             // Only where there is one to show: a few hundred worlds have never been drawn, and a
             // button that opened an empty window on them would say nothing this does not.
             if !data.maps[world].is_empty()
                 && ui
                     .button(ICON_MAP)
-                    .on_hover_text("Show the wiki's map of this world")
+                    .on_hover_text(t!("world-map-hint"))
                     .clicked()
             {
                 self.mapped = Some(world);
             }
             if let Some(parent) = data.routes.parents[world]
-                && ui.button(ICON_ARROW_UPWARD).clicked()
+                && ui
+                    .button(ICON_ARROW_UPWARD)
+                    .on_hover_text(t!("world-move-up"))
+                    .clicked()
             {
                 lit = Some(Highlight::Connection(parent, world));
             }
         });
+        if speaking_japanese() {
+            ui.horizontal(|ui| {
+                ui.label("英名");
+                ui.strong(&data.titles[world].en);
+            });
+        }
         ui.horizontal(|ui| {
-            ui.label("by");
+            ui.label(t!("world-author"));
             if ui
                 .link(&data.authors[data.author_of[world]].name)
-                .on_hover_text("Show every world by this author")
+                .on_hover_text(t!("world-author-hint"))
                 .clicked()
             {
                 lit = Some(Highlight::Author(data.author_of[world]));
             }
         });
         ui.horizontal(|ui| {
-            ui.label(format!("{} connections,", data.degrees[world]));
+            ui.label(t!("world-connections", count = data.degrees[world]));
             if data.descendants[world] > 0
                 && ui
-                    .link(format!("{} descendants", data.descendants[world]))
+                    .link(t!("world-descendants", count = data.descendants[world]))
                     .clicked()
             {
                 lit = Some(Highlight::Descendants(world));
             } else if data.descendants[world] == 0 {
-                ui.label("dead end");
+                ui.label(t!("dead-end"));
             }
         });
         self.lit = self.lit.or(lit.map(Some));
@@ -1756,17 +1864,18 @@ impl Panel {
     /// The knobs: set once and then left alone, which is why they are not in the way of the
     /// reading tabs.
     fn settings(&mut self, ui: &mut egui::Ui /*, read: &PanelData*/) {
-        ui.add(egui::Slider::new(&mut self.hub_repulsion, 0.5..=1.5).text("hub push"))
-            .on_hover_text("The higher the value, the harder bigger worlds' repulsion force is");
-        ui.add(egui::Slider::new(&mut self.ui_scale, UI_SCALE_RANGE).text("UI scale"))
-            .on_hover_text("How large the panel and its text are drawn");
+        self.language(ui);
+        ui.add(egui::Slider::new(&mut self.hub_repulsion, 0.5..=1.5).text(t!("hub-push")))
+            .on_hover_text(t!("hub-push-hint"));
+        ui.add(egui::Slider::new(&mut self.ui_scale, UI_SCALE_RANGE).text(t!("ui-scale")))
+            .on_hover_text(t!("ui-scale-hint"));
         // The way back to a panel that was dismissed for good, so ticking that box is not a
         // door that locks behind the person who ticked it.
-        self.guide |= ui.button("Show controls").clicked();
+        self.guide |= ui.button(t!("show-controls")).clicked();
 
         if ui
             .hyperlink_to(
-                format!("{GITHUB}  yumezu on github"),
+                format!("{GITHUB}  {}", t!("github-link")),
                 "https://github.com/Desdaemon/yumezu",
             )
             .clicked()
@@ -1776,7 +1885,7 @@ impl Panel {
 
         if ui
             .hyperlink_to(
-                format!("{}  Download for Android", ICON_ANDROID.codepoint),
+                format!("{}  {}", ICON_ANDROID.codepoint, t!("android-link")),
                 "https://explorer.yumemiru.dev/android",
             )
             .clicked()
@@ -1785,34 +1894,49 @@ impl Panel {
         }
     }
 
+    /// Which language the app is read in.
+    ///
+    /// Every language names itself, so the list reads the same whichever one is open: someone who
+    /// cannot read the language the app opened in can still find their own in it. The choice is
+    /// left on the panel rather than taken here, so the frame that is already half drawn in one
+    /// language is not finished in another. See [`Overlay::run`].
+    fn language(&mut self, ui: &mut egui::Ui) {
+        let speaking = i18n::speaking();
+        let mut chosen = speaking;
+        egui::ComboBox::from_label(t!("language"))
+            .selected_text(speaking.name())
+            .show_ui(ui, |ui| {
+                for other in i18n::Language::ALL {
+                    ui.selectable_value(&mut chosen, other, other.name());
+                }
+            });
+        if chosen != speaking {
+            self.language = Some(chosen);
+        }
+    }
+
     /// What is lit, read out: the route to it, what hangs off it, or the author it is credited to.
     fn selection(&mut self, ui: &mut egui::Ui, read: &PanelData) {
         let data = read.data;
         match read.selected {
             None => {
-                ui.label(
-                    "Click a world to trace its route to the origin, \
-                     or right-click it for more.",
-                );
+                ui.label(t!("nothing-selected"));
             }
             Some(Highlight::Route(world)) => {
                 self.world_info(ui, data, world);
                 self.forward_connections(ui, read, world);
                 ui.separator();
                 ui.horizontal(|ui| {
-                    ui.label(format!(
-                        "{} connections from the origin",
-                        read.route.len() - 1
-                    ));
+                    ui.label(t!("route-length", count = read.route.len() - 1));
                     let (icon, hint) = match data.frame_route {
-                        true => (ICON_ZOOM_IN, "Zoom in on world"),
-                        false => (ICON_ZOOM_OUT, "Zoom out to route"),
+                        true => (ICON_ZOOM_IN, t!("zoom-in-world")),
+                        false => (ICON_ZOOM_OUT, t!("zoom-out-route")),
                     };
                     self.refit |= ui.button(icon).on_hover_text(hint).clicked();
                 });
                 // Origin first, so the list reads in the order it is walked.
                 for (step, &world) in read.route.iter().rev().enumerate() {
-                    ui.monospace(format!("{step:>2}  {}", data.titles[world]));
+                    ui.monospace(format!("{step:>2}  {}", data.titles[world].show()));
                 }
             }
             // The connection is the subject, but the world it is walked from is still what the
@@ -1829,8 +1953,8 @@ impl Panel {
                 ui.horizontal(|ui| {
                     ui.label(step.arrow());
                     if ui
-                        .link(&data.titles[far])
-                        .on_hover_text("Trace the route to this world")
+                        .link(data.titles[far].show())
+                        .on_hover_text(t!("trace-route"))
                         .clicked()
                     {
                         self.chosen = Some(far);
@@ -1841,20 +1965,25 @@ impl Panel {
             Some(Highlight::Descendants(world)) => {
                 self.world_info(ui, data, world);
                 if read.notable.is_empty() {
-                    ui.label("No notable descendants.");
+                    ui.label(t!("no-notable-descendants"));
                 } else {
-                    ui.label("Notable descendants:");
+                    ui.label(t!("notable-descendants"));
                 }
                 for &world in &read.notable {
                     let degree = data.degrees[world];
                     let kind = match degree {
-                        ..NOTABLE_HUB_CONNECTIONS => "dead end",
-                        _ => "junction",
+                        ..NOTABLE_HUB_CONNECTIONS => t!("dead-end"),
+                        _ => t!("junction"),
                     };
                     if ui
                         .selectable_label(
                             false,
-                            format!("{}  ({kind}, {degree})", data.titles[world]),
+                            t!(
+                                "notable-world",
+                                title = data.titles[world].show(),
+                                kind = kind,
+                                degree = degree
+                            ),
                         )
                         .clicked()
                     {
@@ -1876,7 +2005,10 @@ impl Panel {
                 });
                 ui.label(worlds(read.listed.len()));
                 for &world in &read.listed {
-                    if ui.selectable_label(false, &data.titles[world]).clicked() {
+                    if ui
+                        .selectable_label(false, data.titles[world].show())
+                        .clicked()
+                    {
                         self.chosen = Some(world);
                     }
                 }
@@ -1887,11 +2019,14 @@ impl Panel {
                 let release = &data.versions[version];
                 ui.strong(&release.name);
                 if !release.released.is_empty() {
-                    ui.label(format!("released {}", release.released));
+                    ui.label(t!("version-released", released = &release.released));
                 }
-                ui.label(format!("{} added", worlds(read.listed.len())));
+                ui.label(t!("version-added", worlds = worlds(read.listed.len())));
                 for &world in &read.listed {
-                    if ui.selectable_label(false, &data.titles[world]).clicked() {
+                    if ui
+                        .selectable_label(false, data.titles[world].show())
+                        .clicked()
+                    {
                         self.chosen = Some(world);
                     }
                 }
@@ -1899,10 +2034,13 @@ impl Panel {
             // A layer is a shell rather than a list: it is read off the graph, so the panel only
             // says which shell is lit and how much of the game sits on it.
             Some(Highlight::Layer(depth)) => {
-                ui.strong(format!("Depth {depth}"));
+                ui.strong(t!("layer-depth", depth = depth));
                 ui.label(worlds(read.listed.len()));
                 for &world in &read.listed {
-                    if ui.selectable_label(false, &data.titles[world]).clicked() {
+                    if ui
+                        .selectable_label(false, data.titles[world].show())
+                        .clicked()
+                    {
                         self.chosen = Some(world);
                     }
                 }
@@ -1942,7 +2080,7 @@ impl Panel {
                     ui.vertical_centered(|ui| {
                         if ui
                             .add_enabled(lit != Some(0), egui::Button::new(ICON_KEYBOARD_ARROW_UP))
-                            .on_hover_text("Shallower")
+                            .on_hover_text(t!("rocker-shallower"))
                             .clicked()
                         {
                             self.lit = Some(Some(Highlight::Layer(
@@ -1954,7 +2092,7 @@ impl Panel {
                                 lit != Some(deepest),
                                 egui::Button::new(ICON_KEYBOARD_ARROW_DOWN),
                             )
-                            .on_hover_text("Deeper")
+                            .on_hover_text(t!("rocker-deeper"))
                             .clicked()
                         {
                             self.lit = Some(Some(Highlight::Layer(
@@ -1978,13 +2116,21 @@ impl Panel {
             .show(ui.ctx(), |ui| {
                 egui::Frame::menu(ui.style()).show(ui, |ui| {
                     ui.set_max_width(POPUP_WIDTH);
-                    ui.strong(&data.titles[world]);
+                    ui.strong(data.titles[world].show());
                     ui.label(&data.authors[data.author_of[world]].name);
-                    if data.descendants[world] > 0 && ui.button("Highlight descendants").clicked() {
+                    if data.descendants[world] > 0 && ui.button(t!("menu-descendants")).clicked() {
                         self.lit = Some(Some(Highlight::Descendants(world)));
                     }
-                    if ui.button("Open on yume.wiki").clicked() {
-                        open_in_browser(&world::wiki_url(&data.titles[world]));
+                    if ui.button(t!("menu-open-wiki")).clicked() {
+                        if speaking_japanese() {
+                            open_in_browser(&world::yume2kki_t_url(data.titles[world].show()));
+                        } else {
+                            open_in_browser(&world::wiki_url(&data.titles[world].en));
+                        }
+                        self.menu_taken = true;
+                    }
+                    if speaking_japanese() && ui.button("海外wikiで見る").clicked() {
+                        open_in_browser(&world::wiki_url(&data.titles[world].en));
                         self.menu_taken = true;
                     }
                 });
@@ -2007,7 +2153,7 @@ impl Panel {
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(POPUP_WIDTH);
-                    ui.strong(&read.data.titles[world]);
+                    ui.strong(read.data.titles[world].show());
                     ui.label(&read.data.authors[read.data.author_of[world]].name);
                 });
             });
@@ -2534,8 +2680,8 @@ impl AppEntities {
             .iter()
             .enumerate()
             .filter_map(|(world, title)| {
-                let at = title.to_lowercase().find(&needle)?;
-                Some((at, title.len(), world))
+                let (at, length) = title.find(&needle)?;
+                Some((at, length, world))
             })
             .collect();
         hits.sort_unstable();
@@ -2872,7 +3018,7 @@ fn sidebar_opener(ui: &mut egui::Ui, sidebar: &mut Sidebar, insets: egui::Margin
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 if ui
                     .button(ICON_CHEVRON_RIGHT)
-                    .on_hover_text("Show the sidebar")
+                    .on_hover_text(t!("show-sidebar"))
                     .clicked()
                 {
                     sidebar.closed = false;
@@ -2881,11 +3027,13 @@ fn sidebar_opener(ui: &mut egui::Ui, sidebar: &mut Sidebar, insets: egui::Margin
         });
 }
 
-fn search_box(ui: &mut egui::Ui, search: &mut String, of: &str) {
+/// The box each list is searched with. `of` names the box to egui and never reaches the screen;
+/// `hint` is what is read in it while it is empty, and so is one of the messages.
+fn search_box(ui: &mut egui::Ui, search: &mut String, of: &str, hint: String) {
     let clear_id = egui::Id::new(of);
     let clear_size = egui::Vec2::splat(ui.spacing().interact_size.y);
     let output = egui::TextEdit::singleline(search)
-        .hint_text(of)
+        .hint_text(hint)
         .prefix(ICON_SEARCH)
         .suffix(egui::Atom::custom(clear_id, clear_size))
         .show(ui);
@@ -2896,20 +3044,29 @@ fn search_box(ui: &mut egui::Ui, search: &mut String, of: &str) {
     }
 }
 
-/// How much of a list is being shown, which only needs saying while it is being cut down.
+/// How much of a list is being shown, which is said differently while it is being cut down.
+///
+/// `kind` names the list rather than the noun: a language does not necessarily say "3 authors"
+/// with the same word it says "3 of 9 authors" with, so each list has a message for each of the
+/// two and this only picks between them.
 fn showing(shown: usize, of: usize, kind: &str) -> String {
     match shown == of {
-        true => format!("{of} {kind}"),
-        false => format!("{shown} of {of} {kind}"),
+        true => i18n::format(&format!("showing-{kind}"), Some(&count_args(shown, of))),
+        false => i18n::format(&format!("showing-{kind}-cut"), Some(&count_args(shown, of))),
     }
 }
 
-/// How many worlds, said so that one of them does not read as a bug.
+/// The two values either half of [`showing`] can ask for.
+fn count_args(shown: usize, of: usize) -> fluent_bundle::FluentArgs<'static> {
+    let mut args = fluent_bundle::FluentArgs::new();
+    args.set("shown", shown);
+    args.set("total", of);
+    args
+}
+
+/// How many worlds, said the way the language being read says a count of them.
 fn worlds(count: usize) -> String {
-    match count {
-        1 => "1 world".to_string(),
-        _ => format!("{count} worlds"),
-    }
+    t!("worlds", count = count)
 }
 
 /// A colour at a fraction of its own opacity, whatever it was drawn at before.
@@ -2924,7 +3081,7 @@ fn fade(color: egui::Color32, opacity: u8) -> egui::Color32 {
 /// other, and a reader deciding whether to walk it needs the way they are about to walk.
 fn walk_of(step: &world::Step) -> String {
     let asks = |ask: &world::Ask| match ask.asks() {
-        asks if asks.is_empty() => String::from("freely"),
+        asks if asks.is_empty() => t!("walk-freely"),
         asks => asks,
     };
     match (step.out.as_ref(), step.back.as_ref()) {
@@ -2935,49 +3092,49 @@ fn walk_of(step: &world::Step) -> String {
             Some(Ask {
                 gate: Gate::Free, ..
             }),
-        ) => "No restrictions.".to_string(),
+        ) => t!("walk-free-both"),
         (
             Some(Ask {
                 gate: Gate::DeadEnd,
                 ..
             }),
             _,
-        ) => "Connected via isolated section only.".to_string(),
+        ) => t!("walk-dead-end"),
         (
             Some(Ask {
                 gate: Gate::Isolated,
                 ..
             }),
             _,
-        ) => "Connects to isolated section.".to_string(),
+        ) => t!("walk-isolated"),
         (
             Some(Ask {
                 gate: Gate::Locked, ..
             }),
             _,
-        ) => "Unlockable from opposite entrance.".to_string(),
+        ) => t!("walk-locked-out"),
         (
             _,
             Some(Ask {
                 gate: Gate::Locked, ..
             }),
-        ) => "Unlocks access to this area from opposite entrance.".to_string(),
-        (Some(out), Some(back)) => format!("From here: {}\nTo here: {}.", asks(out), asks(back)),
+        ) => t!("walk-locked-back"),
+        (Some(out), Some(back)) => t!("walk-both", out = asks(out), back = asks(back)),
         (
             Some(Ask {
                 gate: Gate::Free, ..
             }),
             None,
-        ) => String::from("One-way."),
-        (Some(out), None) => format!("From here only: {}", asks(out)),
+        ) => t!("walk-one-way"),
+        (Some(out), None) => t!("walk-out-only", out = asks(out)),
         (
             None,
             Some(Ask {
                 gate: Gate::Free, ..
             }),
-        ) => String::from("No entry from here."),
-        (None, Some(back)) => format!("To here only: {}", asks(back)),
-        (None, None) => String::from("Currently inaccessible."),
+        ) => t!("walk-no-entry"),
+        (None, Some(back)) => t!("walk-back-only", back = asks(back)),
+        (None, None) => t!("walk-none"),
     }
 }
 
