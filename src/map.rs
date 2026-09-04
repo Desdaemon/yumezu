@@ -257,7 +257,7 @@ impl Sheet {
                 ui.spinner();
             }
             Picture::Missing => {
-                ui.weak("This one cannot be shown.");
+                ui.weak("Map image not available.");
             }
             Picture::Ready(texture) => {
                 let size = texture.size_vec2();

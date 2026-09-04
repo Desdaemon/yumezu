@@ -104,6 +104,33 @@ const WAKE_TIME: f32 = 0.5;
 /// At this rate the visible part of a mode change plays out over roughly half a second.
 const CONSTRAINT_RATE: f32 = 8.0;
 
+/// The one timestep the simulation is ever advanced by, in seconds.
+///
+/// A force turns into displacement as `dt.powi(3)` here - see [`integrate_axis`] - and
+/// [`SimulationParameters::damping_factor`] is a factor per step rather than per second, so a
+/// frame twice as long does not walk the same trajectory in coarser steps, it walks a different
+/// one. That matters most exactly where it is least wanted: a freshly seeded layout meets its
+/// largest forces on the first frames of a session, which are also the longest ones, so the
+/// opening burst would throw the nodes far further apart on the first layout a person sees than
+/// on any they ask for later. [`ForceGraph::update`] therefore banks the time it is given and
+/// spends it in steps of this size, and the layout no longer depends on what the frame rate
+/// happened to be while it found its shape.
+///
+/// It is not a frame rate. A display faster than this steps on some frames and not others, which
+/// is the point; a display slower takes several steps at once. What it is, is half of a
+/// calibration: the forces, the damping and [`SimulationParameters::settle_speed`] are all tuned
+/// against a step of this length, so changing it does not run the same layout at a different
+/// resolution, it changes the layout. Retune with it.
+const FIXED_STEP: f32 = 1.0 / 60.0;
+
+/// How many [`FIXED_STEP`]s one [`ForceGraph::update`] call may spend.
+///
+/// Time beyond this is dropped rather than banked. A tab that was away for a minute owes the
+/// layout a minute of catching up, and paying that debt would both stall the frame it is paid on
+/// and, in one call, undo the point of the fixed step. The layout carries on from where it was
+/// instead.
+const MAX_STEPS_PER_UPDATE: usize = 3;
+
 /// Distance below which a constrained axis is set to its target exactly.
 ///
 /// Geometric decay only approaches the target, and [`Dimensions::Two`] is expected to yield
@@ -452,6 +479,8 @@ pub struct ForceGraph<UserNodeData = (), UserEdgeData = ()> {
     /// Target coordinate per node for whichever axis a constraint is closing on. Refilled per
     /// constraint; kept to reuse its allocation.
     targets: Vec<f32>,
+    /// Time handed to [`ForceGraph::update`] that is not yet a whole [`FIXED_STEP`].
+    unspent: f32,
 }
 
 impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
@@ -472,6 +501,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
             interactions: Interactions::default(),
             limits: Vec::new(),
             targets: Vec::new(),
+            unspent: 0.0,
         }
     }
 
@@ -498,6 +528,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
     /// a full window to find its new shape at the speed a fresh one would.
     pub fn revive(&mut self) {
         self.rest.revive();
+        self.unspent = 0.0;
     }
 
     /// Whether the layout has come to rest, leaving [`ForceGraph::update`] with nothing to do.
@@ -569,16 +600,44 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         self.rest.wake();
     }
 
-    /// Applies the next step of the force graph simulation.
+    /// Advances the force graph simulation over `dt`, the number of seconds that have elapsed
+    /// since the previous update.
     ///
-    /// The number of seconds that have elapsed since the previous update must be calculated and
-    /// provided by the user as `dt`.
+    /// The simulation itself only ever moves in whole [`FIXED_STEP`]s, so what `dt` decides is
+    /// how many of them this call spends, never how far each one goes: a slow frame runs the
+    /// same trajectory as a fast one, just more of it at a time. A frame longer than
+    /// [`MAX_STEPS_PER_UPDATE`] steps is not caught up on - see that constant.
+    ///
     /// A settled layout - see [`ForceGraph::is_settled`] - does nothing until something wakes
     /// it, so calling this every frame costs nothing once the graph has come to rest.
-    pub fn update(&mut self, dt: f32) {
+    ///
+    /// Reports whether any node actually moved, which a caller that rebuilds geometry from the
+    /// positions can skip that work on. Two frames answer no: one over a settled layout, and one
+    /// shorter than a whole [`FIXED_STEP`], which a display faster than that rate serves every
+    /// other frame.
+    pub fn update(&mut self, dt: f32) -> bool {
         if self.rest.settled || self.graph.node_count() == 0 {
-            return;
+            return false;
         }
+        self.unspent = (self.unspent + dt).min(FIXED_STEP * MAX_STEPS_PER_UPDATE as f32);
+        let mut stepped = false;
+        while self.unspent >= FIXED_STEP {
+            self.unspent -= FIXED_STEP;
+            self.step();
+            stepped = true;
+            if self.rest.settled {
+                // Nothing left to spend it on, and holding it would hand the next thing to wake
+                // the layout a part-step it did not ask for.
+                self.unspent = 0.0;
+                break;
+            }
+        }
+        stepped
+    }
+
+    /// One [`FIXED_STEP`] of the simulation.
+    fn step(&mut self) {
+        let dt = FIXED_STEP;
         let damping =
             self.parameters.damping_factor * self.rest.advance(dt, self.parameters.settle_after);
         self.repel();
@@ -1234,7 +1293,7 @@ mod test {
             ..Default::default()
         });
 
-        graph.update(0.01);
+        graph.update(FIXED_STEP);
         let [a, b] = positions(&graph)[..] else {
             unreachable!()
         };
@@ -1261,7 +1320,7 @@ mod test {
         });
         graph.add_edge(a, b, Default::default());
 
-        graph.update(0.01);
+        graph.update(FIXED_STEP);
         let [pa, pb] = positions(&graph)[..] else {
             unreachable!()
         };
@@ -1282,7 +1341,7 @@ mod test {
         graph.add_edge(anchor, free, Default::default());
 
         for _ in 0..10 {
-            graph.update(0.01);
+            graph.update(FIXED_STEP);
         }
         assert_eq!(positions(&graph)[0], [0.0; 3]);
     }
@@ -1295,7 +1354,7 @@ mod test {
         graph.add_node(NodeData::default());
         graph.add_node(NodeData::default());
 
-        graph.update(0.01);
+        graph.update(FIXED_STEP);
         for position in positions(&graph) {
             assert!(position.iter().all(|c| c.is_finite()), "{position:?}");
         }
@@ -1326,7 +1385,7 @@ mod test {
                 graph.remove_node(doomed);
             }
             for _ in 0..20 {
-                graph.update(0.01);
+                graph.update(FIXED_STEP);
             }
             positions(&graph)
         };
@@ -1360,7 +1419,7 @@ mod test {
             graph.add_edge(nodes[i], nodes[i / 2], Default::default());
         }
         let before = positions(&graph);
-        graph.update(0.016);
+        graph.update(FIXED_STEP);
         let after = positions(&graph);
         before
             .iter()
@@ -1423,7 +1482,7 @@ mod test {
         }
 
         for _ in 0..120 {
-            graph.update(0.016);
+            graph.update(FIXED_STEP);
         }
         let positions = positions(&graph);
         assert!(positions.iter().all(|p| p[2] == 0.0), "{positions:?}");
@@ -1432,6 +1491,43 @@ mod test {
             values.clone().fold(f32::MIN, f32::max) - values.fold(f32::MAX, f32::min)
         };
         assert!(spread(0) > 100.0 && spread(1) > 100.0, "{positions:?}");
+    }
+
+    /// The layout a person sees must not depend on how the frames happened to be paced while it
+    /// found its shape: a cold start hands `update` its longest frames on exactly the steps a
+    /// freshly seeded layout has its largest forces, and the opening burst is what fixes how far
+    /// apart the layout ends up. Same elapsed time, two pacings, same layout.
+    #[test]
+    fn the_layout_does_not_depend_on_the_frame_rate() {
+        let seeded = || {
+            let mut graph = <ForceGraph>::new(SimulationParameters {
+                dag_level_distance: None,
+                ..Default::default()
+            });
+            for i in 0..48 {
+                graph.add_node(NodeData {
+                    // Crowded well inside one layer's spacing, which is the state a rescatter
+                    // leaves and the one the forces answer hardest.
+                    x: ((i * 37) % 41) as f32,
+                    y: ((i * 53) % 41) as f32,
+                    z: ((i * 71) % 41) as f32,
+                    ..Default::default()
+                });
+            }
+            graph
+        };
+        let run = |dt: f32, frames: usize| {
+            let mut graph = seeded();
+            for _ in 0..frames {
+                graph.update(dt);
+            }
+            positions(&graph)
+        };
+        // Three seconds either way: one step a frame, and the three a stalled frame is allowed.
+        assert_eq!(
+            run(FIXED_STEP, 180),
+            run(FIXED_STEP * MAX_STEPS_PER_UPDATE as f32, 60)
+        );
     }
 
     /// Parameters that settle only once the layout has genuinely come to rest, so that a test
@@ -1446,7 +1542,7 @@ mod test {
     /// Runs the layout until it settles, and reports how many steps that took.
     fn settle<N, E>(graph: &mut ForceGraph<N, E>, limit: usize) -> usize {
         for step in 0..limit {
-            graph.update(1.0 / 60.0);
+            graph.update(FIXED_STEP);
             if graph.is_settled() {
                 return step + 1;
             }
@@ -1469,7 +1565,7 @@ mod test {
         settle(&mut graph, 10_000);
         let resting = positions(&graph);
         for _ in 0..1000 {
-            graph.update(1.0 / 60.0);
+            graph.update(FIXED_STEP);
         }
         assert_eq!(positions(&graph), resting);
     }
@@ -1490,7 +1586,7 @@ mod test {
         graph.apply_force(grabbed, [400.0, 0.0, 0.0]);
         assert!(!graph.is_settled());
 
-        graph.update(1.0 / 60.0);
+        graph.update(FIXED_STEP);
         assert!(positions(&graph)[0][0] > resting[0][0]);
     }
 
@@ -1499,7 +1595,7 @@ mod test {
     #[test]
     fn an_unconverged_layout_is_brought_to_rest() {
         let budget = 5.0f32;
-        let dt = 1.0 / 60.0;
+        let dt = FIXED_STEP;
         let mut graph = <ForceGraph>::new(SimulationParameters {
             settle_after: Some(budget),
             ..Default::default()
@@ -1529,7 +1625,7 @@ mod test {
     /// has to be proportional to how long the layout is actually handled.
     #[test]
     fn a_brief_touch_gives_a_brief_response() {
-        let dt = 1.0 / 60.0;
+        let dt = FIXED_STEP;
         let travel = |frames_held: usize| {
             let mut graph = <ForceGraph>::new(Default::default());
             let mut nodes = Vec::new();
@@ -1572,7 +1668,7 @@ mod test {
     #[test]
     fn the_settling_window_runs_from_the_last_disturbance() {
         let budget = 5.0f32;
-        let dt = 1.0 / 60.0;
+        let dt = FIXED_STEP;
         let steps = (budget / dt).ceil() as usize;
         let mut graph = <ForceGraph>::new(SimulationParameters {
             settle_after: Some(budget),
@@ -1628,7 +1724,7 @@ mod test {
             ..Default::default()
         });
 
-        graph.update(1.0 / 60.0);
+        graph.update(FIXED_STEP);
         assert!(!graph.is_settled(), "settled while still off the plane");
         settle(&mut graph, 10_000);
         assert_eq!(positions(&graph)[0][2], 0.0);
@@ -1649,7 +1745,7 @@ mod test {
         }
 
         for _ in 0..30 {
-            graph.update(0.016);
+            graph.update(FIXED_STEP);
         }
         let positions = positions(&graph);
         assert!(positions.iter().all(|p| p[2] == 0.0), "{positions:?}");
@@ -1678,7 +1774,7 @@ mod test {
         }
 
         for _ in 0..120 {
-            graph.update(0.016);
+            graph.update(FIXED_STEP);
         }
         let ys: Vec<f32> = positions(&graph).iter().map(|p| p[1]).collect();
         // The band is a soft edge, not a wall: a node under load sits a little past it. See
@@ -1712,7 +1808,7 @@ mod test {
         }
 
         for _ in 0..120 {
-            graph.update(0.016);
+            graph.update(FIXED_STEP);
         }
         let layers: Vec<f32> = positions(&graph).iter().map(|p| p[1]).collect();
         assert_eq!(layers, vec![0.0, 100.0, 200.0, 300.0]);
@@ -1732,7 +1828,7 @@ mod test {
                 if graph.is_settled() {
                     return;
                 }
-                graph.update(0.016);
+                graph.update(FIXED_STEP);
             }
             panic!("never settled");
         }
@@ -1791,9 +1887,9 @@ mod test {
         let node = graph.add_node(NodeData::default());
         graph.apply_force(node, [30.0, 0.0, 0.0]);
 
-        graph.update(0.016);
+        graph.update(FIXED_STEP);
         let pushed = positions(&graph)[0][0];
-        graph.update(0.016);
+        graph.update(FIXED_STEP);
         let coasted = positions(&graph)[0][0] - pushed;
         assert!(pushed > 0.0, "{pushed}");
         assert!(coasted > 0.0 && coasted < pushed, "{pushed} {coasted}");
@@ -1827,7 +1923,7 @@ mod test {
                 graph.add_edge(nodes[i], nodes[i - 1], Default::default());
             }
             for _ in 0..10 {
-                graph.update(0.016);
+                graph.update(FIXED_STEP);
             }
             positions(&graph)
         };

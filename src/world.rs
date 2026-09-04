@@ -394,13 +394,33 @@ pub fn connections(worlds: &[World]) -> Vec<Vec<Step>> {
 /// build its pictures is the one thing a page may not do. Asking this host instead makes the
 /// request same-origin, and the host is expected to proxy it on to the wiki.
 ///
-/// A relative path, so it is whichever host served the page: see `download::URL` for the same
-/// arrangement. The native and Android builds send the header themselves and reach the wiki
-/// directly, so they keep the dump's own addresses and this does not exist for them.
+/// Whichever host served the page, so a build is not tied to where it is put: see
+/// `download::URL` for the same arrangement. The native and Android builds send the header
+/// themselves and reach the wiki directly, so they keep the dump's own addresses and this does
+/// not exist for them.
 #[cfg(target_family = "wasm")]
 const WIKI_IMAGES: &str = "https://yume.wiki/images/";
+
+/// The `/img/` the page asks for its pictures under, written out from the page's own origin.
+///
+/// Built once and kept, since every address in the dump gets the same one. Whole rather than the
+/// bare path the host actually sees, because these addresses do not reach the network through the
+/// document. They are handed to `reqwest`, which parses each one by itself and has no page to
+/// resolve it against, so a path with no host is not an address at all to it and the request
+/// fails before it is sent. The origin in front resolves to exactly what the bare path would
+/// have.
 #[cfg(target_family = "wasm")]
-const PROXIED_IMAGES: &str = "/img/";
+fn proxied_images() -> &'static str {
+    static PROXIED_IMAGES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PROXIED_IMAGES.get_or_init(|| {
+        let origin = web_sys::window()
+            .expect("the page has no window")
+            .location()
+            .origin()
+            .expect("the page has no origin to proxy its pictures through");
+        format!("{origin}/img/")
+    })
+}
 
 /// Parses the embedded dump.
 ///
@@ -415,12 +435,12 @@ pub fn load() -> Dump {
     // is not touched by this, which is right -- it runs at build time and has no page to be on.
     #[cfg(target_family = "wasm")]
     for world in &mut dump.worlds {
-        world.image = world.image.replace(WIKI_IMAGES, PROXIED_IMAGES);
+        world.image = world.image.replace(WIKI_IMAGES, proxied_images());
         if let Some(urls) = &mut world.map_url {
             // Rewritten whole rather than entry by entry: every address in the `|`-separated list
             // carries the same prefix, and a label list is never in this field. See
             // [`World::maps`].
-            *urls = urls.replace(WIKI_IMAGES, PROXIED_IMAGES);
+            *urls = urls.replace(WIKI_IMAGES, proxied_images());
         }
     }
     dump

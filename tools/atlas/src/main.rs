@@ -17,8 +17,6 @@ use std::path::{Path, PathBuf};
 /// stays inside one cell down to the level where it spans 16 source texels, so the levels the app
 /// keeps cannot bleed one world's thumbnail into its neighbour's.
 const CELL: [u32; 2] = [64, 48];
-/// The header that gets the wiki's images past its bot protection. Its CDN answers a plain
-/// request with a Cloudflare challenge page, and allows this origin by name.
 const ORIGIN: &str = "https://explorer.yume.wiki";
 /// How hard the atlas is compressed. High enough that the pixel art keeps its edges at the size
 /// it is drawn, low enough that the whole atlas is a download rather than a wait.
@@ -72,7 +70,8 @@ fn main() {
     // being drawn a few tens of pixels wide. Its 8x8 blocks divide both sides of a cell, so the
     // artefacts it does introduce stay inside the world they belong to.
     let out = repo.join("static/thumbnails.jpg");
-    let mut file = std::io::BufWriter::new(std::fs::File::create(&out).expect("cannot write the atlas"));
+    let mut file =
+        std::io::BufWriter::new(std::fs::File::create(&out).expect("cannot write the atlas"));
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut file, JPEG_QUALITY)
         .encode_image(&atlas)
         .expect("cannot encode the atlas");

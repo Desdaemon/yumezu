@@ -1,4 +1,6 @@
 #![allow(special_module_name)]
+#![cfg_attr(target_os = "android", deny(unsafe_code))]
+#![cfg_attr(not(target_os = "android"), forbid(unsafe_code))]
 
 mod main;
 
@@ -24,6 +26,7 @@ pub fn start() -> Result<(), JsValue> {
 /// The apk carries no Java of its own, so this library *is* the app: see `android/`. The handle
 /// the glue passes in is the only way to reach anything the framework owns, which is why it is
 /// both given to winit and kept for everything under `app` that needs the framework later.
+#[allow(unsafe_code)]
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: winit::platform::android::activity::AndroidApp) {

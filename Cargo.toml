@@ -12,6 +12,9 @@ members = [
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+production = []
+
 [profile.min]
 inherits = "release"
 opt-level = "z"
@@ -41,7 +44,7 @@ wasm-bindgen-futures = "0.4"
 wasm-bindgen = "0.2.127"
 console_log = "1.1.0"
 console_error_panic_hook = "0.1.7"
-web-sys = { version = "0.3.104", features = ["Navigator", "Storage", "Window"] }
+web-sys = { version = "0.3.104", features = ["Location", "Navigator", "Storage", "Window"] }
 
 
 [target.'cfg(target_os = "android")'.dependencies]

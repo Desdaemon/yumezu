@@ -4,7 +4,11 @@ use egui_material_icons::icons::*;
 use force_graph_3d::{
     DefaultNodeIdx, Dimensions, EdgeData, ForceGraph, NodeData, SimulationParameters,
 };
-use three_d::{FrameInput, FrameInputGenerator, GUI, WindowedContext, egui, renderer::*};
+use three_d::{
+    FrameInput, FrameInputGenerator, GUI, WindowedContext,
+    egui::{self, special_emojis::GITHUB},
+    renderer::*,
+};
 use winit::{
     application::ApplicationHandler,
     event::{Touch, TouchPhase, WindowEvent},
@@ -37,17 +41,18 @@ const NODE_LEAF_RADIUS: f32 = 1.1;
 const NODE_HUB_RADIUS: f32 = 1.7;
 /// Mass of a world of [`NODE_LEAF_RADIUS`], which is the smallest there is. [`node_mass`] scales
 /// every bigger world up from it.
-const NODE_BASE_MASS: f32 = 18.0;
+const NODE_BASE_MASS: f32 = 21.0;
 /// Where the panel's hub-push knob starts, and so the value [`AppEntities::hub_repulsion`] holds
 /// until somebody drags it. It decides how much of a world's size settles how hard the world
 /// pushes. See [`node_mass`].
 ///
 /// At `0.0` every world pushes alike. At `1.0` the push is proportional to the size. The higher
 /// value spaces the hubs generously, and the rest of the layout with them.
-const HUB_REPULSION_DEFAULT: f32 = 0.45;
+const HUB_REPULSION_DEFAULT: f32 = 0.83;
 
-const FORCE_CHARGE: f32 = 800.0;
-const SETTLE_AFTER: f32 = 15.0;
+const FORCE_CHARGE: f32 = 1800.0;
+const FORCE_CHARGE_2D: f32 = 10000.0;
+const SETTLE_AFTER: f32 = 32.0;
 
 /// How many worlds behind a world put it at [`NODE_HUB_RADIUS`]. It is what fixes where on the
 /// descendant counts the far anchor sits, and so how quickly the sizes climb: the curve keeps the
@@ -56,7 +61,8 @@ const SETTLE_AFTER: f32 = 15.0;
 /// The two radii are near each other on purpose. A wider range than this is more than the layout
 /// can hold without the hubs eating their neighbours.
 const NODE_HUB_DESCENDANTS: f32 = 4.0;
-const EDGE_RADIUS: f32 = 0.02;
+/// How thick a connection is drawn.
+const EDGE_RADIUS: f32 = 0.05;
 /// A connection a player can only walk one way is drawn as a run of marching dashes rather than
 /// a solid line, and which way they march is which way it goes. This is how many dashes, fixed
 /// rather than paced by a fixed dash length so that the count is settled when the graph is built
@@ -79,7 +85,7 @@ const EDGE_DASH_SPEED: f32 = 0.8;
 /// Measured against how wide a layer actually settles, rather than picked for looks. The busiest
 /// layers hold a few hundred worlds and spread to a radius near 7000. Anything much smaller than
 /// this stacks sixteen layers into a pancake, which reads as one thickened cloud, not as layers.
-const DAG_LEVEL_DISTANCE: f32 = 800.0;
+const DAG_LEVEL_DISTANCE: f32 = 1300.0;
 /// The same spacing in two dimensions, where a layer is a line rather than a plane.
 ///
 /// Wider than [`DAG_LEVEL_DISTANCE`]. A flat layer carries the whole crowd on one line, and it
@@ -88,7 +94,7 @@ const DAG_LEVEL_DISTANCE: f32 = 800.0;
 ///
 /// Not much wider than it has to be, though. The gaps multiply over sixteen layers, and a tree
 /// taller than it is wide takes scrolling to read rather than one glance.
-const DAG_LEVEL_DISTANCE_2D: f32 = 3000.0;
+const DAG_LEVEL_DISTANCE_2D: f32 = 1900.0;
 /// How far a world may sit from its layer per microstep of slack, in simulation units.
 ///
 /// Two worlds across, which is what makes a microstep worth taking. A step of one world leaves
@@ -106,10 +112,6 @@ const DAG_LEVEL_MICROSTEP: f32 = 4.0 * NODE_LEAF_RADIUS / SIM_TO_WORLD;
 /// dimensions a layer is a line. A busy line has nowhere for the overflow but on top of itself,
 /// so it may stack this far either side. Keep the band well under [`DAG_LEVEL_DISTANCE_2D`], or
 /// the layers meet and stop reading as layers.
-///
-/// The count fell as the microstep grew with the worlds, but the band still came out several times
-/// deeper than it was: six steps of a third of a world was room for two worlds, where three steps
-/// of two worlds is room for six.
 const DAG_LEVEL_SLACK_MICROSTEPS_2D: f32 = 3.0;
 /// Force per unit of distance between a grabbed node and the cursor.
 ///
@@ -186,7 +188,7 @@ const PANORAMA_PARALLAX: f32 = 0.12;
 /// Brightness of the connection into a world with nothing behind it, against the one into the
 /// world the whole game is behind. See [`edge_colors`]. The connections carry the depth ramp, so
 /// this value is the range the ramp is drawn over rather than a color of their own.
-const EDGE_LEAF_BRIGHTNESS: f32 = 0.55;
+const EDGE_LEAF_BRIGHTNESS: f32 = 0.6;
 /// How far the connection colors move toward even apparent brightness. At 0 the ramp keeps its
 /// own stops. At 1 every stop takes the brightness of the dimmest.
 ///
@@ -279,6 +281,32 @@ struct AppStatics {
     touches: Touches,
     /// The WASD keys being held. See [`Walk`].
     walk: Walk,
+}
+
+/// Where the camera stands, as the three vectors [`Camera::new_perspective`] is given.
+///
+/// Read out by the settings tab so a view found by hand can be pasted back into [`App::new`] as
+/// the one the app opens on.
+#[derive(Clone, Copy)]
+struct Pose {
+    position: Vec3,
+    target: Vec3,
+    up: Vec3,
+}
+
+impl std::fmt::Display for Pose {
+    /// The three lines of [`App::new`] these belong on, in the order they are written there and
+    /// ready to be pasted over them.
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        for vector in [self.position, self.target, self.up] {
+            writeln!(
+                f,
+                "vec3({:.1}, {:.1}, {:.1}),",
+                vector.x, vector.y, vector.z
+            )?;
+        }
+        Ok(())
+    }
 }
 
 /// The WASD keys, held down.
@@ -508,7 +536,7 @@ struct Sidebar {
 enum Tab {
     /// The graph in front of the person: what is selected, and what to look at next.
     #[default]
-    Graph,
+    Worlds,
     /// Who made the worlds.
     Authors,
     /// What each release added.
@@ -546,6 +574,8 @@ struct Panel {
 struct PanelData<'a> {
     data: &'a AppEntities,
     fps: f32,
+    /// Where the camera stands, for the settings tab to read out. See [`Pose`].
+    // pose: Pose,
     /// The route home from what is lit, origin last.
     route: Vec<usize>,
     /// The worlds worth naming among the descendants of what is lit.
@@ -630,11 +660,6 @@ struct Grab {
 }
 
 /// The left-button gesture in progress.
-///
-/// Three readings compete for the same button — click a node, drag a node, orbit the camera — and
-/// a press alone does not say which. So a press only nominates: the gesture stays [Gesture::Held]
-/// until the cursor either travels far enough to be a drag or lets go without doing so, and until
-/// then nothing downstream sees the motion.
 enum Gesture {
     /// Pressed, and still ambiguous. Carries what the press landed on, so a release can select it
     /// and a drag can start moving it without picking again.
@@ -866,14 +891,15 @@ impl App {
     pub fn new() -> Self {
         let camera = Camera::new_perspective(
             Viewport::new_at_origo(1, 1),
-            vec3(0.0, -50., -150.),
-            vec3(0.0, -50., 0.0),
+            // preset position to see the settled 3D tree!
+            vec3(-263.8, 8.0, -238.9),
+            vec3(4.4, -118.4, -27.3),
             vec3(0.0, 1.0, 0.0),
             degrees(FOV_Y_DEGREES),
             0.1,
             1000.0,
         );
-        let control = OrbitControl::new(camera.target(), 1.0, 300.0);
+        let control = OrbitControl::new(camera.target(), 1.0, 500.0);
 
         Self {
             ctx: AppContext::default(),
@@ -1181,13 +1207,11 @@ impl App {
 
         data.pull_grabbed_node(&self.statics.camera);
         data.receive_atlas(ctx, self.overlay.as_ref().unwrap().gui.context());
-        // A settled graph steps to nothing, and its instance buffers already hold the layout, so
-        // there is no geometry to rebuild until something wakes it. Asked before the step,
-        // because a step that ends settled has still moved the nodes.
-        let stepped = !data.graph.is_settled();
-        // Clamp dt so a stalled tab does not blow the simulation apart.
-        data.graph
-            .update((frame_input.elapsed_time as f32 * 1e-3).min(0.05));
+        // Unclamped: the layout steps at a fixed rate and caps how much of a long frame it will
+        // catch up on itself, so a stalled tab is already its problem, not this one. It reports
+        // whether it moved anything, which is what says whether there is geometry to rebuild: a
+        // settled layout has none, and neither has a frame too short to be a whole step of one.
+        let stepped = data.graph.update(frame_input.elapsed_time as f32 * 1e-3);
         // The quads face the camera, so turning it dates their transformations even over a layout
         // that has not moved at all.
         let turned = data.billboard != billboard(&self.statics.camera);
@@ -1410,15 +1434,17 @@ impl Overlay {
         let parameters = data.graph.parameters_mut();
         let reseed = panel.dimensions != parameters.dimensions;
         parameters.dimensions = panel.dimensions;
-        let (spacing, slack) = match panel.dimensions {
+        let (spacing, slack, force_charge) = match panel.dimensions {
             Dimensions::Two => (
                 DAG_LEVEL_DISTANCE_2D,
                 DAG_LEVEL_MICROSTEP * DAG_LEVEL_SLACK_MICROSTEPS_2D,
+                FORCE_CHARGE_2D,
             ),
-            Dimensions::Three => (DAG_LEVEL_DISTANCE, 0.0),
+            Dimensions::Three => (DAG_LEVEL_DISTANCE, 0.0, FORCE_CHARGE),
         };
         parameters.dag_level_distance = panel.layered.then_some(spacing);
         parameters.dag_level_slack = slack;
+        parameters.force_charge = force_charge;
         // A switch rearranges the whole layout rather than nudging it, so it gets a full
         // settling window instead of what a settled graph has left: see [ForceGraph::revive].
         data.graph.revive();
@@ -1506,7 +1532,7 @@ impl Panel {
     /// person has read.
     fn window(&mut self, ui: &mut egui::Ui, read: &PanelData, sidebar: &mut Sidebar) {
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut sidebar.tab, Tab::Graph, "Graph");
+            ui.selectable_value(&mut sidebar.tab, Tab::Worlds, "Worlds");
             ui.selectable_value(&mut sidebar.tab, Tab::Authors, "Authors");
             ui.selectable_value(&mut sidebar.tab, Tab::Versions, "Versions");
             ui.selectable_value(&mut sidebar.tab, Tab::Settings, ICON_SETTINGS);
@@ -1526,10 +1552,10 @@ impl Panel {
         // of the window to run down, and a list that scrolled inside a column that also scrolled
         // would fight the drag that reached it.
         egui::ScrollArea::vertical().show(ui, |ui| match sidebar.tab {
-            Tab::Graph => self.graph(ui, read, &mut sidebar.worlds),
+            Tab::Worlds => self.graph(ui, read, &mut sidebar.worlds),
             Tab::Authors => self.authors(ui, read, &mut sidebar.authors),
             Tab::Versions => self.versions(ui, read, &mut sidebar.versions),
-            Tab::Settings => self.settings(ui),
+            Tab::Settings => self.settings(ui /*, read*/),
         });
     }
 
@@ -1757,14 +1783,53 @@ impl Panel {
 
     /// The knobs: set once and then left alone, which is why they are not in the way of the
     /// reading tabs.
-    fn settings(&mut self, ui: &mut egui::Ui) {
-        ui.add(egui::Slider::new(&mut self.hub_repulsion, 0.0..=1.0).text("hub push"))
+    fn settings(&mut self, ui: &mut egui::Ui /*, read: &PanelData*/) {
+        ui.add(egui::Slider::new(&mut self.hub_repulsion, 0.5..=1.5).text("hub push"))
             .on_hover_text("The higher the value, the harder bigger worlds' repulsion force is");
         ui.add(egui::Slider::new(&mut self.ui_scale, UI_SCALE_RANGE).text("UI scale"))
             .on_hover_text("How large the panel and its text are drawn");
         // The way back to a panel that was dismissed for good, so ticking that box is not a
         // door that locks behind the person who ticked it.
         self.guide |= ui.button("Show controls").clicked();
+
+        if ui
+            .hyperlink_to(
+                format!("{GITHUB}  yumezu on github"),
+                "https://github.com/Desdaemon/yumezu",
+            )
+            .clicked()
+        {
+            open_in_browser("https://github.com/Desdaemon/yumezu");
+        }
+
+        if ui
+            .hyperlink_to(
+                format!("{}  Download for Android", ICON_ANDROID.codepoint),
+                "https://explorer.yumemiru.dev/android",
+            )
+            .clicked()
+        {
+            open_in_browser("https://explorer.yumemiru.dev/android");
+        }
+
+        #[cfg(false)]
+        {
+            ui.separator();
+            // Written the way [`App::new`] wants it, so the view the person has flown to can be read
+            // off here and pasted straight over the three vectors the app opens on. See [`Pose`].
+            let pose = read.pose.to_string();
+            ui.horizontal(|ui| {
+                ui.label("Camera");
+                if ui
+                    .button(ICON_CONTENT_COPY)
+                    .on_hover_text("Copy the three vectors App::new takes")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(pose.clone());
+                }
+            });
+            ui.monospace(pose.trim_end());
+        }
     }
 
     /// What is lit, read out: the route to it, what hangs off it, or the author it is credited to.
@@ -1963,6 +2028,7 @@ impl Panel {
                 egui::Frame::menu(ui.style()).show(ui, |ui| {
                     ui.set_max_width(POPUP_WIDTH);
                     ui.strong(&data.titles[world]);
+                    ui.label(&data.authors[data.author_of[world]].name);
                     if data.descendants[world] > 0 && ui.button("Highlight descendants").clicked() {
                         self.lit = Some(Some(Highlight::Descendants(world)));
                     }
@@ -1990,7 +2056,7 @@ impl Panel {
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(POPUP_WIDTH);
-                    ui.label(&read.data.titles[world]);
+                    ui.strong(&read.data.titles[world]);
                     ui.label(&read.data.authors[read.data.author_of[world]].name);
                 });
             });
@@ -2088,6 +2154,15 @@ impl AppStatics {
         if cursor != self.cursor {
             self.cursor = cursor;
             window.set_cursor(cursor);
+        }
+    }
+
+    /// Where the camera stands right now. See [`Pose`].
+    fn pose(&self) -> Pose {
+        Pose {
+            position: self.camera.position(),
+            target: self.camera.target(),
+            up: self.camera.up(),
         }
     }
 
@@ -2618,10 +2693,15 @@ impl AppEntities {
         self.dashes.set_instances(&self.dash_instances);
     }
 
+    fn edge_radius(&self) -> f32 {
+        EDGE_RADIUS
+    }
+
     /// Rewrites the instance transformations from the current node positions and the direction
     /// the camera is looking from.
     fn rebuild_instances(&mut self, camera: &Camera) {
         let billboard = billboard(camera);
+        let radius = self.edge_radius();
         let thumbnails = &mut self.thumbnail_instances.transformations;
         thumbnails.clear();
         self.graph.visit_nodes(|node| {
@@ -2648,7 +2728,7 @@ impl AppEntities {
             edges.push(
                 Mat4::from_translation(from)
                     * rotation_matrix_from_dir_to_dir(vec3(1.0, 0.0, 0.0), dir.normalize())
-                    * Mat4::from_nonuniform_scale(dir.magnitude(), EDGE_RADIUS, EDGE_RADIUS),
+                    * Mat4::from_nonuniform_scale(dir.magnitude(), radius, radius),
             );
         });
         self.thumbnails.set_instances(&self.thumbnail_instances);
@@ -2666,6 +2746,7 @@ impl AppEntities {
         // of it stood, so the run is unchanged and the phase can simply start over.
         self.dash_phase = (self.dash_phase + dt * EDGE_DASH_SPEED).fract();
         let phase = self.dash_phase;
+        let radius = self.edge_radius() * EDGE_DASH_WIDTH;
         let radii = &self.node_radii;
         let dashes = &mut self.dash_instances.transformations;
         dashes.clear();
@@ -2696,7 +2777,6 @@ impl AppEntities {
             // comes back on into at the near one. The dashes are placed along a run one dash
             // shorter than the span, so the leading one ends where the span does rather than
             // reaching past it into the picture the whole point was to keep clear of.
-            let radius = EDGE_RADIUS * EDGE_DASH_WIDTH;
             let run = span / (1.0 + EDGE_DASH_FILL / EDGE_DASHES as f32);
             let length = run * EDGE_DASH_FILL / EDGE_DASHES as f32;
             let unit = dir / dir.magnitude();
@@ -3224,8 +3304,10 @@ fn open_in_browser(url: &str) {
         let context = ndk_context::android_context();
         // Safe as long as the glue really did publish a VM and a context, which it does before
         // it ever calls `android_main`, and they outlive the app.
+        #[allow(unsafe_code)]
         let vm = unsafe { jni::JavaVM::from_raw(context.vm().cast()) };
         let opened = vm.attach_current_thread(|env| -> Result<(), jni::errors::Error> {
+            #[allow(unsafe_code)]
             let application = unsafe { JObject::from_raw(env, context.context().cast()) };
             let url = env.new_string(url)?;
             let uri = env
