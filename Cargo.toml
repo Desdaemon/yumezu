@@ -12,6 +12,10 @@ members = [
 [lib]
 crate-type = ["cdylib"]
 
+[[bin]]
+name = "yumezu_main"
+path = "src/main.rs"
+
 [features]
 production = []
 

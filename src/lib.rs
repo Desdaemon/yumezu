@@ -1,8 +1,8 @@
-#![allow(special_module_name)]
 #![cfg_attr(target_os = "android", deny(unsafe_code))]
 #![cfg_attr(not(target_os = "android"), forbid(unsafe_code))]
 
-mod main;
+#[path = "main.rs"]
+mod entry;
 
 // Entry point for wasm
 #[cfg(target_arch = "wasm32")]
@@ -13,11 +13,10 @@ use wasm_bindgen::prelude::*;
 pub fn start() -> Result<(), JsValue> {
     console_log::init_with_level(log::Level::Debug).unwrap();
 
-    use log::info;
-    info!("Logging works!");
+    log::info!("Logging initialized.");
 
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
-    main::main();
+    entry::main();
     Ok(())
 }
 

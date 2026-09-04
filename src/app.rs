@@ -1616,7 +1616,7 @@ impl Panel {
     /// is behind. Clicking a name lights their whole body of work.
     fn authors(&mut self, ui: &mut egui::Ui, read: &PanelData, search: &mut String) {
         let data = read.data;
-        search_box(ui, search, "author");
+        search_box(ui, search, "Search authors");
         ui.label(showing(read.authors.len(), data.authors.len(), "authors"));
         ui.separator();
         for &author in &read.authors {
@@ -1639,7 +1639,7 @@ impl Panel {
     /// down the history as by name, and the pictures are what make it worth reading down.
     fn versions(&mut self, ui: &mut egui::Ui, read: &PanelData, search: &mut String) {
         let data = read.data;
-        search_box(ui, search, "version");
+        search_box(ui, search, "Search versions");
         ui.label(showing(
             read.versions.len(),
             data.versions.len(),
@@ -1840,12 +1840,10 @@ impl Panel {
             }
             Some(Highlight::Descendants(world)) => {
                 self.world_info(ui, data, world);
-                ui.label(format!(
-                    "{} worlds are reached through it",
-                    data.descendants[world]
-                ));
                 if read.notable.is_empty() {
-                    ui.label("Nothing branches off it.");
+                    ui.label("No notable descendants.");
+                } else {
+                    ui.label("Notable descendants:");
                 }
                 for &world in &read.notable {
                     let degree = data.degrees[world];
@@ -2884,11 +2882,18 @@ fn sidebar_opener(ui: &mut egui::Ui, sidebar: &mut Sidebar, insets: egui::Margin
 }
 
 fn search_box(ui: &mut egui::Ui, search: &mut String, of: &str) {
-    egui::TextEdit::singleline(search)
+    let clear_id = egui::Id::new(of);
+    let clear_size = egui::Vec2::splat(ui.spacing().interact_size.y);
+    let output = egui::TextEdit::singleline(search)
         .hint_text(of)
         .prefix(ICON_SEARCH)
-        .suffix(ICON_CANCEL)
+        .suffix(egui::Atom::custom(clear_id, clear_size))
         .show(ui);
+    if let Some(rect) = output.response.rect(clear_id)
+        && ui.place(rect, egui::Label::new("❌")).clicked()
+    {
+        search.clear();
+    }
 }
 
 /// How much of a list is being shown, which only needs saying while it is being cut down.
