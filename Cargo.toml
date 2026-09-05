@@ -35,7 +35,7 @@ serde_json = "1"
 three-d = { version = "0.20.0", git = "https://github.com/asny/three-d" }
 # explicitly depended to override features
 three-d-asset = { version = "0.10", features = ["jpeg", "png", "http-rustls"] }
-reqwest = "0.13"
+reqwest = { version = "0.13.4" }
 winit = "0.30"
 egui_material_icons = "0.7.0"
 # What the app says is kept in `locales/` rather than written out where it is read, because
@@ -65,6 +65,14 @@ fontique = { version = "0.11", default-features = false, features = ["system"] }
 # already keeps.
 egui-winit = { version = "0.35", default-features = false, features = ["clipboard"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+# Caching downloads between runs. `reqwest` keeps nothing at all -- no store, no `Cache-Control`,
+# no revalidation -- which is only invisible on the page, where it hands the request to the
+# browser's own `fetch` and inherits its cache. These two put that behaviour back everywhere else,
+# so the wiki pictures a run fetched are still there for the next one. The cache crate is a
+# pre-release because that is the only line supporting reqwest 0.13 so far; pinned exactly, since
+# an alpha may break its API between patch versions. See `src/fetch.rs`.
+reqwest-middleware = "0.5.2"
+http-cache-reqwest = "=1.0.0-alpha.8"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 # The page keeps the reader's languages on `navigator`, which is only reachable through js.
@@ -96,3 +104,8 @@ android_logger = "0.15"
 # the tree underneath the activity glue, which publishes the one and is written against the other.
 jni = "0.22"
 ndk-context = "0.1"
+# The roots TLS is checked against here. Every other platform gets them from the OS, through
+# `rustls-platform-verifier`, which reqwest picks by itself; on Android that verifier is a Java
+# class it calls through JNI, and this apk carries no Java at all -- see `android/build.sh`. So
+# the roots are compiled in instead, and handed to the client `src/fetch.rs` builds.
+webpki-root-certs = "1"

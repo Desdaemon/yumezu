@@ -299,9 +299,7 @@ const URL: &str = "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@Sans2.004/Sans
 /// already drawing.
 #[cfg(target_family = "wasm")]
 async fn download() -> Option<Vec<u8>> {
-    // Its own client, built inside the request so it lands on the executor [`fetch::spawn`] put
-    // this on. The same arrangement, for the same reason, as `detail::download`.
-    let response = reqwest::Client::new()
+    let response = super::fetch::client()
         .get(URL)
         .send()
         .await

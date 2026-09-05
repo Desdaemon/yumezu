@@ -206,12 +206,8 @@ pub fn load(url: String) -> fetch::Pending<Option<CpuTexture>> {
 }
 
 /// Fetches one picture's bytes.
-///
-/// Its own client rather than a shared one: eight downloads over a session do not repay a
-/// connection pool, and building the client inside the request keeps it on the executor
-/// [`fetch::spawn`] put this on, which is where the native one needs to be.
-async fn download(url: &str) -> Result<Vec<u8>, reqwest::Error> {
-    Ok(reqwest::Client::new()
+async fn download(url: &str) -> Result<Vec<u8>, fetch::Error> {
+    Ok(fetch::client()
         .get(url)
         // See [`ORIGIN`]. Dropped by the browser, which sets its own.
         .header("origin", ORIGIN)
