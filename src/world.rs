@@ -1,4 +1,5 @@
-//! The Yume 2kki world graph, as published by yume.wiki and captured in `data.json`.
+//! The Yume 2kki world graph, as published by yume.wiki and served to this app as `data.json`
+//! by `dreamweaver`. See [`load`].
 //!
 //! The dump carries far more per world than a layout needs — images, BGM, version history — so
 //! only the fields the visualization draws are deserialized; serde skips the rest without
@@ -12,9 +13,14 @@ use serde::Deserialize;
 
 use super::i18n::t;
 
-/// The dump is embedded rather than fetched: it is a fixed asset of this demo, and compiling it
-/// in keeps startup synchronous on both native and wasm, where the app has no async path.
-const DATA: &str = include_str!("../data.json");
+/// Where the dump is fetched from natively: `dreamweaver`, on the machine the app is running on.
+/// See `crates/dreamweaver`, which builds it out of the wiki and keeps it current.
+///
+/// Fetched rather than compiled in, so a build is not a snapshot of the wiki: a run draws
+/// whatever the server has published since it was built, and worlds arrive weekly. What it costs
+/// is a load the first frame has to wait out, which is what the app's loading frame is for.
+#[cfg(not(target_family = "wasm"))]
+const DUMP: &str = "http://127.0.0.1:5000/data.json";
 
 /// The dump as it is published: the worlds, and the release history the wiki dates them by.
 #[derive(Deserialize)]
@@ -469,24 +475,66 @@ const WIKI_IMAGES: &str = "https://yume.wiki/images/";
 #[cfg(target_family = "wasm")]
 fn proxied_images() -> &'static str {
     static PROXIED_IMAGES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    PROXIED_IMAGES.get_or_init(|| {
-        let origin = web_sys::window()
+    PROXIED_IMAGES.get_or_init(|| format!("{}/img/", origin()))
+}
+
+/// Where the page was served from, which is the only host it may ask for anything without being
+/// let: see [`proxied_images`] and [`url`].
+#[cfg(target_family = "wasm")]
+fn origin() -> &'static str {
+    static ORIGIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ORIGIN.get_or_init(|| {
+        web_sys::window()
             .expect("the page has no window")
             .location()
             .origin()
-            .expect("the page has no origin to proxy its pictures through");
-        format!("{origin}/img/")
+            .expect("the page has no origin to ask for anything through")
     })
 }
 
-/// Parses the embedded dump.
+/// Where this run asks for the dump.
 ///
-/// Panics on a malformed dump: it is a compile-time asset, so a failure here is a broken build
-/// rather than something the running app could recover from.
-pub fn load() -> Dump {
+/// The server's own address natively. The page asks its own host instead, under the same path,
+/// for the reason [`WIKI_IMAGES`] is rewritten: a request straight at the server is a
+/// cross-origin one it sends no headers to allow, and a blocked mixed-content one wherever the
+/// page itself is served over https. The host puts it through to `dreamweaver` -- see the proxy
+/// in `Trunk.toml`.
+fn url() -> std::borrow::Cow<'static, str> {
+    #[cfg(not(target_family = "wasm"))]
+    return std::borrow::Cow::Borrowed(DUMP);
+    #[cfg(target_family = "wasm")]
+    return std::borrow::Cow::Owned(format!("{}/data.json", origin()));
+}
+
+/// Fetches the dump and parses it.
+///
+/// `Err` carries what to say on screen rather than panicking, which is the whole of what fetching
+/// costs over compiling in: a document off the network can fail to arrive, or arrive as something
+/// else, and neither is worth taking the window down for. See `app`'s `Dump`, which names the
+/// failure and leaves the app standing.
+pub async fn load() -> Result<Dump, String> {
+    let url = url();
+    let json = download(&url)
+        .await
+        .map_err(|error| format!("cannot reach {url}: {error}"))?;
+    parse(&json).map_err(|error| format!("{url} is not the expected world dump: {error}"))
+}
+
+/// The dump's bytes, as the server sends them.
+async fn download(url: &str) -> Result<String, super::fetch::Error> {
+    Ok(super::fetch::client()
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?)
+}
+
+/// Reads the dump, and rewrites the addresses in it that this platform cannot use as they stand.
+fn parse(json: &str) -> serde_json::Result<Dump> {
     #[allow(unused_mut)]
-    let mut dump =
-        serde_json::from_str::<Dump>(DATA).expect("data.json is not the expected world dump");
+    let mut dump = serde_json::from_str::<Dump>(json)?;
     // Every picture address the app fetches at runtime passes through here, and only here: the
     // world's own and its maps'. See [`WIKI_IMAGES`]. The atlas tool reads `data.json` itself and
     // is not touched by this, which is right -- it runs at build time and has no page to be on.
@@ -500,7 +548,7 @@ pub fn load() -> Dump {
             *urls = urls.replace(WIKI_IMAGES, proxied_images());
         }
     }
-    dump
+    Ok(dump)
 }
 
 /// How a release is named across the two halves of the dump, which do not spell it identically:
@@ -788,11 +836,23 @@ fn walkable_steps(worlds: &[World]) -> Vec<Vec<(usize, Ask)>> {
 
 #[cfg(test)]
 mod tests {
+    /// The dump the assertions below are made against.
+    ///
+    /// Read off disk rather than fetched, so the tests neither need a server running nor say
+    /// anything different depending on what one has published since. It is the same document:
+    /// `just dreamweaver` writes exactly what it serves to `data.json`.
+    fn load() -> super::Dump {
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/data.json");
+        let json = std::fs::read_to_string(file)
+            .expect("data.json is missing; run `just dreamweaver` to write one");
+        super::parse(&json).expect("data.json is not the expected world dump")
+    }
+
     /// A connection is one connection however many of its two worlds list it: both of them carry
     /// it, and they agree on which ways round it can be walked.
     #[test]
     fn a_connection_reads_the_same_from_either_end() {
-        let worlds = super::load().worlds;
+        let worlds = load().worlds;
         let connections = super::connections(&worlds);
         for (from, steps) in connections.iter().enumerate() {
             for step in steps {
@@ -814,7 +874,7 @@ mod tests {
         // The words below are the English ones, and a test is read out in whatever language the
         // machine running it is set to unless it says otherwise.
         crate::i18n::speak_english();
-        let worlds = super::load().worlds;
+        let worlds = load().worlds;
         let connections = super::connections(&worlds);
         let asks: Vec<String> = connections
             .iter()
@@ -836,7 +896,7 @@ mod tests {
     /// otherwise: this proves it still parses and still carries a connected world graph.
     #[test]
     fn dump_parses() {
-        let worlds = super::load().worlds;
+        let worlds = load().worlds;
         assert!(worlds.len() > 1000, "{} worlds", worlds.len());
         assert!(
             worlds
@@ -865,7 +925,7 @@ mod tests {
     /// no world closer in.
     #[test]
     fn the_origin_roots_the_route_tree() {
-        let routes = super::canonical_routes(&super::load().worlds);
+        let routes = super::canonical_routes(&load().worlds);
         assert_eq!(routes.depth[0], Some(0));
         assert!(routes.parents[0].is_none());
     }
@@ -874,7 +934,7 @@ mod tests {
     /// the walk has to arrive at the origin in exactly as many steps as the depth claims.
     #[test]
     fn depth_is_the_length_of_the_canonical_route() {
-        let worlds = super::load().worlds;
+        let worlds = load().worlds;
         let routes = super::canonical_routes(&worlds);
         for (world, depth) in routes.depth.iter().enumerate() {
             let Some(depth) = *depth else {
@@ -900,7 +960,7 @@ mod tests {
     /// which is what this used to report.
     #[test]
     fn conditions_only_ever_push_a_world_deeper() {
-        let worlds = super::load().worlds;
+        let worlds = load().worlds;
         let routes = super::canonical_routes(&worlds);
 
         let mut neighbours = vec![Vec::new(); worlds.len()];
@@ -943,19 +1003,30 @@ mod tests {
         assert!(deeper > worlds.len() / 4, "only {deeper} worlds moved");
     }
 
-    /// One world in the dump can be left but never entered, so it has no canonical route at all
-    /// and the visualization draws it as unreached. Pinned because it is the only one: a second
-    /// would more likely be a misread flag than a real hole.
+    /// A world with no canonical route is drawn as unreached, and there are only two ways to
+    /// become one. The wiki may document no passage touching the world at all -- a page in the
+    /// locations category that carries nothing else, of which it keeps a few -- or it may
+    /// document a way out and no way in, which one world really is. Anything else unreached is a
+    /// misread flag closing a passage that is open.
     #[test]
-    fn only_the_world_with_no_way_in_is_unreachable() {
-        let worlds = super::load().worlds;
+    fn a_world_is_unreached_only_where_the_wiki_leaves_no_way_in() {
+        let worlds = load().worlds;
         let routes = super::canonical_routes(&worlds);
+        let mut touched = vec![false; worlds.len()];
+        for (at, world) in worlds.iter().enumerate() {
+            for connection in &world.connections {
+                touched[at] = true;
+                touched[connection.target_id] = true;
+            }
+        }
         let unreachable: Vec<_> = routes
             .depth
             .iter()
             .enumerate()
             .filter(|(_, depth)| depth.is_none())
-            .map(|(world, _)| worlds[world].title.as_str())
+            .map(|(world, _)| world)
+            .filter(|&world| touched[world])
+            .map(|world| worlds[world].title.as_str())
             .collect();
         assert_eq!(unreachable, ["Gallery of Me"]);
     }
@@ -977,7 +1048,7 @@ mod tests {
     /// account for every world exactly once — no world in two authors' work, none in none.
     #[test]
     fn every_world_is_credited_and_dated_once() {
-        let dump = super::load();
+        let dump = load();
         let (authors, author_of) = dump.authors();
         assert!(authors.len() > 100, "{} authors", authors.len());
         for (world, &author) in author_of.iter().enumerate() {
@@ -1009,7 +1080,7 @@ mod tests {
     /// on more than equality or those releases would come out twice, undated, at the end.
     #[test]
     fn a_release_is_one_version_however_the_dump_spells_it() {
-        let versions = super::load().versions();
+        let versions = load().versions();
         assert_eq!(
             versions
                 .iter()

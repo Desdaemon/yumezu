@@ -10,6 +10,11 @@
 language-name = 日本語
 language = 言語
 
+## The frame before the graph.
+
+dump-loading = 世界を読み込んでいます…
+dump-failed = 世界のデータを読み込めませんでした。
+
 ## The sidebar and its tabs.
 
 tab-worlds = マップ

@@ -1,3 +1,5 @@
+# Serves the page. `just dreamweaver` has to be running alongside it: the page asks its own host
+# for the world dump, and `Trunk.toml` puts that request through to the server.
 serve:
     trunk serve --release
 
@@ -17,3 +19,7 @@ apk:
 # Installs that apk on the device adb is talking to.
 install: apk
     adb install -r target/android/yumezu.apk
+
+# Serves `data.json`, building it from the wiki and keeping it current. See `crates/dreamweaver`.
+dreamweaver:
+    cargo run --release -p dreamweaver -- --data data.json

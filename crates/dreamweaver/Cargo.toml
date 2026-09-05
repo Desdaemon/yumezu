@@ -1,0 +1,26 @@
+[package]
+name = "dreamweaver"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# The wiki is reached through ynoproject's wrapper, which answers in JSON and pages with a
+# `continueKey`, so talking to it needs nothing but a transport and a deserializer -- see
+# `src/wiki.rs`. `rustls` explicitly: the default is the platform verifier, which is right for the
+# app but drags a native TLS stack into a server build that has no use for one.
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "http2", "query", "rustls"] }
+# What a passage between two worlds is like is a set of independent flags the reader gets back out
+# of one number, so the type is a bitfield rather than an enum. `bitflags` is what makes it one
+# that can still be matched on and printed.
+bitflags = "2.13"
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The dump stamps itself with the moment it was built, and the reader wants a calendar date. The
+# stamp is written out by hand in `sync::stamp`, so no formatting feature; `parsing` is there
+# because a soft sync reads the stamp back to know what to ask the wiki about -- see
+# `sync::asked_from`.
+time = { version = "0.3", features = ["parsing"] }
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

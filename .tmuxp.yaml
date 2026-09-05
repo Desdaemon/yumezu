@@ -1,0 +1,10 @@
+session_name: yumezu
+windows:
+  - window_name: frontend
+    layout: main-vertical
+    panes:
+      - just serve
+      - cargo run -p dreamweaver
+  - window_name: shell
+    panes:
+      - fish

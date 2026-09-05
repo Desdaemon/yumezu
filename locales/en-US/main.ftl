@@ -12,6 +12,12 @@
 language-name = English
 language = Language
 
+## The frame before the graph: what is said while the world dump is on its way in, and what is
+## said if it never arrives. See `world::load`.
+
+dump-loading = Loading worlds…
+dump-failed = The world dump could not be loaded.
+
 ## The sidebar and its tabs.
 
 tab-worlds = Worlds

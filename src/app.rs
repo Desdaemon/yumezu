@@ -271,6 +271,26 @@ pub(super) struct App {
     statics: AppStatics,
     /// Built with the graphics context, so it cannot exist before the window does.
     overlay: Option<Overlay>,
+    /// The world dump, which everything in [`AppEntities`] is built out of. See [`Dump`].
+    dump: Dump,
+}
+
+/// The dump, at whatever stage of arriving it has reached.
+///
+/// It comes off the network now rather than out of the binary -- see [`world::load`] -- so there
+/// is a stretch at the start of a run with a window on screen and nothing to draw in it, and a
+/// way for a run to end up with nothing to draw at all. Both are states the app is in rather than
+/// reasons to fail: see [`App::draw_loading`], which is the frame each of them shows.
+///
+/// Kept once it arrives rather than dropped into the entities built from it, because a phone
+/// rebuilds those every time the app comes back to the screen -- see [`App::release`] -- and the
+/// dump it would have to fetch again has not changed in the meantime.
+enum Dump {
+    /// On its way in. See [`fetch`].
+    Loading(fetch::Pending<Result<world::Dump, String>>),
+    Ready(world::Dump),
+    /// Why there is no dump, in the words the loading frame says it in.
+    Failed(String),
 }
 
 #[derive(Default)]
@@ -924,6 +944,9 @@ impl App {
 
         Self {
             ctx: AppContext::default(),
+            // Started here rather than at the first frame: the fetch is the longest thing a run
+            // waits for, and nothing it needs is owned by the window.
+            dump: Dump::Loading(fetch::spawn(world::load())),
             statics: AppStatics {
                 control,
                 camera,
@@ -943,214 +966,311 @@ impl App {
             Some(WindowedContext::from_winit_window(window, Default::default()).unwrap());
         let ctx = self.ctx.wctx.as_ref().unwrap();
         self.ctx.fig = Some(FrameInputGenerator::from_winit_window(window));
+        self.overlay = Some(Overlay::new(event_loop, window, ctx));
+        self.build();
+    }
 
-        let rng = Rng(0x5eed_1337);
-
-        let dump = world::load();
-        let worlds = &dump.worlds;
-        // How deep a player has to go to reach each world: see [`world::canonical_routes`]. It
-        // both colors the nodes and, in layered mode, picks the layer each one is pinned to, so
-        // the two always agree.
-        let routes = world::canonical_routes(worlds);
-        let deepest = routes.depth.iter().flatten().copied().max().unwrap_or(0);
-        let furthest = deepest.max(1) as f32;
-        // Sized by how much of the graph hangs off each world, between the two anchors above: a
-        // leaf keeps [`NODE_LEAF_RADIUS`]. The logarithm is what carries the depth: a deep world
-        // with a handful of worlds behind it lands within reach of a shallow one with a hundred,
-        // because the size grows with the order of magnitude of what a world leads to rather than
-        // with the count. See [`world::Routes::descendant_counts`].
-        let descendants = routes.descendant_counts();
-        let node_radii: Vec<_> = descendants
-            .iter()
-            .map(|&descendants| {
-                let growth = (1.0 + descendants as f32).ln() / (1.0 + NODE_HUB_DESCENDANTS).ln();
-                NODE_LEAF_RADIUS + (NODE_HUB_RADIUS - NODE_LEAF_RADIUS) * growth
-            })
-            .collect();
-
-        let mut graph = Graph::new(SimulationParameters {
-            dag_level_distance: Some(DAG_LEVEL_DISTANCE),
-            force_charge: FORCE_CHARGE,
-            settle_after: Some(SETTLE_AFTER),
-            ..Default::default()
-        });
-        // Positions come from `scatter` below, so the initial layout and a restart agree.
-        let nodes: Vec<_> = routes
-            .depth
-            .iter()
-            .enumerate()
-            .map(|(world, depth)| {
-                graph.add_node(NodeData {
-                    // Worlds the origin cannot reach have no depth to share a layer with, so they
-                    // get one of their own past the deepest that does.
-                    level: depth.map_or(furthest + 1.0, |depth| depth as f32),
-                    mass: node_mass(node_radii[world], HUB_REPULSION_DEFAULT),
-                    ..Default::default()
-                })
-            })
-            .collect();
-        // Every connection as it is drawn and as the panel reads it out: which worlds are joined,
-        // and which ways round each joining can be walked. See [`world::connections`].
-        let connections = world::connections(worlds);
-        // Counted off the same connections the edges are built from, so the panel calls a world a
-        // junction on exactly the lines it draws for it.
-        let mut degrees = vec![0; worlds.len()];
-        // How many of those lines are drawn as dashes instead, which is what fixes how many dash
-        // instances there are. See [`EDGE_DASHES`].
-        let mut dashed = 0;
-        for (from, steps) in connections.iter().enumerate() {
-            for step in steps {
-                // Once per connection rather than once per world it joins: both of them carry it,
-                // and one line is drawn for it. Two springs on the same two nodes would pull them
-                // together twice as hard.
-                if step.world <= from {
-                    continue;
-                }
-                let to = step.world;
-                // Stored from the end a player can leave, so the dashes march the way they can
-                // walk. A connection walkable both ways, or neither, keeps the dump's own order:
-                // nothing is drawn on it that a direction would mean anything to.
-                let (from, to) = if step.out.is_none() && step.back.is_some() {
-                    (to, from)
-                } else {
-                    (from, to)
-                };
-                dashed += usize::from(step.one_way());
-                graph.add_edge(
-                    nodes[from],
-                    nodes[to],
-                    EdgeData {
-                        user_data: step.one_way(),
-                    },
-                );
-                degrees[from] += 1;
-                degrees[to] += 1;
-            }
-        }
-
-        // How deep each world is, as a color. Not drawn on the worlds themselves, which carry
-        // pictures: the connections wear it instead. See [`edge_colors`].
-        let depth_colors: Vec<_> = routes
-            .depth
-            .iter()
-            .map(|depth| match depth {
-                Some(depth) => distance_color(*depth as f32 / furthest),
-                None => UNREACHED_COLOR,
-            })
-            .collect();
-        let edge_colors = edge_colors(&graph, &routes, &descendants, &depth_colors);
-        let titles: Vec<world::Title> = worlds.iter().map(world::World::titles).collect();
-        let maps: Vec<Vec<world::Map>> = worlds.iter().map(world::World::maps).collect();
-        // The catalog's own two readings of the dump, built once here: both group every world,
-        // which is not work a frame can afford, and both are ordered for the lists they fill.
-        let (authors, author_of) = dump.authors();
-        let versions = dump.versions();
-        // White, so a picture reaches the screen as itself. Only a selection ever changes them,
-        // dimming everything it does not light along with the rest of the graph.
-        let thumbnail_instances = Instances {
-            transformations: vec![Mat4::identity(); worlds.len()],
-            colors: Some(vec![Srgba::WHITE; worlds.len()]),
-            ..Default::default()
+    /// Builds the graph, once there is a dump to build it out of.
+    ///
+    /// Does nothing until there is: a run that is still fetching one, or that failed to, draws
+    /// [`App::draw_loading`] instead until [`App::draw`] finds the dump has landed and calls this
+    /// again. On a phone it is also called by every [`App::reset`], because the entities are all
+    /// built on a graphics context the framework takes back whenever the app leaves the screen.
+    fn build(&mut self) {
+        let Dump::Ready(dump) = &self.dump else {
+            return;
         };
-        // One instance per solid line, and [`EDGE_DASHES`] of them per one-way one. The colors
-        // are left to the first [`AppEntities::repaint`] below, which is where the same fan-out
-        // has to live anyway.
-        let solid = edge_colors.len() - dashed;
-        let edge_instances = Instances {
-            transformations: vec![Mat4::identity(); solid],
-            colors: Some(vec![Srgba::WHITE; solid]),
-            ..Default::default()
-        };
-        let dash_instances = Instances {
-            transformations: vec![Mat4::identity(); dashed * EDGE_DASHES],
-            colors: Some(vec![Srgba::WHITE; dashed * EDGE_DASHES]),
-            ..Default::default()
-        };
-        let backdrop = ColorMaterial {
-            color: Srgba::WHITE,
-            texture: Some(Texture2DRef::from_cpu_texture(ctx, &panorama_tile())),
-            // Colour only, and no depth test: the quad stands in for the cleared background, so
-            // it must neither occlude the graph nor be occluded by the cleared depth buffer.
-            render_states: RenderStates {
-                write_mask: WriteMask::COLOR,
-                depth_test: DepthTest::Always,
+        let ctx = self.ctx.wctx.as_ref().unwrap();
+        self.data = Some(entities(dump, ctx));
+    }
+}
+
+/// Everything the graph is drawn out of, built from the dump and the context that will draw it.
+///
+/// A free function rather than a method because it reads the dump the app holds and hands back
+/// what the app is about to hold beside it, which is two borrows of one [`App`] that do not
+/// overlap in fact and cannot both be taken in one.
+fn entities(dump: &world::Dump, ctx: &WindowedContext) -> AppEntities {
+    let rng = Rng(0x5eed_1337);
+
+    let worlds = &dump.worlds;
+    // How deep a player has to go to reach each world: see [`world::canonical_routes`]. It
+    // both colors the nodes and, in layered mode, picks the layer each one is pinned to, so
+    // the two always agree.
+    let routes = world::canonical_routes(worlds);
+    let deepest = routes.depth.iter().flatten().copied().max().unwrap_or(0);
+    let furthest = deepest.max(1) as f32;
+    // Sized by how much of the graph hangs off each world, between the two anchors above: a
+    // leaf keeps [`NODE_LEAF_RADIUS`]. The logarithm is what carries the depth: a deep world
+    // with a handful of worlds behind it lands within reach of a shallow one with a hundred,
+    // because the size grows with the order of magnitude of what a world leads to rather than
+    // with the count. See [`world::Routes::descendant_counts`].
+    let descendants = routes.descendant_counts();
+    let node_radii: Vec<_> = descendants
+        .iter()
+        .map(|&descendants| {
+            let growth = (1.0 + descendants as f32).ln() / (1.0 + NODE_HUB_DESCENDANTS).ln();
+            NODE_LEAF_RADIUS + (NODE_HUB_RADIUS - NODE_LEAF_RADIUS) * growth
+        })
+        .collect();
+
+    let mut graph = Graph::new(SimulationParameters {
+        dag_level_distance: Some(DAG_LEVEL_DISTANCE),
+        force_charge: FORCE_CHARGE,
+        settle_after: Some(SETTLE_AFTER),
+        ..Default::default()
+    });
+    // Positions come from `scatter` below, so the initial layout and a restart agree.
+    let nodes: Vec<_> = routes
+        .depth
+        .iter()
+        .enumerate()
+        .map(|(world, depth)| {
+            graph.add_node(NodeData {
+                // Worlds the origin cannot reach have no depth to share a layer with, so they
+                // get one of their own past the deepest that does.
+                level: depth.map_or(furthest + 1.0, |depth| depth as f32),
+                mass: node_mass(node_radii[world], HUB_REPULSION_DEFAULT),
                 ..Default::default()
-            },
-            is_transparent: false,
+            })
+        })
+        .collect();
+    // Every connection as it is drawn and as the panel reads it out: which worlds are joined,
+    // and which ways round each joining can be walked. See [`world::connections`].
+    let connections = world::connections(worlds);
+    // Counted off the same connections the edges are built from, so the panel calls a world a
+    // junction on exactly the lines it draws for it.
+    let mut degrees = vec![0; worlds.len()];
+    // How many of those lines are drawn as dashes instead, which is what fixes how many dash
+    // instances there are. See [`EDGE_DASHES`].
+    let mut dashed = 0;
+    for (from, steps) in connections.iter().enumerate() {
+        for step in steps {
+            // Once per connection rather than once per world it joins: both of them carry it,
+            // and one line is drawn for it. Two springs on the same two nodes would pull them
+            // together twice as hard.
+            if step.world <= from {
+                continue;
+            }
+            let to = step.world;
+            // Stored from the end a player can leave, so the dashes march the way they can
+            // walk. A connection walkable both ways, or neither, keeps the dump's own order:
+            // nothing is drawn on it that a direction would mean anything to.
+            let (from, to) = if step.out.is_none() && step.back.is_some() {
+                (to, from)
+            } else {
+                (from, to)
+            };
+            dashed += usize::from(step.one_way());
+            graph.add_edge(
+                nodes[from],
+                nodes[to],
+                EdgeData {
+                    user_data: step.one_way(),
+                },
+            );
+            degrees[from] += 1;
+            degrees[to] += 1;
+        }
+    }
+
+    // How deep each world is, as a color. Not drawn on the worlds themselves, which carry
+    // pictures: the connections wear it instead. See [`edge_colors`].
+    let depth_colors: Vec<_> = routes
+        .depth
+        .iter()
+        .map(|depth| match depth {
+            Some(depth) => distance_color(*depth as f32 / furthest),
+            None => UNREACHED_COLOR,
+        })
+        .collect();
+    let edge_colors = edge_colors(&graph, &routes, &descendants, &depth_colors);
+    let titles: Vec<world::Title> = worlds.iter().map(world::World::titles).collect();
+    let maps: Vec<Vec<world::Map>> = worlds.iter().map(world::World::maps).collect();
+    // The catalog's own two readings of the dump, built once here: both group every world,
+    // which is not work a frame can afford, and both are ordered for the lists they fill.
+    let (authors, author_of) = dump.authors();
+    let versions = dump.versions();
+    // White, so a picture reaches the screen as itself. Only a selection ever changes them,
+    // dimming everything it does not light along with the rest of the graph.
+    let thumbnail_instances = Instances {
+        transformations: vec![Mat4::identity(); worlds.len()],
+        colors: Some(vec![Srgba::WHITE; worlds.len()]),
+        ..Default::default()
+    };
+    // One instance per solid line, and [`EDGE_DASHES`] of them per one-way one. The colors
+    // are left to the first [`AppEntities::repaint`] below, which is where the same fan-out
+    // has to live anyway.
+    let solid = edge_colors.len() - dashed;
+    let edge_instances = Instances {
+        transformations: vec![Mat4::identity(); solid],
+        colors: Some(vec![Srgba::WHITE; solid]),
+        ..Default::default()
+    };
+    let dash_instances = Instances {
+        transformations: vec![Mat4::identity(); dashed * EDGE_DASHES],
+        colors: Some(vec![Srgba::WHITE; dashed * EDGE_DASHES]),
+        ..Default::default()
+    };
+    let backdrop = ColorMaterial {
+        color: Srgba::WHITE,
+        texture: Some(Texture2DRef::from_cpu_texture(ctx, &panorama_tile())),
+        // Colour only, and no depth test: the quad stands in for the cleared background, so
+        // it must neither occlude the graph nor be occluded by the cleared depth buffer.
+        render_states: RenderStates {
+            write_mask: WriteMask::COLOR,
+            depth_test: DepthTest::Always,
+            ..Default::default()
+        },
+        is_transparent: false,
+    };
+    // Quads rather than cubes, and turned to face the camera every frame: a picture has to be
+    // seen square on to be seen at all, and a cube's own uv coordinates unwrap its six faces
+    // across the image rather than giving each face the whole of it.
+    //
+    // No texture yet: it is the atlas, which is still on its way in. See
+    // [`AppEntities::receive_atlas`].
+    let thumbnails = Gm::new(
+        InstancedMesh::new(ctx, &thumbnail_instances, &CpuMesh::square()),
+        ColorMaterial::default(),
+    );
+    let edges = Gm::new(
+        InstancedMesh::new(ctx, &edge_instances, &CpuMesh::cylinder(8)),
+        ColorMaterial::default(),
+    );
+    // The same shape as a solid line, placed the same way, only shorter: a dash says nothing
+    // by itself, and everything by where it is against the last frame. See
+    // [`AppEntities::march_dashes`].
+    let dashes = Gm::new(
+        InstancedMesh::new(ctx, &dash_instances, &CpuMesh::cylinder(8)),
+        ColorMaterial::default(),
+    );
+
+    let mut data = AppEntities {
+        graph,
+        gesture: None,
+        rng,
+        routes,
+        titles,
+        maps,
+        authors,
+        author_of,
+        versions,
+        selected: None,
+        deepest,
+        right_press: None,
+        menu: None,
+        cursor: None,
+        hover: None,
+        framing: false,
+        frame_route: false,
+        edge_colors,
+        node_radii,
+        hub_repulsion: HUB_REPULSION_DEFAULT,
+        descendants,
+        connections,
+        degrees,
+        backdrop,
+        thumbnails,
+        edges,
+        dashes,
+        thumbnail_instances,
+        edge_instances,
+        dash_instances,
+        atlas: Some(thumbnails::load()),
+        sheet: None,
+        detail: detail::Detail::new(worlds.iter().map(|world| world.image.clone()).collect()),
+        dash_phase: 0.0,
+        // Rebuilt on the first frame either way, because a fresh layout has not settled.
+        billboard: Mat4::identity(),
+    };
+    // The instance colors have not been written yet, only sized. See above.
+    data.repaint();
+    scatter(&mut data);
+    data
+}
+
+impl App {
+    /// The frame drawn while there is no graph: the background, and a word about why.
+    ///
+    /// The whole of the app until the dump lands, and the whole of it for ever if it does not.
+    /// Everything the overlay usually reads is built out of the dump, so none of the panel can be
+    /// laid out here -- only the one message, over the same cleared background the graph is drawn
+    /// on, so that the window does not change colour when the graph arrives.
+    fn draw_loading(&mut self) {
+        let ctx = self.ctx.wctx.as_ref().unwrap();
+        let frame_input = self.ctx.fig.as_mut().unwrap().generate(ctx);
+        let window = self.ctx.window.as_ref().unwrap();
+        let overlay = self.overlay.as_mut().unwrap();
+        let failed = match &self.dump {
+            Dump::Failed(error) => Some(error.as_str()),
+            _ => None,
         };
-        // Quads rather than cubes, and turned to face the camera every frame: a picture has to be
-        // seen square on to be seen at all, and a cube's own uv coordinates unwrap its six faces
-        // across the image rather than giving each face the whole of it.
-        //
-        // No texture yet: it is the atlas, which is still on its way in. See
-        // [`AppEntities::receive_atlas`].
-        let thumbnails = Gm::new(
-            InstancedMesh::new(ctx, &thumbnail_instances, &CpuMesh::square()),
-            ColorMaterial::default(),
-        );
-        let edges = Gm::new(
-            InstancedMesh::new(ctx, &edge_instances, &CpuMesh::cylinder(8)),
-            ColorMaterial::default(),
-        );
-        // The same shape as a solid line, placed the same way, only shorter: a dash says nothing
-        // by itself, and everything by where it is against the last frame. See
-        // [`AppEntities::march_dashes`].
-        let dashes = Gm::new(
-            InstancedMesh::new(ctx, &dash_instances, &CpuMesh::cylinder(8)),
-            ColorMaterial::default(),
-        );
-
-        self.overlay = Some(Overlay::new(
-            event_loop,
-            self.ctx.window.as_ref().unwrap(),
-            ctx,
-        ));
-
-        let data = self.data.insert(AppEntities {
-            graph,
-            gesture: None,
-            rng,
-            routes,
-            titles,
-            maps,
-            authors,
-            author_of,
-            versions,
-            selected: None,
-            deepest,
-            right_press: None,
-            menu: None,
-            cursor: None,
-            hover: None,
-            framing: false,
-            frame_route: false,
-            edge_colors,
-            node_radii,
-            hub_repulsion: HUB_REPULSION_DEFAULT,
-            descendants,
-            connections,
-            degrees,
-            backdrop,
-            thumbnails,
-            edges,
-            dashes,
-            thumbnail_instances,
-            edge_instances,
-            dash_instances,
-            atlas: Some(thumbnails::load()),
-            sheet: None,
-            detail: detail::Detail::new(worlds.iter().map(|world| world.image.clone()).collect()),
-            dash_phase: 0.0,
-            // Rebuilt on the first frame either way, because a fresh layout has not settled.
-            billboard: Mat4::identity(),
+        // The same scale the panel is laid out at, so the message is the size the rest of the
+        // interface will be. See [`Overlay::panel`].
+        overlay.gui.context().set_zoom_factor(overlay.ui_scale);
+        // As in [`Overlay::run`]: the face Japanese needs is not compiled in, and this frame is
+        // the first that may want it.
+        let context = overlay.gui.context().clone();
+        overlay.japanese.serve(&context);
+        overlay.gui.run(window, |ui| {
+            egui::Area::new(egui::Id::new("loading"))
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ui.ctx(), |ui| {
+                    ui.horizontal(|ui| match failed {
+                        // What went wrong is logged in full; on screen it is the one line, since
+                        // there is nothing the reader can do with a URL and a status code beyond
+                        // knowing the server is not answering.
+                        Some(error) => {
+                            ui.label(t!("dump-failed")).on_hover_text(error);
+                        }
+                        None => {
+                            ui.add(egui::Spinner::new());
+                            ui.label(t!("dump-loading"));
+                        }
+                    });
+                });
         });
-        // The instance colors have not been written yet, only sized. See above.
-        data.repaint();
-        scatter(data);
+        frame_input
+            .screen()
+            .clear(ClearState::color_and_depth(
+                BACKGROUND_COLOR[0],
+                BACKGROUND_COLOR[1],
+                BACKGROUND_COLOR[2],
+                1.0,
+                1.0,
+            ))
+            .write::<std::convert::Infallible>(|| {
+                overlay.gui.paint(window);
+                Ok(())
+            })
+            .unwrap();
     }
 
     /// The meat of this module.
     fn draw(&mut self) {
+        if self.data.is_none() {
+            // Looked in on once a frame, and only while there is nothing to draw: the frames
+            // after this one have a graph in them and nothing left to wait for.
+            let arrived = match &self.dump {
+                Dump::Loading(pending) => pending.take(),
+                _ => None,
+            };
+            if let Some(loaded) = arrived {
+                self.dump = match loaded {
+                    Ok(dump) => Dump::Ready(dump),
+                    Err(error) => {
+                        log::error!("{error}");
+                        Dump::Failed(error)
+                    }
+                };
+                self.build();
+            }
+            if self.data.is_none() {
+                self.draw_loading();
+                return;
+            }
+        }
         let ctx = self.ctx.wctx.as_ref().unwrap();
         let mut frame_input = self.ctx.fig.as_mut().unwrap().generate(ctx);
         let window = self.ctx.window.as_ref().unwrap();

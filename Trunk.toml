@@ -1,0 +1,7 @@
+# Trunk's own settings for `just serve`. The one thing here is the dump: the page asks its own
+# host for it -- see `world::url` -- and this is what puts that request through to `dreamweaver`,
+# which has to be running alongside (`just dreamweaver`). A page served by anything else needs the
+# same path proxied the same way.
+[[proxy]]
+rewrite = "/data.json"
+backend = "http://127.0.0.1:5000/data.json"
