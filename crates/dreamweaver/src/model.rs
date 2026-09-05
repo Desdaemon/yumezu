@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::wiki;
+use crate::smw;
 
 use serde::{Deserialize, Serialize};
 
@@ -51,7 +51,7 @@ impl ConnType {
     ///
     /// `None` for a word this does not know, which is how a vocabulary the wiki grows stays
     /// non-fatal: an unrecognised attribute leaves the passage exactly as walkable as it was.
-    pub fn of(attribute: &str, connection: &wiki::Connection) -> Option<(Self, Wording)> {
+    pub fn of(attribute: &str, connection: &smw::Connection) -> Option<(Self, Wording)> {
         let plain = |flag| Some((flag, Wording::None));
         match attribute {
             "No Return" => plain(Self::ONE_WAY),
@@ -78,7 +78,11 @@ impl ConnType {
                 Wording::Words(connection.chance_percentage.clone()?),
             )),
             "Seasonal" => {
-                let season = connection.season_available.as_deref()?;
+                // The first of however many the wiki lists. A passage open in three seasons is
+                // published as open in the first of them: the reader has one word to put beside a
+                // route and four it knows how to translate, and the wrapper narrowed these the
+                // same way.
+                let season = connection.seasons_available.first()?;
                 Some((Self::SEASONAL, Wording::Translated(season.to_owned())))
             }
             _ => None,
@@ -239,7 +243,6 @@ pub struct World {
     pub removed: bool,
     pub secret: bool,
     pub connections: Vec<Connection>,
-    pub images: Vec<String>,
 }
 
 /// A release that changed a world, and what kind of change it was.

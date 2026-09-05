@@ -1,11 +1,11 @@
 //! Building a dump out of what the wiki knows.
 //!
-//! Five fetches come back describing five parts of the same thing -- worlds, the passages between
-//! them, the pictures on their pages, the people credited for them, the releases they arrived in
-//! -- and none of them knows about the others. This is where they are joined into one graph,
-//! measured, and written out in the shape the reader expects.
+//! Four fetches come back describing four parts of the same thing -- worlds, the passages between
+//! them, the people credited for them, the releases they arrived in -- and none of them knows
+//! about the others. This is where they are joined into one graph, measured, and written out in
+//! the shape the reader expects.
 //!
-//! A rebuild does not have to fetch all five. [`Fetched`] keeps the last answers, and a sync that
+//! A rebuild does not have to fetch all four. [`Fetched`] keeps the last answers, and a sync that
 //! knows which pages have been edited re-asks only the parts of the wiki those pages could have
 //! changed -- see [`Refresh`].
 
@@ -13,13 +13,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::depth;
 use crate::model::{ConnType, Connection, Dump, TypeParams, World};
+use crate::smw;
 use crate::versions;
-use crate::wiki;
 
 /// What the last sync fetched, kept so the next one can leave most of it alone.
 ///
 /// Every fetch here is a question about pages: the authors are one page, the releases a handful,
-/// a world's gallery is its own page, and a passage belongs to the page that writes it up. So an
+/// and a passage belongs to the page that writes it up. So an
 /// account of which pages have been edited is also an account of which of these answers can still
 /// be trusted, and a soft sync spends its requests on the rest. On a wiki where a week's editing
 /// touches a dozen worlds, that is two or three requests instead of thirty.
@@ -33,12 +33,11 @@ use crate::wiki;
 /// an empty one and so fetches everything.
 #[derive(Default)]
 pub struct Fetched {
-    authors: Vec<wiki::Author>,
-    releases: Vec<crate::smw::Version>,
-    galleries: Vec<wiki::LocationImages>,
+    authors: Vec<smw::Author>,
+    releases: Vec<smw::Version>,
     /// Passages, in the pieces they were asked in: keyed by the first character of the world they
     /// leave. See [`crate::smw::connections`].
-    passages: BTreeMap<char, Vec<wiki::Connection>>,
+    passages: BTreeMap<char, Vec<smw::Connection>>,
 }
 
 /// How much of the wiki a sync re-reads.
@@ -97,46 +96,33 @@ const VERSION_HISTORY: &str = "Version History";
 /// rebuilt without asking. Everything else in the new dump comes from the wiki or from `fetched`,
 /// which is the wiki as of the last time this asked.
 pub async fn run(
-    client: &wiki::Client,
+    http: &reqwest::Client,
     previous: &Dump,
     refresh: Refresh,
     fetched: &mut Fetched,
-) -> wiki::Result<Dump> {
+) -> smw::Result<Dump> {
     // First and on its own: what the worlds are decides which pieces of the passage query there
-    // are to ask for, and which edited pages were worlds at all.
-    let locations = client.locations().await?;
+    // are to ask for.
+    let locations = smw::locations(http).await?;
     let initials: BTreeSet<char> = locations
         .iter()
         .filter_map(|location| location.title.chars().next())
         .collect();
-    let known: BTreeSet<&str> = locations
-        .iter()
-        .map(|location| location.title.as_str())
-        .collect();
-
     // An empty cache is a run that has just come up: there is nothing to keep, so everything is
     // asked for however little the wiki says has changed.
     let cold = fetched.passages.is_empty();
     let want_authors = cold || refresh.touches(AUTHORS);
     let want_releases = cold || refresh.touches_under(VERSION_HISTORY);
-    // A gallery is the pictures on a world's page, so only an edited world can have changed one.
-    // It is all or nothing, though: the endpoint answers with every world's gallery whatever it is
-    // asked, so one edited world costs the lot -- which is most of what a sync spends.
-    let want_galleries = cold
-        || match &refresh {
-            Refresh::Everything => true,
-            Refresh::Pages(pages) => pages.iter().any(|page| known.contains(page.as_str())),
-        };
     let shards = match cold {
         true => initials.clone(),
         false => refresh.shards(&initials),
     };
 
-    let (authors, releases, galleries, passages) = tokio::try_join!(
-        optional(want_authors, client.authors()),
-        optional(want_releases, client.versions()),
-        optional(want_galleries, client.images()),
-        client.connections(shards.iter().copied()),
+    let shards_count = shards.len();
+    let (authors, releases, passages) = tokio::try_join!(
+        optional(want_authors, smw::authors(http)),
+        optional(want_releases, smw::versions(http)),
+        smw::connections(http, shards),
     )?;
 
     // What came back replaces what it was asked in place of; the rest of the last answer stands.
@@ -145,9 +131,6 @@ pub async fn run(
     }
     if let Some(releases) = releases {
         fetched.releases = releases;
-    }
-    if let Some(galleries) = galleries {
-        fetched.galleries = galleries;
     }
     fetched.passages.extend(passages);
     // A piece with no worlds left in it is a letter the wiki no longer has a world under, and
@@ -165,12 +148,9 @@ pub async fn run(
         }
     }
     tracing::info!(
-        "read {} worlds and {} of {} passage groups; {} galleries {}, {} authors {}, {} releases {}",
+        "read {} worlds and {shards_count} of {} passage groups; {} authors {}, {} releases {}",
         locations.len(),
-        shards.len(),
         initials.len(),
-        fetched.galleries.len(),
-        again(want_galleries),
         fetched.authors.len(),
         again(want_authors),
         fetched.releases.len(),
@@ -179,7 +159,6 @@ pub async fn run(
     Ok(assemble(
         locations,
         fetched.passages.values().flatten(),
-        &fetched.galleries,
         &fetched.authors,
         &fetched.releases,
         previous,
@@ -190,8 +169,8 @@ pub async fn run(
 /// Awaits `work` only if it is wanted, so several conditional fetches can still be run as one.
 async fn optional<T>(
     wanted: bool,
-    work: impl std::future::Future<Output = wiki::Result<T>>,
-) -> wiki::Result<Option<T>> {
+    work: impl std::future::Future<Output = smw::Result<T>>,
+) -> smw::Result<Option<T>> {
     match wanted {
         true => Ok(Some(work.await?)),
         false => Ok(None),
@@ -201,11 +180,10 @@ async fn optional<T>(
 /// Joins the fetches into a dump. Split out from [`run`] so it can be exercised without a
 /// network.
 fn assemble<'a>(
-    locations: Vec<wiki::Location>,
-    connections: impl Iterator<Item = &'a wiki::Connection>,
-    galleries: &[wiki::LocationImages],
-    authors: &[wiki::Author],
-    releases: &[crate::smw::Version],
+    locations: Vec<smw::Location>,
+    connections: impl Iterator<Item = &'a smw::Connection>,
+    authors: &[smw::Author],
+    releases: &[smw::Version],
     previous: &Dump,
     full: bool,
 ) -> Dump {
@@ -296,11 +274,6 @@ fn assemble<'a>(
             .collect()
     };
     let secret = marked_secret(previous);
-    let gallery: HashMap<&str, &Vec<wiki::Image>> = galleries
-        .iter()
-        .map(|gallery| (gallery.title.as_str(), &gallery.images))
-        .collect();
-
     let worlds = locations
         .iter()
         .enumerate()
@@ -345,10 +318,6 @@ fn assemble<'a>(
                 removed: false,
                 secret: secret.contains(location.title.as_str()),
                 connections,
-                images: gallery
-                    .get(location.title.as_str())
-                    .map(|images| images.iter().map(|image| image.url.clone()).collect())
-                    .unwrap_or_default(),
             }
         })
         .collect();
@@ -398,7 +367,7 @@ struct Passage {
 /// what a client's own caches are keyed by, and what the thumbnail atlas is packed in. Worlds the
 /// last dump had keep their relative order; worlds it did not have go on the end, in the order the
 /// store listed them.
-fn in_published_order(locations: Vec<wiki::Location>, previous: &Dump) -> Vec<wiki::Location> {
+fn in_published_order(locations: Vec<smw::Location>, previous: &Dump) -> Vec<smw::Location> {
     let was: HashMap<&str, usize> = previous
         .worlds
         .iter()

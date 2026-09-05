@@ -27,14 +27,14 @@ comes up with the wiki unreachable still serves the last dump it wrote.
 
 ## Where the data comes from
 
-Everything but one thing is the wiki's own store, asked directly through `api.php` -- see
-`src/smw.rs`. A world's infobox, the passages out of it, the people credited for it and the
-releases it lived through are all properties and subobjects, so these are queries for structured
-data and nothing here reads wiki prose.
+All of it is the wiki's own store, asked directly through `api.php` -- see `src/smw.rs`. A world's
+infobox, the passages out of it, the people credited for it and the releases it lived through are
+all properties and subobjects, so these are queries for structured data and nothing here reads wiki
+prose. Nothing is asked of [ynoproject/wikiwrapper] any more.
 
-The exception is the **galleries**: the pictures on a world's page are page content rather than
-properties, and [ynoproject/wikiwrapper] has already done that reading, so `/images` is the one
-endpoint still called.
+The one thing the wrapper answered that the store cannot is the **galleries** -- the pictures on a
+world's page are page content rather than properties -- and they are no longer published. They were
+the whole of what a second host and a second shape of answer were for, and nothing reads them.
 
 Two of the queries exist because the wrapper could not answer them at all, and they are worth
 knowing about:
@@ -66,17 +66,13 @@ the pass costs one small request and stops.
 
 When the answer is not none, the list of pages is also a list of which answers are now stale, and
 only those are asked for again. The author list is one page. The version history is a handful. A
-world's gallery is its own page. A passage belongs to the page of the world it leaves, so an
+passage belongs to the page of the world it leaves, so an
 edited world can only have changed the letter its own title falls under. The worlds themselves are
 re-read every time -- that is one query for all sixteen hundred, and a cache of them would be
 something to reconcile rather than something to skip.
 
-What that saves is requests rather than minutes, and it is worth knowing why. The store answers
-quickly: the worlds take about twenty seconds and all twenty-seven passage groups together about
-thirty. The galleries take two or three minutes, because the wrapper's `/images` hands back fifty
-worlds at a time and ignores every attempt to ask it for fewer -- so a sync that re-reads them at
-all pays for all sixteen hundred, and any edited world makes it re-read them. Until a world's
-gallery can be asked for by name, that is the floor on a sync that has anything to do.
+What that saves is requests rather than minutes: the store answers quickly, with the worlds taking
+about twenty seconds and all twenty-seven passage groups together about thirty.
 
 Two corrections are made to "everything since the dump was built", both because taking the wiki
 literally would lose edits:
@@ -110,7 +106,8 @@ read for, and none of them is in the store: effects and menu themes live in pros
 their pages, and reading those would make this the second program scraping them. The fields stay in
 the shape so a reader written against the reference dump keeps working.
 
-The reference dump also carries a per-world `size`, computed from the dimensions of the RPG Maker
+Per-world `images` is left out as well: it is the gallery on a world's page, which the store does
+not hold at all. The reference dump also carries a per-world `size`, computed from the dimensions of the RPG Maker
 maps a world is built out of. The store publishes which maps those are but not how big they are, so
 the field is left out rather than guessed at.
 

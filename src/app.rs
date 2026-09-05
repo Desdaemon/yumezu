@@ -202,6 +202,13 @@ const ROUTE_COLOR: Srgba = Srgba::new(255, 242, 194, 255);
 /// Brightness left to everything off the highlighted route. Low enough to set the surrounding
 /// graph behind the route, high enough that it stays readable as context.
 const DIMMED_BRIGHTNESS: f32 = 0.25;
+/// How much of its own picture is added back over a world's node while a list row points at it.
+///
+/// Added rather than multiplied, because a lit node is already painted white and there is nothing
+/// left to multiply it by: the brightening is a second pass of the same picture blended on top of
+/// the first. High enough to pick the node out of a crowd at a glance, low enough that the
+/// screenshot is still a screenshot rather than a white patch.
+const POINTED_BRIGHTNESS: f32 = 0.85;
 /// Color for the worlds the origin cannot reach. It is deliberately off the distance ramp. Those
 /// worlds are at no distance at all rather than at a large one, and reading them as the far end
 /// of the ramp would be a lie.
@@ -562,6 +569,9 @@ struct Panel {
     layered: bool,
     /// A world picked out of one of the lists, to be routed to.
     chosen: Option<usize>,
+    /// A world a list row is pointing at, to be brightened where it sits in the graph. At most
+    /// one: the pointer is over one row or none. See [`AppEntities::pointed`].
+    pointed: Option<usize>,
     /// What the menu, a link, or the rocker asked to light, if any of them asked at all. The
     /// inner `None` is the rocker's off position, which asks for nothing to be lit.
     lit: Option<Option<Highlight>>,
@@ -731,6 +741,9 @@ struct AppEntities {
     /// hovers. See [`AppEntities::track_gesture`].
     cursor: Option<PhysicalPoint>,
     hover: Option<usize>,
+    /// The world a sidebar list row is pointing at, brightened where it sits in the graph and
+    /// cleared as soon as the pointer leaves the row. Only ever one: see [`Panel::pointed`].
+    pointed: Option<usize>,
     /// Per world, every connection it has and which ways round it can be walked. The lines are
     /// built from it, and the panel reads a world's ways on out of it. See [`world::connections`].
     connections: Vec<Vec<world::Step>>,
@@ -763,6 +776,10 @@ struct AppEntities {
     /// The worlds: a picture of each on a camera-facing quad. Drawn only once the atlas they
     /// sample has arrived, because until then there is nothing to sample: see [`thumbnails`].
     thumbnails: Gm<InstancedMesh, ColorMaterial>,
+    /// One world's thumbnail again, blended over the node it is already drawn on to brighten it.
+    /// Drawn only while something is [`AppEntities::pointed`] at, and pointed at its cell of the
+    /// atlas by [`AppEntities::aim_glow`].
+    glow: Gm<Mesh, ColorMaterial>,
     edges: Gm<InstancedMesh, ColorMaterial>,
     /// The dashes that stand in for a solid line on a one-way connection, [`EDGE_DASHES`] of them
     /// per connection. See [`AppEntities::march_dashes`].
@@ -941,6 +958,9 @@ impl App {
             1000.0,
         );
         let control = OrbitControl::new(camera.target(), 1.0, 500.0);
+        // Alongside the dump, and nothing here waits on it or holds it: it publishes what it
+        // loads where the app reads it. See `world::load_pages`.
+        drop(fetch::spawn(world::load_pages()));
 
         Self {
             ctx: AppContext::default(),
@@ -1134,6 +1154,33 @@ fn entities(dump: &world::Dump, ctx: &WindowedContext) -> AppEntities {
         InstancedMesh::new(ctx, &thumbnail_instances, &CpuMesh::square()),
         ColorMaterial::default(),
     );
+    // The same quad again, added to what is already on the screen rather than covering it: a lit
+    // node is drawn white, so there is no multiplier left that would make it brighter. No texture
+    // yet either, and the same one the thumbnails sample when it arrives.
+    let glow = Gm::new(
+        Mesh::new(ctx, &CpuMesh::square()),
+        ColorMaterial {
+            color: scaled(Srgba::WHITE, POINTED_BRIGHTNESS),
+            texture: None,
+            render_states: RenderStates {
+                // Depth read but not written: the quad stands in front of the node it brightens,
+                // and a node genuinely in front of that one still hides it.
+                write_mask: WriteMask::COLOR,
+                // Equal passes, because at the distances this graph is read from the lift toward
+                // the camera is smaller than one step of the depth buffer. The quad is never
+                // *behind* the node it copies -- it is lifted from it -- so the two depths
+                // quantise to either less or the same, and the strict test the default gives
+                // would drop the glow on exactly the frames the rounding went the other way.
+                // That is the flicker, and this is the whole of the fix: the lift keeps the two
+                // apart where there is precision to keep them apart, and this keeps them drawn
+                // where there is not.
+                depth_test: DepthTest::LessOrEqual,
+                blend: Blend::ADD,
+                ..Default::default()
+            },
+            is_transparent: true,
+        },
+    );
     let edges = Gm::new(
         InstancedMesh::new(ctx, &edge_instances, &CpuMesh::cylinder(8)),
         ColorMaterial::default(),
@@ -1162,6 +1209,7 @@ fn entities(dump: &world::Dump, ctx: &WindowedContext) -> AppEntities {
         menu: None,
         cursor: None,
         hover: None,
+        pointed: None,
         framing: false,
         frame_route: false,
         edge_colors,
@@ -1172,6 +1220,7 @@ fn entities(dump: &world::Dump, ctx: &WindowedContext) -> AppEntities {
         degrees,
         backdrop,
         thumbnails,
+        glow,
         edges,
         dashes,
         thumbnail_instances,
@@ -1376,6 +1425,9 @@ impl App {
         // about how much of the atlas the screen is asking for.
         let magnified = data.magnified(&self.statics.camera, frame_input.viewport);
         data.detail.track(ctx, &magnified);
+        // Every frame likewise, and after the instances it stands on: a turn of the camera moves
+        // the quad it is copied from without moving the layout.
+        data.aim_glow(&self.statics.camera);
 
         if let Some(texture) = data.backdrop.texture.as_mut() {
             texture.transformation = panorama_transform(
@@ -1404,7 +1456,10 @@ impl App {
                     .into_iter()
                     .chain(&data.dashes)
                     .chain(data.drawn_thumbnails())
-                    .chain(data.detail.drawn()),
+                    .chain(data.detail.drawn())
+                    // Last of the three, because it brightens whichever of the other two drew the
+                    // world it is over.
+                    .chain(data.drawn_glow()),
                 &[],
             )
             // Over the scene, into the same target, which is what makes it an overlay.
@@ -1465,6 +1520,7 @@ impl Overlay {
             ui_scale: self.ui_scale,
             layered: parameters.dag_level_distance.is_some(),
             chosen: None,
+            pointed: None,
             lit: None,
             menu_taken: false,
             wants_pointer: false,
@@ -1573,6 +1629,9 @@ impl Overlay {
         if let Some(world) = panel.chosen {
             data.select(Some(Highlight::Route(world)));
         }
+        // Every frame, cleared included: the row stops pointing by no longer being hovered, which
+        // is a frame that says nothing rather than a frame that says to stop.
+        data.pointed = panel.pointed;
         // Framing again rather than only from here on: the button is pressed to be taken there
         // now, whether or not the camera had already arrived where it was.
         if panel.refit {
@@ -1659,14 +1718,16 @@ impl<'a> PanelData<'a> {
             // for nobody is work every frame would pay for.
             authors: match sidebar.tab {
                 Tab::Authors => matching(
-                    data.authors.iter().map(|by| by.name.as_str()),
+                    data.authors.iter().map(|by| by.name.names()),
                     &sidebar.authors,
                 ),
                 _ => Vec::new(),
             },
             versions: match sidebar.tab {
                 Tab::Versions => matching(
-                    data.versions.iter().map(|version| version.name.as_str()),
+                    data.versions
+                        .iter()
+                        .map(|version| std::iter::once(version.name.as_str())),
                     &sidebar.versions,
                 ),
                 _ => Vec::new(),
@@ -1760,15 +1821,8 @@ impl Panel {
         ui.separator();
         search_box(ui, search, "worlds", t!("search-worlds"));
         for &world in &read.candidates {
-            if ui
-                .selectable_label(
-                    read.selected.and_then(Highlight::world) == Some(world),
-                    data.titles[world].show(),
-                )
-                .clicked()
-            {
-                self.chosen = Some(world);
-            }
+            let selected = read.selected.and_then(Highlight::world) == Some(world);
+            self.world_row(ui, world, selected, data.titles[world].show());
         }
         ui.separator();
         self.selection(ui, read);
@@ -1805,11 +1859,13 @@ impl Panel {
             let title = data.titles[step.world].show();
             ui.horizontal(|ui| {
                 ui.label(step.arrow());
-                if ui
+                let row = ui
                     .selectable_label(read.selected == Some(lit), title)
-                    .on_hover_text(walk_of(step))
-                    .clicked()
-                {
+                    .on_hover_text(walk_of(step));
+                if row.hovered() {
+                    self.pointed = Some(step.world);
+                }
+                if row.clicked() {
                     if read.selected == Some(lit) {
                         self.lit = Some(Some(Highlight::Route(world)));
                     } else {
@@ -1833,7 +1889,11 @@ impl Panel {
             if ui
                 .selectable_label(
                     read.selected == Some(Highlight::Author(author)),
-                    t!("author-row", name = &by.name, worlds = by.worlds.len()),
+                    t!(
+                        "author-row",
+                        name = by.name.show(),
+                        worlds = by.worlds.len()
+                    ),
                 )
                 .clicked()
             {
@@ -1925,11 +1985,7 @@ impl Panel {
                 .on_hover_text(t!("menu-open-wiki"))
                 .clicked()
             {
-                if speaking_japanese() {
-                    open_in_browser(&world::yume2kki_t_url(data.titles[world].show()));
-                } else {
-                    open_in_browser(&world::wiki_url(&data.titles[world].en));
-                }
+                open_in_browser(&data.titles[world].wiki_url());
             }
             // Only where there is one to show: a few hundred worlds have never been drawn, and a
             // button that opened an empty window on them would say nothing this does not.
@@ -1953,13 +2009,20 @@ impl Panel {
         if speaking_japanese() {
             ui.horizontal(|ui| {
                 ui.label("英名");
-                ui.strong(&data.titles[world].en);
+                let link = world::wiki_url(&data.titles[world].en);
+                if ui
+                    .hyperlink_to(&data.titles[world].en, &link)
+                    .on_hover_text("海外wikiで見る")
+                    .clicked()
+                {
+                    open_in_browser(&link);
+                }
             });
         }
         ui.horizontal(|ui| {
             ui.label(t!("world-author"));
             if ui
-                .link(&data.authors[data.author_of[world]].name)
+                .link(data.authors[data.author_of[world]].name.show())
                 .on_hover_text(t!("world-author-hint"))
                 .clicked()
             {
@@ -2035,6 +2098,32 @@ impl Panel {
         }
     }
 
+    /// One world in a list: pointed at where it stands in the graph while the pointer is over the
+    /// row, and gone to when the row is clicked.
+    ///
+    /// Every list of worlds in the panel is drawn through here, so all of them point alike. The
+    /// one list that is not is the ways on from a world -- see [`Self::forward_connections`],
+    /// whose rows are connections rather than worlds, and which lights the passage rather than
+    /// either end of it.
+    ///
+    /// [`Self::pointed`] is written rather than merged: the loop leaves the last hovered row
+    /// standing, and egui hovers at most one row at a time anyway.
+    fn world_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        world: usize,
+        selected: bool,
+        text: impl Into<egui::WidgetText>,
+    ) {
+        let row = ui.selectable_label(selected, text);
+        if row.hovered() {
+            self.pointed = Some(world);
+        }
+        if row.clicked() {
+            self.chosen = Some(world);
+        }
+    }
+
     /// What is lit, read out: the route to it, what hangs off it, or the author it is credited to.
     fn selection(&mut self, ui: &mut egui::Ui, read: &PanelData) {
         let data = read.data;
@@ -2055,8 +2144,8 @@ impl Panel {
                     self.refit |= ui.button(icon).on_hover_text(hint).clicked();
                 });
                 // Origin first, so the list reads in the order it is walked.
-                for (step, &world) in read.route.iter().rev().enumerate() {
-                    ui.monospace(format!("{step:>2}  {}", data.titles[world].show()));
+                for &world in read.route.iter().rev() {
+                    self.world_row(ui, world, false, data.titles[world].show());
                 }
             }
             // The connection is the subject, but the world it is walked from is still what the
@@ -2095,20 +2184,17 @@ impl Panel {
                         ..NOTABLE_HUB_CONNECTIONS => t!("dead-end"),
                         _ => t!("junction"),
                     };
-                    if ui
-                        .selectable_label(
-                            false,
-                            t!(
-                                "notable-world",
-                                title = data.titles[world].show(),
-                                kind = kind,
-                                degree = degree
-                            ),
-                        )
-                        .clicked()
-                    {
-                        self.chosen = Some(world);
-                    }
+                    self.world_row(
+                        ui,
+                        world,
+                        false,
+                        t!(
+                            "notable-world",
+                            title = data.titles[world].show(),
+                            kind = kind,
+                            degree = degree
+                        ),
+                    );
                 }
                 ui.separator();
                 self.forward_connections(ui, read, world);
@@ -2118,19 +2204,14 @@ impl Panel {
             Some(Highlight::Author(author)) => {
                 let by = &data.authors[author];
                 ui.horizontal(|ui| {
-                    ui.strong(&by.name);
+                    ui.strong(by.name.show());
                     if ui.button(ICON_OPEN_IN_NEW).clicked() {
-                        open_in_browser(&world::author_url(&by.name));
+                        open_in_browser(&by.wiki_url());
                     }
                 });
                 ui.label(worlds(read.listed.len()));
                 for &world in &read.listed {
-                    if ui
-                        .selectable_label(false, data.titles[world].show())
-                        .clicked()
-                    {
-                        self.chosen = Some(world);
-                    }
+                    self.world_row(ui, world, false, data.titles[world].show());
                 }
             }
             // A release is a list like an author's work is, and read the same way: what it
@@ -2143,12 +2224,7 @@ impl Panel {
                 }
                 ui.label(t!("version-added", worlds = worlds(read.listed.len())));
                 for &world in &read.listed {
-                    if ui
-                        .selectable_label(false, data.titles[world].show())
-                        .clicked()
-                    {
-                        self.chosen = Some(world);
-                    }
+                    self.world_row(ui, world, false, data.titles[world].show());
                 }
             }
             // A layer is a shell rather than a list: it is read off the graph, so the panel only
@@ -2157,12 +2233,7 @@ impl Panel {
                 ui.strong(t!("layer-depth", depth = depth));
                 ui.label(worlds(read.listed.len()));
                 for &world in &read.listed {
-                    if ui
-                        .selectable_label(false, data.titles[world].show())
-                        .clicked()
-                    {
-                        self.chosen = Some(world);
-                    }
+                    self.world_row(ui, world, false, data.titles[world].show());
                 }
             }
         }
@@ -2237,20 +2308,20 @@ impl Panel {
                 egui::Frame::menu(ui.style()).show(ui, |ui| {
                     ui.set_max_width(POPUP_WIDTH);
                     ui.strong(data.titles[world].show());
-                    ui.label(&data.authors[data.author_of[world]].name);
+                    ui.label(data.authors[data.author_of[world]].name.show());
                     if data.descendants[world] > 0 && ui.button(t!("menu-descendants")).clicked() {
                         self.lit = Some(Some(Highlight::Descendants(world)));
                     }
                     if ui.button(t!("menu-open-wiki")).clicked() {
-                        if speaking_japanese() {
-                            open_in_browser(&world::yume2kki_t_url(data.titles[world].show()));
-                        } else {
-                            open_in_browser(&world::wiki_url(&data.titles[world].en));
-                        }
+                        open_in_browser(&data.titles[world].wiki_url());
                         self.menu_taken = true;
                     }
                     if speaking_japanese() && ui.button("海外wikiで見る").clicked() {
                         open_in_browser(&world::wiki_url(&data.titles[world].en));
+                        self.menu_taken = true;
+                    }
+                    if !data.maps[world].is_empty() && ui.button(t!("world-map-hint")).clicked() {
+                        self.mapped = Some(world);
                         self.menu_taken = true;
                     }
                 });
@@ -2274,7 +2345,7 @@ impl Panel {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.set_max_width(POPUP_WIDTH);
                     ui.strong(read.data.titles[world].show());
-                    ui.label(&read.data.authors[read.data.author_of[world]].name);
+                    ui.label(read.data.authors[read.data.author_of[world]].name.show());
                 });
             });
     }
@@ -3018,9 +3089,13 @@ impl AppEntities {
         };
         self.thumbnail_instances.texture_transformations = Some(cells);
         self.thumbnails.set_instances(&self.thumbnail_instances);
+        // One upload, sampled by both: a [Texture2DRef] is a handle over a shared texture, so the
+        // clone costs a Mat3 and an atomic rather than a second copy of the atlas.
+        let atlas = Texture2DRef::from_cpu_texture(context, &atlas);
+        self.glow.material.texture = Some(atlas.clone());
         // Last, because it is what [`Self::drawn_thumbnails`] reads to decide the quads are ready
         // to be drawn at all.
-        self.thumbnails.material.texture = Some(Texture2DRef::from_cpu_texture(context, &atlas));
+        self.thumbnails.material.texture = Some(atlas);
     }
 
     /// The thumbnail quads, once they have an atlas to sample. Nothing before that: an untextured
@@ -3031,6 +3106,41 @@ impl AppEntities {
             .texture
             .is_some()
             .then_some(&self.thumbnails as &dyn Object)
+    }
+
+    /// Stands the glow quad over the node a list row is pointing at, on that world's cell of the
+    /// atlas.
+    ///
+    /// The node's own quad is taken rather than worked out again: it is already turned to face the
+    /// camera and already the right size, and standing the glow anywhere else would brighten a
+    /// different shape than the one on the screen. Only the lift toward the camera is added, so
+    /// the two are not coplanar and the depth test does not pick between them per pixel -- the
+    /// same trick, and the same reason, as [`detail::LIFT`]. Twice as far, because a magnified
+    /// world already sits one lift in front and the glow is over that too.
+    ///
+    /// A lift proportional to a node is small next to how far away the graph is read from, so it
+    /// is not on its own enough to clear the depth buffer's own rounding; the test the quad is
+    /// drawn under is what makes that harmless. See its `depth_test`.
+    fn aim_glow(&mut self, camera: &Camera) {
+        let Some(world) = self.pointed else { return };
+        let Some(cells) = self.thumbnail_instances.texture_transformations.as_ref() else {
+            return;
+        };
+        let Some(quad) = self.thumbnail_instances.transformations.get(world) else {
+            return;
+        };
+        let lift = camera.view_direction() * (self.node_radii[world] * detail::LIFT * 2.0);
+        let quad = Mat4::from_translation(-lift) * quad;
+        self.glow.set_transformation(quad);
+        if let Some(texture) = self.glow.material.texture.as_mut() {
+            texture.transformation = cells[world];
+        }
+    }
+
+    /// The glow quad, while there is a world to brighten and an atlas to brighten it out of.
+    fn drawn_glow(&self) -> Option<&dyn Object> {
+        let ready = self.pointed.is_some() && self.glow.material.texture.is_some();
+        ready.then_some(&self.glow as &dyn Object)
     }
 
     /// Every world the view is asking more of than the atlas holds, widest on screen first.
@@ -3103,7 +3213,10 @@ fn drawn_width(camera: &Camera, radius: f32, position: Vec3) -> f32 {
 /// much name is left over. Uncut, unlike that one: these lists are short enough to read down, and
 /// they are already kept in the order they are worth being read down in. See
 /// [`world::Dump::authors`] and [`world::Dump::versions`].
-fn matching<'a>(names: impl Iterator<Item = &'a str>, needle: &str) -> Vec<usize> {
+fn matching<'a>(
+    names: impl Iterator<Item = impl Iterator<Item = &'a str>>,
+    needle: &str,
+) -> Vec<usize> {
     let needle = needle.trim().to_lowercase();
     if needle.is_empty() {
         return (0..names.count()).collect();
@@ -3111,8 +3224,12 @@ fn matching<'a>(names: impl Iterator<Item = &'a str>, needle: &str) -> Vec<usize
     let mut hits: Vec<_> = names
         .enumerate()
         .filter_map(|(at, name)| {
-            let found = name.to_lowercase().find(&needle)?;
-            Some((found, name.len(), at))
+            // Whichever of an entry's names fits best, so someone reading in one language still
+            // finds what they typed in the other.
+            let (found, length) = name
+                .filter_map(|name| Some((name.to_lowercase().find(&needle)?, name.len())))
+                .min()?;
+            Some((found, length, at))
         })
         .collect();
     hits.sort_unstable();

@@ -34,7 +34,6 @@ mod smw;
 mod store;
 mod sync;
 mod versions;
-mod wiki;
 
 /// Where the dump is kept, and so what a run with no `--data` reads and writes.
 const DATA: &str = "data.json";
@@ -50,8 +49,8 @@ const LISTEN: &str = "127.0.0.1:5000";
 /// more passes each covering less, not more of the wiki read.
 const SYNC_EVERY: u64 = 6;
 
-/// What the server hands to its handlers: the published dump, the client that refreshes it, and
-/// what the last refresh already fetched.
+/// What the server hands to its handlers: the published dump, the HTTP client the wiki is asked
+/// through, and what the last refresh already fetched.
 ///
 /// The lock around that last part is also what keeps two refreshes from running at once, which
 /// matters more than the cache does: a scheduled sync and a `POST /update` arriving together
@@ -59,7 +58,7 @@ const SYNC_EVERY: u64 = 6;
 #[derive(Clone)]
 struct Server {
     store: Arc<store::Store>,
-    wiki: wiki::Client,
+    http: reqwest::Client,
     fetched: Arc<tokio::sync::Mutex<sync::Fetched>>,
 }
 
@@ -80,7 +79,7 @@ async fn main() -> std::process::ExitCode {
 
     let server = Server {
         store: Arc::new(store::Store::open(&options.data)),
-        wiki: wiki::Client::new(),
+        http: reqwest::Client::new(),
         fetched: Arc::default(),
     };
     serve(server, options).await;
@@ -149,14 +148,14 @@ enum Sync {
 ///
 /// `Ok(None)` means a soft sync found nothing to do, which is not a failure and not a dump: the
 /// one already published is still the right one, down to the byte.
-async fn refresh(server: &Server, sync: Sync) -> wiki::Result<Option<usize>> {
+async fn refresh(server: &Server, sync: Sync) -> smw::Result<Option<usize>> {
     let mut fetched = server.fetched.lock().await;
     let previous = server.store.snapshot();
     let plan = match plan(server, sync, &previous.dump).await {
         Some(plan) => plan,
         None => return Ok(None),
     };
-    let dump = sync::run(&server.wiki, &previous.dump, plan, &mut fetched).await?;
+    let dump = sync::run(&server.http, &previous.dump, plan, &mut fetched).await?;
     Ok(Some(server.store.publish(dump).dump.worlds.len()))
 }
 
@@ -181,7 +180,7 @@ async fn plan(server: &Server, sync: Sync, previous: &model::Dump) -> Option<syn
         tracing::info!("the dump is older than the wiki's memory of what it changed; reading all");
         return Some(sync::Refresh::Everything);
     };
-    match server.wiki.changed_since(&since).await {
+    match smw::changed_since(&server.http, &since).await {
         Ok(pages) if pages.is_empty() => None,
         Ok(pages) => {
             tracing::info!("{} pages edited since {since}", pages.len());

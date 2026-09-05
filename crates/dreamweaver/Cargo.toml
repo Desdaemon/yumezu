@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-# The wiki is reached through ynoproject's wrapper, which answers in JSON and pages with a
-# `continueKey`, so talking to it needs nothing but a transport and a deserializer -- see
-# `src/wiki.rs`. `rustls` explicitly: the default is the platform verifier, which is right for the
+# The wiki is asked over its own `api.php`, which answers in JSON, so talking to it needs nothing
+# but a transport and a deserializer -- see `src/smw.rs`. `rustls` explicitly: the default is the platform verifier, which is right for the
 # app but drags a native TLS stack into a server build that has no use for one.
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "http2", "query", "rustls"] }
 # What a passage between two worlds is like is a set of independent flags the reader gets back out

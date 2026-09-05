@@ -77,7 +77,7 @@ notable-world = { $title } ({ $kind }、接続 { $degree })
 author-row = { $name } ({ $worlds })
 version-row = { $name } ({ $worlds })
 version-row-dated = { $name } ({ $worlds }, { $released })
-version-released = { $released } 公開
+version-released = { $released } 実装
 version-added = { $worlds } 追加
 layer-depth = 深さ { $depth }
 

@@ -22,6 +22,21 @@ use super::i18n::t;
 #[cfg(not(target_family = "wasm"))]
 const DUMP: &str = "http://127.0.0.1:5000/data.json";
 
+/// Translations of authors to their yume2kki-t tag.
+/// Rightfully these are corrections that should eventually be done on yume.wiki.
+static JAPANESE_AUTHOR_OVERRIDES: phf::Map<&str, &str> = phf::phf_map! {
+    "Bean" => "bean",
+    "窯良" => "窯良(oneirokamara)",
+    "コンテンツ" => "kontentsu",
+    "Ouri" => "ouri",
+    "sniperbob" => "Sniperbob",
+    "Mokaccino" => "Moka",
+    "◆gH8PoF17WqX" => "Ferdy",
+    "Nightmare" => "†Nightmare†",
+    "tKp9vEGEfhCD" => "◆tKp9vEGEfhCD",
+    "Nulsdodage" => "nulsdodage"
+};
+
 /// The dump as it is published: the worlds, and the release history the wiki dates them by.
 #[derive(Deserialize)]
 pub struct Dump {
@@ -31,6 +46,19 @@ pub struct Dump {
     /// catalog is built out of [`Dump::versions`] rather than out of this directly.
     #[serde(rename = "versionInfoData")]
     releases: Vec<Release>,
+    /// Everyone the wiki credits, and how the game itself writes their name where the two
+    /// differ. Read only for those Japanese names: who made what is settled by the worlds
+    /// themselves, in [`World::author`]. See [`Dump::authors`].
+    #[serde(rename = "authorInfoData", default)]
+    credits: Vec<Credit>,
+}
+
+/// One name the wiki credits, in each of the languages it publishes it in.
+#[derive(Deserialize)]
+struct Credit {
+    name: String,
+    #[serde(rename = "nameJP")]
+    name_jp: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -95,11 +123,29 @@ impl Title {
     /// not have to be reading in the other language to find it. `needle` is expected already
     /// lowercased, since one is matched against every world.
     pub fn find(&self, needle: &str) -> Option<(usize, usize)> {
+        self.names()
+            .filter_map(|name| Some((name.to_lowercase().find(needle)?, name.len())))
+            .min()
+    }
+
+    /// Where to read about this: the Japanese wiki while the app speaks Japanese and there is a
+    /// Japanese name to look up, and the English wiki otherwise.
+    ///
+    /// The two wikis name their pages after their own name for a world, so a name is only ever
+    /// asked of the wiki that wrote it: the few dozen worlds the dump leaves unnamed in Japanese
+    /// have no page on the Japanese wiki to open.
+    pub fn wiki_url(&self) -> String {
+        match &self.jp {
+            Some(jp) if super::i18n::speaking_japanese() => yume2kki_t_url(jp),
+            _ => wiki_url(&self.en),
+        }
+    }
+
+    /// Every name this is known by, English first. What a search reads.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
         [Some(self.en.as_str()), self.jp.as_deref()]
             .into_iter()
             .flatten()
-            .filter_map(|name| Some((name.to_lowercase().find(needle)?, name.len())))
-            .min()
     }
 }
 
@@ -163,10 +209,27 @@ pub struct Version {
 }
 
 /// Someone the wiki credits, and everything credited to them.
+///
+/// Both wikis list one person's whole body of work, but they keep it in different shapes, so
+/// which of them to open is [`Author::wiki_url`]'s to answer rather than the caller's.
 pub struct Author {
-    pub name: String,
+    /// Their name, in each language the dump gives one. Named the same way a world is, and read
+    /// the same way: the English one addresses their wiki page, either one finds them.
+    pub name: Title,
     /// In world order.
     pub worlds: Vec<usize>,
+}
+
+impl Author {
+    /// Links to yume.wiki or yume2kki-t as approproiate.
+    pub fn wiki_url(&self) -> String {
+        if super::i18n::speaking_japanese() {
+            let name = self.name.show();
+            yume2kki_t_author_url(JAPANESE_AUTHOR_OVERRIDES.get(name).copied().unwrap_or(name))
+        } else {
+            author_url(&self.name.en)
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -621,12 +684,26 @@ impl Dump {
     /// most behind them. Ties break by name, so the order is fixed rather than however the worlds
     /// happened to be listed.
     pub fn authors(&self) -> (Vec<Author>, Vec<usize>) {
+        // Only where the two names differ: the dump gives a Japanese name for everyone it
+        // credits, and for most of them it is the English one over again, which is nothing to
+        // show or to search twice.
+        let jp: std::collections::HashMap<&str, &str> = self
+            .credits
+            .iter()
+            .filter_map(|credit| {
+                let name_jp = credit.name_jp.as_deref()?;
+                (name_jp != credit.name).then_some((credit.name.as_str(), name_jp))
+            })
+            .collect();
         let mut at = std::collections::HashMap::new();
         let mut authors: Vec<Author> = Vec::new();
         for (world, by) in self.worlds.iter().enumerate() {
             let author = *at.entry(by.author.as_str()).or_insert_with(|| {
                 authors.push(Author {
-                    name: by.author.clone(),
+                    name: Title {
+                        en: by.author.clone(),
+                        jp: jp.get(by.author.as_str()).map(|&name| name.to_owned()),
+                    },
                     worlds: Vec::new(),
                 });
                 authors.len() - 1
@@ -637,7 +714,7 @@ impl Dump {
             b.worlds
                 .len()
                 .cmp(&a.worlds.len())
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                .then_with(|| a.name.en.to_lowercase().cmp(&b.name.en.to_lowercase()))
         });
 
         // After the sort, so a world names where its author ended up rather than where they were
@@ -677,16 +754,142 @@ pub fn wiki_url(title: &str) -> String {
     url
 }
 
+/// The Japanese wiki, which is a different wiki with pages of its own rather than a translation
+/// of the English one.
+const YUME2KKI_T: &str = "https://wikiwiki.jp/yume2kki-t/";
+
+/// Where YNOproject keeps the list of what that wiki calls each place, which is what the game's
+/// own client addresses it by. See [`Pages`].
+const YNOLOCATIONS: &str =
+    "https://raw.githubusercontent.com/ynoproject/ynolocations/refs/heads/master/2kki/ja.json";
+
+/// Every world whose Japanese page is not simply named after it: an area the wiki writes up
+/// inside another world's page, or a name it files under a longer path. A few dozen, out of the
+/// fifteen hundred the dump names in Japanese.
+type Pages = std::collections::HashMap<String, String>;
+
+/// The overrides, once they have arrived. Empty until then -- see [`load_pages`].
+static PAGES: std::sync::OnceLock<Pages> = std::sync::OnceLock::new();
+
+/// Fetches the location list and keeps what [`yume2kki_t_url`] reads out of it.
+///
+/// Started beside the dump rather than on the first Japanese link, because a link is opened from
+/// a click and a click cannot wait: on the page, a window opened after the gesture has passed is
+/// a popup the browser blocks. A link clicked in the first moment of a run is therefore addressed
+/// without the list, which is the right address for all but the few dozen worlds in it.
+///
+/// Failure is a warning and nothing more, for the same reason. The list is served with an `ETag`
+/// and a `max-age`, so a second run mostly revalidates rather than downloads -- see `fetch`.
+pub async fn load_pages() {
+    let pages = match download(YNOLOCATIONS).await {
+        Ok(json) => parse_pages(&json),
+        Err(error) => {
+            log::warn!("cannot reach {YNOLOCATIONS}: {error}");
+            return;
+        }
+    };
+    log::info!(
+        "{} japanese pages are named after something else",
+        pages.len()
+    );
+    let _ = PAGES.set(pages);
+}
+
+/// Reads the list: the pages named twice, and nothing else it says.
+///
+/// It names places by map rather than by world, and most of it is which map is which, which this
+/// has no use for. The pairs it does read are nested several ways -- a map may name one place,
+/// several, or a different one per map it leads on from -- and none of that nesting says anything
+/// either, so the document is walked rather than modelled.
+fn parse_pages(json: &str) -> Pages {
+    let mut pages = Pages::new();
+    let Ok(list) = serde_json::from_str::<serde_json::Value>(json) else {
+        log::warn!("{YNOLOCATIONS} is not JSON");
+        return pages;
+    };
+    // Whole-name overrides first, so a per-map one wins where the list gives both.
+    if let Some(titles) = list["locationUrlTitles"].as_object() {
+        for (title, page) in titles {
+            if let Some(page) = page.as_str() {
+                pages.insert(title.clone(), page.to_owned());
+            }
+        }
+    }
+    collect_url_titles(&list["mapLocations"], &mut pages);
+    pages
+}
+
+/// Every `title`/`urlTitle` pair anywhere under `value`. See [`parse_pages`].
+fn collect_url_titles(value: &serde_json::Value, pages: &mut Pages) {
+    match value {
+        serde_json::Value::Object(fields) => match (fields.get("title"), fields.get("urlTitle")) {
+            (Some(serde_json::Value::String(title)), Some(serde_json::Value::String(page))) => {
+                pages.insert(title.clone(), page.clone());
+            }
+            _ => {
+                for nested in fields.values() {
+                    collect_url_titles(nested, pages);
+                }
+            }
+        },
+        serde_json::Value::Array(entries) => {
+            for nested in entries {
+                collect_url_titles(nested, pages);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Where a world's page sits on the Japanese wiki, given its Japanese name.
 pub fn yume2kki_t_url(title: &str) -> String {
-    let mut url = String::from("https://wikiwiki.jp/yume2kki-t/");
-    append_encoded(title, &mut url);
+    page_url(PAGES.get().unwrap_or(&Pages::new()), title)
+}
+
+/// The address, given the overrides to read it against. An override may name an anchor within a
+/// page as well as the page, and that `#` has to stay a `#`.
+fn page_url(pages: &Pages, title: &str) -> String {
+    let page = pages.get(title).map_or(title, String::as_str);
+    let (page, anchor) = match page.split_once('#') {
+        Some((page, anchor)) => (page, Some(anchor)),
+        None => (page, None),
+    };
+    let mut url = String::from(YUME2KKI_T);
+    append_encoded(page, &mut url);
+    if let Some(anchor) = anchor {
+        url.push('#');
+        append_encoded(anchor, &mut url);
+    }
     url
 }
 
+/// Where everything one person made is listed on the English wiki, which files it as a category.
 pub fn author_url(author: &str) -> String {
     let mut url = String::from("https://yume.wiki/Category:");
     append_encoded(author, &mut url);
     url
+}
+
+/// The same listing on the Japanese wiki, which tags a world's page with its author's name
+/// rather than giving each author a page: what there is to open is the search for the tag.
+pub fn yume2kki_t_author_url(author: &str) -> String {
+    let mut url = format!("{YUME2KKI_T}::cmd/taglist?tag=");
+    // The wiki tags with the name and the honorific together, and this is a query rather than a
+    // path, so the name is encoded as one -- a space stays a space rather than becoming the
+    // underscore a page name would want.
+    append_query_encoded(author, &mut url);
+    append_query_encoded("氏", &mut url);
+    url
+}
+
+fn append_query_encoded(input: &str, output: &mut String) {
+    for byte in input.bytes() {
+        match byte {
+            byte if byte.is_ascii_alphanumeric() => output.push(byte as char),
+            b'-' | b'_' | b'.' | b'~' => output.push(byte as char),
+            byte => output.push_str(&format!("%{byte:02X}")),
+        }
+    }
 }
 
 /// The canonical route from every world back to world 0, Urotsuki's Room.
@@ -1068,6 +1271,15 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].worlds.len() >= pair[1].worlds.len())
         );
+        // The credits join onto the worlds by name, so a change in either spelling would show up
+        // as nobody having a Japanese name at all.
+        assert!(
+            authors
+                .iter()
+                .filter(|by| by.name.names().count() == 2)
+                .count()
+                > 10
+        );
 
         // Not every world: a handful are undated, and those belong to no release.
         let versions = dump.versions();
@@ -1103,6 +1315,72 @@ mod tests {
         assert_eq!(
             super::wiki_url("Fluorescent Cité"),
             "https://yume.wiki/2kki/Fluorescent_Cit%C3%A9"
+        );
+    }
+
+    /// The Japanese wiki has no page per author: it tags each world's page with who made it, so
+    /// the listing is a search for that tag, honorific and all.
+    #[test]
+    fn an_author_addresses_a_tag_on_the_japanese_wiki() {
+        assert_eq!(
+            super::yume2kki_t_author_url("185 Go"),
+            "https://wikiwiki.jp/yume2kki-t/::cmd/taglist?tag=185%20Go%E6%B0%8F"
+        );
+        // And where the wiki writes a name differently from the dump, its own writing of it.
+        let bean = super::JAPANESE_AUTHOR_OVERRIDES["Bean"];
+        assert_eq!(
+            super::yume2kki_t_author_url(bean),
+            "https://wikiwiki.jp/yume2kki-t/::cmd/taglist?tag=bean%E6%B0%8F"
+        );
+        assert_eq!(
+            super::yume2kki_t_author_url("かえるD"),
+            "https://wikiwiki.jp/yume2kki-t/::cmd/taglist?tag=%E3%81%8B%E3%81%88%E3%82%8BD%E6%B0%8F"
+        );
+    }
+
+    /// The Japanese wiki names a few dozen pages something other than the world on them, so a
+    /// Japanese title is looked up before it is addressed.
+    #[test]
+    fn a_japanese_title_addresses_the_page_the_wiki_files_it_under() {
+        // A slice of the list, in each of the shapes it writes a place in: a bare name, a name
+        // and the page it is written up on, a map leading to several places, and one leading
+        // somewhere different per map it came from.
+        let pages = super::parse_pages(
+            r#"{
+                "urlRoot": "https://wikiwiki.jp/yume2kki-t/",
+                "mapLocations": {
+                    "0011": "青い腕の通路",
+                    "0058": [
+                        "昭和路地",
+                        { "title": "昭和路地：バスツアー", "urlTitle": "昭和路地" }
+                    ],
+                    "0230": {
+                        "0229": { "title": "製作者の部屋", "urlTitle": "うろつき邸#map0230" },
+                        "else": "うろつき邸"
+                    }
+                },
+                "locationUrlTitles": { "ミニゲームA": "ミニゲーム/A" }
+            }"#,
+        );
+        // Its own name, which is the ordinary case, and what an unread list leaves every name at.
+        let plain = "https://wikiwiki.jp/yume2kki-t/%E6%B9%96%E4%B8%8A%E3%81%AE%E6%A9%8B";
+        assert_eq!(super::page_url(&pages, "湖上の橋"), plain);
+        assert_eq!(super::yume2kki_t_url("湖上の橋"), plain);
+        // An area written up inside another world's page: the page, and the anchor within it,
+        // which stays an anchor rather than being encoded away.
+        assert_eq!(
+            super::page_url(&pages, "製作者の部屋"),
+            "https://wikiwiki.jp/yume2kki-t/%E3%81%86%E3%82%8D%E3%81%A4%E3%81%8D%E9%82%B8#map0230"
+        );
+        // A place the wiki writes up on a bigger page, and one it files under a path, which is
+        // the one shape the list keeps outside its maps. The slash stays a slash.
+        assert_eq!(
+            super::page_url(&pages, "昭和路地：バスツアー"),
+            "https://wikiwiki.jp/yume2kki-t/%E6%98%AD%E5%92%8C%E8%B7%AF%E5%9C%B0"
+        );
+        assert_eq!(
+            super::page_url(&pages, "ミニゲームA"),
+            "https://wikiwiki.jp/yume2kki-t/%E3%83%9F%E3%83%8B%E3%82%B2%E3%83%BC%E3%83%A0/A"
         );
     }
 

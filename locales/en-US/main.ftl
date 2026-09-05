@@ -60,9 +60,9 @@ showing-versions-cut = { $shown } of { $total } versions
 ## The selected world.
 
 world-author = by
-world-author-hint = Show every world by this author
-world-map-hint = Show the wiki's map of this world
-world-move-up = Show parent map
+world-author-hint = Show author's worlds
+world-map-hint = View maps
+world-move-up = Show parent world
 world-connections = { $count ->
         [one] 1 connection,
        *[other] { $count } connections,
