@@ -3,9 +3,17 @@
 //! egui's own fonts carry Latin and little else, so Japanese -- the messages, and the Japanese
 //! name the wiki publishes for nearly every world -- is drawn as the empty boxes of a glyph no
 //! installed font carries. A face that has the glyphs is a few megabytes wherever it comes from,
-//! which is why it is neither compiled in nor fetched at startup: it is asked for the first frame
-//! the app speaks Japanese, and installed the frame it turns up. A run that never asks for
-//! Japanese never pays for it.
+//! so it is not compiled in; it is sent for as the app starts and installed the frame it turns
+//! up.
+//!
+//! Sent for whatever language the run is in, because the language is not what decides whether
+//! Japanese is drawn. Nearly every world carries the Japanese name the wiki publishes for it, and
+//! an English run shows those names beside the English ones. Waiting for the settings tab would
+//! mean drawing them as boxes until somebody happened to open it.
+//!
+//! Nothing waits for it either. It is fetched on [`super::fetch`]'s executor like anything else
+//! that would otherwise stall a frame, so the panel is drawn in whatever it already has and gains
+//! the glyphs partway through the first second.
 //!
 //! Where it comes from is the whole of what the platforms differ in. A device has one already --
 //! Android and Windows and macOS always, a desktop Linux with any CJK font installed -- and
@@ -18,59 +26,51 @@ const NAME: &str = "japanese";
 
 /// The face, and how far along getting hold of it this run has got.
 pub(super) enum Japanese {
-    /// Nothing has needed it yet, which is every run that stays in English.
-    Unasked,
-    /// On its way. Only ever on the page: a system font is found within the frame that asks for
-    /// it, so nowhere else is there a frame in between.
-    #[cfg(target_family = "wasm")]
-    Coming(super::fetch::Pending<Option<Vec<u8>>>),
+    /// On its way, on whatever executor this platform has. Started as the app is built, so this
+    /// is what every run opens in.
+    Coming(super::fetch::Pending<Option<(Vec<u8>, u32)>>),
     /// Installed, or looked for and not found. Either way there is nothing further to do: a
-    /// device with no Japanese font draws the boxes, which is the same thing it drew before and
-    /// is not worth looking for a second time.
+    /// device with no Japanese font draws the boxes, and there is no second place to look.
     Settled,
 }
 
 impl Japanese {
+    /// Sends for the face. Nothing is loaded here -- this only starts the work and hands back the
+    /// slot its answer will land in.
     pub(super) fn new() -> Self {
-        Self::Unasked
+        Self::Coming(super::fetch::spawn(face()))
     }
 
-    /// Gets the face if it is wanted and not here yet, and installs it the frame it arrives.
+    /// Installs the face the frame it arrives.
     ///
-    /// Called every frame with whether Japanese is being spoken, so choosing Japanese in the
-    /// settings tab is the whole of what starts this off.
+    /// Called every frame, and does nothing on all but one of them.
     pub(super) fn serve(&mut self, ctx: &egui::Context) {
-        match self {
-            Self::Settled => (),
-            Self::Unasked if !super::i18n::speaking_japanese() => (),
-            Self::Unasked => *self = Self::start(ctx),
-            #[cfg(target_family = "wasm")]
-            Self::Coming(pending) => {
-                let Some(downloaded) = pending.take() else {
-                    return;
-                };
-                // Index zero: what is served is a single face rather than a collection.
-                install(ctx, downloaded.map(|face| (face, 0)));
-                *self = Self::Settled;
-            }
-        }
+        let Self::Coming(pending) = self else {
+            return;
+        };
+        let Some(face) = pending.take() else {
+            return;
+        };
+        install(ctx, face);
+        *self = Self::Settled;
     }
+}
 
-    /// Starts getting hold of the face, and reports how far that got within this frame.
-    #[cfg(target_family = "wasm")]
-    fn start(_ctx: &egui::Context) -> Self {
-        Self::Coming(super::fetch::spawn(download()))
-    }
+/// Reads the face out of the system's own fonts.
+///
+/// Reading a whole font collection is the one blocking thing this app does off its own thread. It
+/// is a single call at startup and it is over long before anything else wants that thread, which
+/// is why it is left on [`super::fetch`]'s executor rather than given one of its own.
+#[cfg(not(target_family = "wasm"))]
+async fn face() -> Option<(Vec<u8>, u32)> {
+    installed()
+}
 
-    /// Finds the face among the system's own fonts and installs it, all within this frame.
-    ///
-    /// Reading the whole of a font collection costs a frame here, and it is the frame the person
-    /// chose Japanese in: they asked for the panel to be redrawn, and it is redrawn in Japanese.
-    #[cfg(not(target_family = "wasm"))]
-    fn start(ctx: &egui::Context) -> Self {
-        install(ctx, installed());
-        Self::Settled
-    }
+/// Fetches the face, there being none on the page to read.
+#[cfg(target_family = "wasm")]
+async fn face() -> Option<(Vec<u8>, u32)> {
+    // Index zero: what is served is a single face rather than a collection.
+    download().await.map(|face| (face, 0))
 }
 
 /// Adds the face to every family egui draws text in, at the lowest priority.
@@ -85,6 +85,10 @@ fn install(ctx: &egui::Context, face: Option<(Vec<u8>, u32)>) {
     };
     let data = egui::FontData {
         index,
+        tweak: egui::FontTweak {
+            y_offset_factor: lowered(ctx, &face, index),
+            ..egui::FontTweak::default()
+        },
         ..egui::FontData::from_owned(face)
     };
     ctx.add_font(egui::epaint::text::FontInsert::new(
@@ -98,6 +102,70 @@ fn install(ctx: &egui::Context, face: Option<(Vec<u8>, u32)>) {
             })
             .collect(),
     ));
+}
+
+/// How far the face has to be moved for its baseline to land on the panel's own, as a fraction of
+/// the font size. Positive is downwards, which is what [`egui::FontTweak::y_offset_factor`] means.
+///
+/// egui does not align the baselines of the faces in a family. It centres them: a glyph is placed
+/// at its own face's ascent, plus half of however much shorter that face's line is than the
+/// family's. That is the right thing for the emoji faces egui ships, which have no baseline worth
+/// speaking of, and the wrong thing for a second text face. A Japanese face reserves far more of
+/// its line above the baseline than a Latin one does -- Noto Sans CJK JP asks for 1.16 of the font
+/// size where Ubuntu Light, which egui draws the rest of the panel in, asks for 0.93 -- so
+/// centring the two drops the Japanese a full point below the Latin beside it, which is the step
+/// visible in a line like `ここへ: Chainsaw が必要。`.
+///
+/// So the offset is measured rather than guessed, once, on the face this device turned out to
+/// have: each side reports where it puts its baseline within its own line, and the difference is
+/// what closes the step. Guessing is not open to us anyway, since the face differs per platform
+/// and each of them has its own metrics.
+///
+/// Both sides are measured against the proportional family, which is what the panel is drawn in.
+/// The face is inserted into the monospace family as well, whose own first face sits a fraction
+/// differently; the sixth of a point that leaves behind is not worth a second copy of the face to
+/// correct.
+///
+/// Zero if either side cannot be measured, which leaves the placement exactly as egui had it.
+fn lowered(ctx: &egui::Context, face: &[u8], index: u32) -> f32 {
+    /// Where a face puts its baseline, measured down from the middle of the line it asks for and
+    /// scaled to the font size. The one quantity the two sides can be compared in: egui's
+    /// centring aligns the middles of the lines, so what is left over is the difference between
+    /// the baselines' distances from those middles.
+    fn from_middle(ascent: f32, line: f32) -> f32 {
+        ascent - line / 2.0
+    }
+
+    let panel = {
+        // Asked of egui rather than read off the file egui happens to be built with, so this stays
+        // right if the panel is ever given a different face to draw Latin in. A glyph carries the
+        // metrics of the family it was placed against, and one already-drawn letter at the size
+        // the panel is already drawing costs nothing to lay out again.
+        let font = egui::TextStyle::Body.resolve(&ctx.style_of(ctx.theme()));
+        let size = font.size;
+        let galley = ctx.fonts_mut(|fonts| {
+            fonts.layout_no_wrap("A".to_owned(), font, egui::Color32::PLACEHOLDER)
+        });
+        let Some(glyph) = galley.rows.first().and_then(|row| row.row.glyphs.first()) else {
+            return 0.0;
+        };
+        from_middle(glyph.font_ascent, glyph.font_height) / size
+    };
+
+    let japanese = {
+        use skrifa::{MetadataProvider as _, instance::LocationRef, prelude::Size};
+
+        // Unscaled and divided by the em, which is how egui reads these too: the same three
+        // numbers, in the same units, so that the two sides are comparable.
+        let Ok(font) = skrifa::FontRef::from_index(face, index) else {
+            return 0.0;
+        };
+        let metrics = font.metrics(Size::unscaled(), LocationRef::default());
+        let line = metrics.ascent - metrics.descent + metrics.leading;
+        from_middle(metrics.ascent, line) / metrics.units_per_em as f32
+    };
+
+    panel - japanese
 }
 
 /// The Japanese interface face each platform is expected to have, best first.

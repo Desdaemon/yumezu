@@ -1381,7 +1381,7 @@ impl Overlay {
                     egui::Panel::left("yumezu")
                         .frame(frame)
                         .default_size(SIDEBAR_WIDTH)
-                        .show_inside(ui, |ui| panel.window(ui, &read, sidebar));
+                        .show(ui, |ui| panel.window(ui, &read, sidebar));
                 }
                 true => sidebar_opener(ui, sidebar, insets),
             }

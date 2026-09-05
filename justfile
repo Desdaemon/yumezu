@@ -1,8 +1,8 @@
 serve:
     trunk serve --release
 
-dist:
-    trunk build --cargo-profile=min --features=production
+dist *args:
+    trunk build --cargo-profile=min --features=production {{args}}
 
 # Downloads every world's image from the wiki and packs them into `static/thumbnails.jpg`, which
 # the app samples for the node thumbnails. Downloads are cached under `tools/atlas/cache`, so

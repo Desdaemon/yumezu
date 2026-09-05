@@ -111,8 +111,8 @@ impl Gui {
     pub(crate) fn paint(&mut self, window: &Window) {
         let shapes = std::mem::take(&mut self.shapes);
         let mut textures = std::mem::take(&mut self.textures);
-        for (id, delta) in textures.set {
-            self.painter.set_texture(id, &delta);
+        for (id, delta) in &textures.set {
+            self.painter.set_texture(*id, delta);
         }
         let primitives = self.ctx.tessellate(shapes, self.pixels_per_point);
         self.painter.paint_primitives(

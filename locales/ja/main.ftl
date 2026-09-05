@@ -65,7 +65,7 @@ forward-connections = 降下接続 { $count }本
 
 no-notable-descendants = 主要な後続マップはありません。
 notable-descendants = 主要な後続マップ:
-notable-world = { $title }（{ $kind }、接続 { $degree }）
+notable-world = { $title } ({ $kind }、接続 { $degree })
 
 ## The catalogs.
 
