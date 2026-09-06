@@ -2184,6 +2184,7 @@ impl Panel {
         // The way back to a panel that was dismissed for good, so ticking that box is not a
         // door that locks behind the person who ticked it.
         self.guide |= ui.button(t!("show-controls")).clicked();
+        Self::clear_cache(ui);
 
         if ui
             .hyperlink_to(
@@ -2205,6 +2206,46 @@ impl Panel {
             open_in_browser("https://explorer.yumemiru.dev/android");
         }
     }
+
+    /// Emptying the pictures kept between runs.
+    ///
+    /// Reads the cache's own state rather than keeping any of its own, which is why this needs
+    /// nothing of `self`: there is one store behind one client, and [`fetch::cleared`] is its
+    /// answer to everyone. So the button is honest across a frame that redraws for some other
+    /// reason, and would be honest twice over if the settings tab were ever open in two places.
+    ///
+    /// Native only. The page's cache is the browser's, which this app neither built nor may
+    /// empty -- see [`fetch::Cleared`].
+    #[cfg(not(target_family = "wasm"))]
+    fn clear_cache(ui: &mut egui::Ui) {
+        let cleared = fetch::cleared();
+        let clearing = cleared == fetch::Cleared::Clearing;
+        if ui
+            .add_enabled(!clearing, egui::Button::new(t!("clear-cache")))
+            .on_hover_text(t!("clear-cache-hint"))
+            .clicked()
+        {
+            fetch::clear();
+        }
+        // Under the button rather than in it: the button says what it does, and this says what
+        // came of the last press. A run nobody has pressed it in says nothing at all.
+        match cleared {
+            fetch::Cleared::Never => {}
+            fetch::Cleared::Clearing => {
+                ui.label(t!("clear-cache-clearing"));
+            }
+            fetch::Cleared::Done => {
+                ui.label(t!("clear-cache-done"));
+            }
+            fetch::Cleared::Failed => {
+                ui.label(t!("clear-cache-failed"));
+            }
+        }
+    }
+
+    /// Nothing to draw: see the native [`Self::clear_cache`] above.
+    #[cfg(target_family = "wasm")]
+    fn clear_cache(_: &mut egui::Ui) {}
 
     /// Which language the app is read in.
     ///

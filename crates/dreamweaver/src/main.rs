@@ -13,7 +13,7 @@
 //! There is nothing to run but the server, and nothing to tell it to do. It keeps the dump current
 //! out of the requests for it: a `GET /data` that arrives more than `--sync-every` hours after the
 //! wiki was last asked about starts a sync and answers `503 needs update` instead of the dump, and
-//! the client waits that sync out on `POST /pollUpdate` before asking again. Every other `GET
+//! the client waits that sync out on `GET /pollUpdate` before asking again. Every other `GET
 //! /data` is answered from the file. See [`Due`] and [`data`].
 //!
 //! A sync asks the wiki what has been edited since the dump was built and rebuilds out of the
@@ -34,7 +34,7 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::get;
 
 mod depth;
 mod model;
@@ -62,7 +62,7 @@ const SYNC_EVERY: u64 = 6;
 /// through, and what the last refresh already fetched.
 ///
 /// The lock around that last part is also what keeps two refreshes from running at once, which
-/// matters more than the cache does: a scheduled sync and a `POST /update` arriving together
+/// matters more than the cache does: a scheduled sync and a `GET /update` arriving together
 /// would otherwise both build a dump and the slower one would publish over the newer.
 #[derive(Clone)]
 struct Server {
@@ -142,8 +142,10 @@ impl Options {
                     // whose dump is always due never serves it at all. See [`Due`] and [`data`].
                     self.sync_every = match value()?.parse() {
                         Ok(hours) if hours > 0 => hours,
-                        _ => return Err("--sync-every wants a whole number of hours, at least one"
-                            .to_owned()),
+                        _ => {
+                            return Err("--sync-every wants a whole number of hours, at least one"
+                                .to_owned());
+                        }
                     }
                 }
                 other => return Err(format!("no such switch: {other}")),
@@ -312,7 +314,7 @@ async fn serve(server: Server, options: Options) {
         // implementation serves it as, and `/data.json` is what a build script would rather save.
         .route("/data", get(data))
         .route("/data.json", get(data))
-        .route("/pollUpdate", post(poll_update))
+        .route("/pollUpdate", get(poll_update))
         .with_state(server);
 
     match Listen::read(&options.listen) {
@@ -390,7 +392,7 @@ where
 /// and a request arriving after the last sync has gone stale is what starts the next one. The
 /// client is told to wait rather than handed the old dump so that it has one story for both of
 /// the waits it can meet -- the first sync of a server with nothing to serve, and a routine
-/// refresh -- and `POST /pollUpdate` is how it waits: poll it until `done`, then ask again.
+/// refresh -- and `GET /pollUpdate` is how it waits: poll it until `done`, then ask again.
 ///
 /// An empty dump is never served. A client cannot tell it from a wiki with no worlds in it and
 /// would draw the second, so a server that has never built one answers `needs update` however
@@ -408,6 +410,7 @@ async fn data(State(server): State<Server>) -> axum::response::Response {
         )
             .into_response();
     }
+
     (
         [(header::CONTENT_TYPE, "application/json")],
         snapshot.json.to_string(),
@@ -415,7 +418,7 @@ async fn data(State(server): State<Server>) -> axum::response::Response {
         .into_response()
 }
 
-/// `POST /pollUpdate` -- what the sync is doing, in the reference implementation's own shape.
+/// `GET /pollUpdate` -- what the sync is doing, in the reference implementation's own shape.
 ///
 /// `done` is that no sync is running, not that there is a dump: a server between syncs answers
 /// `{"task": null, "done": true}` whether or not it has ever built one. See [`progress`].

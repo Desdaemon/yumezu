@@ -3,7 +3,7 @@
 //! A sync takes a minute or so, and `GET /data` answers `needs update` for the whole of it rather
 //! than serving a dump that is about to be replaced -- see [`crate::data`]. The app on the other
 //! end has nothing to draw and nothing to say about why, so the sync says where it has got to as
-//! it goes and `POST /pollUpdate` is how a client reads that.
+//! it goes and `GET /pollUpdate` is how a client reads that.
 //!
 //! The stage names are the reference implementation's own, so a reader written against its
 //! `/pollUpdate` reads these unchanged -- see [`crate`]. They are a coarser account than its

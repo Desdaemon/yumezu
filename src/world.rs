@@ -599,7 +599,7 @@ fn url() -> String {
 ///
 /// A server that is rebuilding the dump answers [`url`] with `needs update` rather than with a
 /// dump it is about to replace -- see [`load`] -- so the wait can be a minute, and this is what
-/// the loading frame says during it. `POST /pollUpdate` is the reference implementation's own
+/// the loading frame says during it. `GET /pollUpdate` is the reference implementation's own
 /// route for asking, and `dreamweaver` answers in the same shape: see its `progress` module.
 ///
 /// `None` for everything that is not a stage this app has words for: a server between syncs, a
@@ -642,10 +642,9 @@ const STAGES: [(&str, &str); 4] = [
     ("prepareWorldData", "dump-task-assembling"),
 ];
 
-/// Asks `url` and reads the answer. A `POST` because that is what the route it is for expects.
 async fn ask(url: &str) -> Result<String, super::fetch::Error> {
     Ok(super::fetch::client()
-        .post(url)
+        .get(url)
         .send()
         .await?
         .error_for_status()?
@@ -1668,7 +1667,10 @@ mod tests {
                 "{said} is not a message any language has"
             );
         }
-        assert_eq!(super::stage("fetchEffectData"), None, "a stage with no words");
+        assert_eq!(
+            super::stage("fetchEffectData"),
+            None,
+            "a stage with no words"
+        );
     }
-
 }

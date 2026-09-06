@@ -139,6 +139,11 @@ hub-push-hint = The higher the value, the harder bigger worlds' repulsion force 
 ui-scale = UI scale
 ui-scale-hint = How large the panel and its text are drawn
 show-controls = Show controls
+clear-cache = Clear downloads
+clear-cache-hint = Empties the pictures kept between runs, so the next look at a world fetches it again
+clear-cache-clearing = Clearing...
+clear-cache-done = Downloads cleared
+clear-cache-failed = The downloads could not be cleared
 github-link = yumezu on github
 android-link = Download for Android
 

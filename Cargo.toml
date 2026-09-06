@@ -38,14 +38,8 @@ three-d-asset = { version = "0.10", features = ["jpeg", "png", "http-rustls"] }
 reqwest = { version = "0.13.4" }
 winit = "0.30"
 egui_material_icons = "0.7.0"
-# What the app says is kept in `locales/` rather than written out where it is read, because
-# half of what it says is a count of something and the languages disagree about how a count is
-# said. See `src/i18n.rs`.
 fluent-bundle = "0.16"
-# Only to parse and compare language tags, which is what settles the language a run opens in.
 unic-langid = "0.9"
-# What the device asks to be spoken to in, which is what a run with nothing chosen yet opens in.
-# One crate for all four platforms, each of which keeps it somewhere else entirely.
 sys-locale = "0.3"
 # pinned via egui_material_icons
 egui = "0.35"
@@ -57,33 +51,17 @@ skrifa = "0.44"
 phf = { version = "0.14.0", features = ["macros"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-# The one way to the Japanese face off a device that already has one, asked for by which glyphs a
-# family covers rather than by a name this app would have to guess per platform. There is nothing
-# for it to look at on the page, which downloads a face instead: see `src/japanese.rs`.
 fontique = { version = "0.11", default-features = false, features = ["system"] }
-# Paste into the search box. Left off the page build, where `arboard` underneath it has no
-# platform to speak to -- see `src/text_agent.rs`, which gets a paste for free from the element it
-# already keeps.
 egui-winit = { version = "0.35", default-features = false, features = ["clipboard"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
-# Caching downloads between runs. `reqwest` keeps nothing at all -- no store, no `Cache-Control`,
-# no revalidation -- which is only invisible on the page, where it hands the request to the
-# browser's own `fetch` and inherits its cache. These two put that behaviour back everywhere else,
-# so the wiki pictures a run fetched are still there for the next one. The cache crate is a
-# pre-release because that is the only line supporting reqwest 0.13 so far; pinned exactly, since
-# an alpha may break its API between patch versions. See `src/fetch.rs`.
 reqwest-middleware = "0.5.2"
 http-cache-reqwest = "=1.0.0-alpha.8"
+http = "1.5"
 
 [target.'cfg(all(not(target_family = "wasm"), not(target_os = "android")))'.dependencies]
-# Somewhere for `log` to go on a desktop. The page has `console_log` and the phone has
-# `android_logger`; without this the third platform is the one where a failed dump and a server
-# saying what it is building are both written to nobody. Off unless `RUST_LOG` asks, which is
-# `env_logger`'s own default and the right one for a windowed app.
 env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-# The page keeps the reader's languages on `navigator`, which is only reachable through js.
 sys-locale = { version = "0.3", features = ["js"] }
 tokio = { version = "1.53.1", features = ["macros"] }
 wasm-bindgen-futures = "0.4"
@@ -100,20 +78,9 @@ web-sys = { version = "0.3.104", features = [
 
 
 [target.'cfg(target_os = "android")'.dependencies]
-# The activity glue behind `android_main`, which winit re-exports rather than being given: see
-# `src/lib.rs`. `android-native-activity` is the framework's own NativeActivity, so the apk needs
-# no Java of its own -- see `android/`.
 winit = { version = "0.30", features = ["android-native-activity"] }
-# `log` reaches nothing on Android without a backend, and logcat is the only place a message can
-# go on a device with no terminal.
 android_logger = "0.15"
-# Opening a link is a Java call here, and these two are how `open_in_browser` places it: the VM
-# and the app's context out of `ndk-context`, the call itself through `jni`. Both are already in
-# the tree underneath the activity glue, which publishes the one and is written against the other.
 jni = "0.22"
 ndk-context = "0.1"
-# The roots TLS is checked against here. Every other platform gets them from the OS, through
-# `rustls-platform-verifier`, which reqwest picks by itself; on Android that verifier is a Java
-# class it calls through JNI, and this apk carries no Java at all -- see `android/build.sh`. So
-# the roots are compiled in instead, and handed to the client `src/fetch.rs` builds.
+# to handle TLS certs removed from reqwest
 webpki-root-certs = "1"

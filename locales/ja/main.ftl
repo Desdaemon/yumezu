@@ -104,6 +104,11 @@ hub-push-hint = 値が大きいほど、接続の多いマップの反発力が�
 ui-scale = UIの大きさ
 ui-scale-hint = パネルと文字を描く大きさ
 show-controls = 操作方法を表示
+clear-cache = ダウンロードを消去
+clear-cache-hint = 実行間に保存された画像を消去します。次に見るときは再取得されます
+clear-cache-clearing = 消去中...
+clear-cache-done = ダウンロードを消去しました
+clear-cache-failed = ダウンロードを消去できませんでした
 github-link = GitHubで見る
 android-link = Android版をダウンロード
 

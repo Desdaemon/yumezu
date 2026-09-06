@@ -4849,6 +4849,7 @@ dependencies = [
  "fluent-bundle",
  "fontique",
  "force_graph_3d",
+ "http",
  "http-cache-reqwest",
  "jni",
  "log",

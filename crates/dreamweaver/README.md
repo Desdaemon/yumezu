@@ -33,7 +33,7 @@ wrote.
 |----------------|--|
 | `GET /data`    | the dump, byte for byte as the file holds it -- or `503 needs update` |
 | `GET /data.json` | the same |
-| `POST /pollUpdate` | what the running sync is doing: `{"task": ..., "done": ...}` |
+| `GET /pollUpdate` | what the running sync is doing: `{"task": ..., "done": ...}` |
 
 There is no clock in the server, only requests. A `GET /data` arriving more than `--sync-every`
 hours after the wiki was last asked about starts a sync and answers `503 needs update` instead of
