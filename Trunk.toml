@@ -1,7 +1,12 @@
-# Trunk's own settings for `just serve`. The one thing here is the dump: the page asks its own
-# host for it -- see `world::url` -- and this is what puts that request through to `dreamweaver`,
-# which has to be running alongside (`just dreamweaver`). A page served by anything else needs the
-# same path proxied the same way.
+# Trunk's own settings for `just serve`. The one thing here is the server the page asks: it may
+# only ask its own host -- see `world::server` -- and these put those requests through to
+# `dreamweaver`, which has to be running alongside (`just dreamweaver`). A page served by anything
+# else needs the same routes proxied the same way.
 [[proxy]]
-rewrite = "/data.json"
-backend = "http://127.0.0.1:5000/data.json"
+rewrite = "/data"
+backend = "http://127.0.0.1:5000/data"
+
+# What the loading frame says while a server with no dump yet builds one. See `world::building`.
+[[proxy]]
+rewrite = "/pollUpdate"
+backend = "http://127.0.0.1:5000/pollUpdate"

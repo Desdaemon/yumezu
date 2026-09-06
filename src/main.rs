@@ -13,6 +13,11 @@ pub(crate) use app::i18n;
 /// [`run`] themselves: the page from `lib.rs`'s `start`, the phone from its `android_main`.
 #[allow(unused)]
 pub fn main() {
+    // The other two platforms install their own on the way in -- see `lib.rs`. Reads `RUST_LOG`
+    // and says nothing without it: a windowed app has no terminal to write to most of the time,
+    // and the messages worth having are the ones somebody went looking for.
+    #[cfg(all(not(target_family = "wasm"), not(target_os = "android")))]
+    env_logger::init();
     run(winit::event_loop::EventLoop::new().unwrap());
 }
 

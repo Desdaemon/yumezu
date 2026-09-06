@@ -240,7 +240,20 @@ pub struct World {
     pub ver_updated: Option<Vec<VerUpdated>>,
     #[serde(rename = "verGaps")]
     pub ver_gaps: Option<Vec<VerGap>>,
+    /// The RPG Maker maps the world is built out of, by the number the game gives each.
+    ///
+    /// Not a field the reference dump carries -- it keeps these in its database and publishes only
+    /// `size`, the area they add up to. The store holds which maps a world is but not how big any
+    /// of them is, so `size` cannot be had from here and this is what there is instead: the count
+    /// and the sharing, without the areas. Absent rather than empty for the three pages in the
+    /// category whose infobox names no map at all.
+    #[serde(rename = "mapIds", default, skip_serializing_if = "Vec::is_empty")]
+    pub map_ids: Vec<u32>,
     pub removed: bool,
+    /// Whether a reader should be shown this world at all. Set for the debug room, and for
+    /// whatever else an operator has marked as a spoiler -- see `sync`'s `SECRET_MAPS` and
+    /// `marked_secret`. Published rather than acted on here: the world stays in the dump, in the
+    /// graph and in the numbering, and the client is what leaves it out.
     pub secret: bool,
     pub connections: Vec<Connection>,
 }

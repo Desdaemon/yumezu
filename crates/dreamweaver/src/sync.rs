@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::depth;
 use crate::model::{ConnType, Connection, Dump, TypeParams, World};
+use crate::progress::{self, Progress};
 use crate::smw;
 use crate::versions;
 
@@ -42,8 +43,8 @@ pub struct Fetched {
 
 /// How much of the wiki a sync re-reads.
 pub enum Refresh {
-    /// All of it, whatever the wiki says about itself. What a run does when it comes up and what
-    /// `POST /update` asks for.
+    /// All of it, whatever the wiki says about itself. What a sync does when it has no dump to
+    /// ask the wiki about, or one the wiki no longer remembers that far back.
     Everything,
     /// Only what these pages can have changed, spelled without the namespace. An empty list is a
     /// wiki that has not moved, and never reaches here -- the caller stands the sync down instead.
@@ -89,20 +90,39 @@ impl Refresh {
 const AUTHORS: &str = "Authors";
 const VERSION_HISTORY: &str = "Version History";
 
+/// The map the game starts the player on. The world built out of it is the origin and opens the
+/// dump: every reader walks its routes out from there.
+///
+/// A map number rather than a title, because the wiki renames a world far more readily than the
+/// game renumbers a map.
+const ORIGIN_MAP: u32 = 2;
+
+/// Maps that are not part of the game to a reader. A world built out of any of them is published
+/// as a secret, which is the dump's one way of saying "do not show this": see [`model::World`].
+///
+/// Map 1 is the debug room. The wiki documents it as a location like any other, so the store hands
+/// it back like any other, but the game never walks the player into it. The wiki carries no
+/// property for that, so this is the one the program supplies; every other secret is an operator's
+/// own mark, and [`marked_secret`] is where those come from.
+const SECRET_MAPS: [u32; 1] = [1];
+
 /// Fetches what `refresh` says is worth fetching and builds the dump.
 ///
-/// `previous` is the last dump published, and it is consulted for three things only: the order
-/// worlds are published in, what an operator has marked on them, and when the dump was last
-/// rebuilt without asking. Everything else in the new dump comes from the wiki or from `fetched`,
-/// which is the wiki as of the last time this asked.
+/// `previous` is the last dump published, and it is consulted for two things only: what an
+/// operator has marked on the worlds, and when the dump was last rebuilt without asking. The order
+/// the worlds go out in used to be a third and is not any more -- see [`published_place`].
+/// Everything else in the new dump comes from the wiki or from `fetched`, which is the wiki as of
+/// the last time this asked.
 pub async fn run(
     http: &reqwest::Client,
     previous: &Dump,
     refresh: Refresh,
     fetched: &mut Fetched,
+    progress: &Progress,
 ) -> smw::Result<Dump> {
     // First and on its own: what the worlds are decides which pieces of the passage query there
     // are to ask for.
+    progress.at(progress::WORLDS);
     let locations = smw::locations(http).await?;
     let initials: BTreeSet<char> = locations
         .iter()
@@ -119,6 +139,9 @@ pub async fn run(
     };
 
     let shards_count = shards.len();
+    // One stage for the three, because they are one question: they are awaited together, and the
+    // passages are the long half of it. See [`progress`].
+    progress.at(progress::PASSAGES);
     let (authors, releases, passages) = tokio::try_join!(
         optional(want_authors, smw::authors(http)),
         optional(want_releases, smw::versions(http)),
@@ -187,7 +210,7 @@ fn assemble<'a>(
     previous: &Dump,
     full: bool,
 ) -> Dump {
-    let locations = in_published_order(locations, previous);
+    let locations = published_worlds(locations);
     let at: HashMap<&str, usize> = locations
         .iter()
         .enumerate()
@@ -301,6 +324,7 @@ fn assemble<'a>(
                 filename: encode_uri(&location.location_image),
                 map_url: joined(location.location_maps.iter().map(|map| map.path.clone())),
                 map_label: joined(location.location_maps.iter().map(|map| map.caption.clone())),
+                map_ids: location.map_ids.clone(),
                 bgm_url: joined(location.bgms.iter().map(|bgm| bgm.path.clone())),
                 // Two fields packed into one, since the reader takes them apart together with the
                 // paths above and a track with neither still has to hold its place in the list.
@@ -316,7 +340,8 @@ fn assemble<'a>(
                 ver_updated: versions::updates(&location.versions_updated.join(",")),
                 ver_gaps: versions::gaps(&location.version_gaps.join(",")),
                 removed: false,
-                secret: secret.contains(location.title.as_str()),
+                secret: secret.contains(location.title.as_str())
+                    || location.map_ids.iter().any(|id| SECRET_MAPS.contains(id)),
                 connections,
             }
         })
@@ -329,7 +354,8 @@ fn assemble<'a>(
             .iter()
             .map(|author| crate::model::Author {
                 name: author.name.clone(),
-                name_jp: author.original_name.clone(),
+                // TODO: do we want multiple names here?
+                name_jp: author.original_name.first().cloned(),
             })
             .collect(),
         versions: releases
@@ -361,25 +387,44 @@ struct Passage {
     wording: std::collections::BTreeMap<i16, TypeParams>,
 }
 
-/// The fetched worlds, reordered to keep the places they already hold in the published dump.
+/// The worlds this dump is about, in the order they go out in: [`published_place`] order.
 ///
-/// A world's published id is its index in the list, so the order is part of the interface: it is
-/// what a client's own caches are keyed by, and what the thumbnail atlas is packed in. Worlds the
-/// last dump had keep their relative order; worlds it did not have go on the end, in the order the
-/// store listed them.
-fn in_published_order(locations: Vec<smw::Location>, previous: &Dump) -> Vec<smw::Location> {
-    let was: HashMap<&str, usize> = previous
-        .worlds
-        .iter()
-        .map(|world| (world.title.as_str(), world.id))
-        .collect();
-    let mut locations = locations;
-    locations.sort_by_key(|location| {
-        was.get(location.title.as_str())
-            .copied()
-            .unwrap_or(usize::MAX)
-    });
+/// Every world the wiki documents is here, the secrets included. A secret is published and marked
+/// rather than dropped, for two reasons: the mark is carried from one dump to the next by title
+/// (see [`marked_secret`]), so a dropped world is a mark forgotten at the next sync, and hiding is
+/// a question about a reader rather than about the game -- the client is what acts on it.
+///
+/// A world's published id is its index in this list, so the order is part of the interface: it is
+/// what a client's own caches are keyed by, and what the thumbnail atlas is packed in. It is
+/// therefore worth being a property of the game rather than of this program's history, and it is:
+/// two runs that read the same wiki publish the same ids, whether either of them had a dump to
+/// start from or not.
+fn published_worlds(mut locations: Vec<smw::Location>) -> Vec<smw::Location> {
+    locations.sort_by(|one, other| published_place(one).cmp(&published_place(other)));
     locations
+}
+
+/// Where one world belongs: the origin first, then by the earliest RPG Maker map the world is
+/// built out of, then by title.
+///
+/// The map numbers are the game's own, handed out in the order the maps were made -- so this is
+/// very nearly the order the worlds were added in, and a world added next week takes a number
+/// above every number now in use and lands at the end. That is the "relatively" in relatively
+/// stable: a world already published moves only if the wiki corrects which maps it is, and a new
+/// one mostly moves nothing.
+///
+/// [`ORIGIN_MAP`] is named rather than left to that rule, and has to be: the debug room is map 1
+/// and would otherwise open the dump. It is also the one place in the order a reader depends on.
+///
+/// Two worlds sharing their earliest map -- ninety-odd groups do -- are separated by title, and
+/// the worlds the wiki names no map for sort after everything by the same rule. Neither is
+/// arbitrary in the sense that matters: the same input gives the same answer.
+fn published_place(location: &smw::Location) -> (bool, u32, &str) {
+    (
+        !location.map_ids.contains(&ORIGIN_MAP),
+        location.map_ids.iter().copied().min().unwrap_or(u32::MAX),
+        &location.title,
+    )
 }
 
 /// The worlds an operator has marked as a spoiler, which no sync should unmark.
@@ -475,11 +520,15 @@ const MARGIN: time::Duration = time::Duration::hours(1);
 /// The moment a soft sync asks the wiki about, or `None` for a dump too old for the question to
 /// mean anything -- which is a full sync's job. See [`HORIZON`] and [`MARGIN`].
 pub fn asked_from(since: &str, now: time::OffsetDateTime) -> Option<String> {
-    let since = time::OffsetDateTime::parse(since, &time::format_description::well_known::Rfc3339)
-        // A stamp that will not parse was not written by this program, and there is nothing to
-        // date the question from. Reading the whole wiki is the safe answer to that.
-        .ok()?;
+    // A stamp that will not parse was not written by this program, and there is nothing to date
+    // the question from. Reading the whole wiki is the safe answer to that.
+    let since = moment(since)?;
     (now - since < HORIZON).then(|| iso(since - MARGIN))
+}
+
+/// Reads a stamp back out of a dump. `None` for anything [`iso`] did not write.
+pub fn moment(stamp: &str) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::parse(stamp, &time::format_description::well_known::Rfc3339).ok()
 }
 
 /// Now, in the format the reference implementation's dump stamps itself with.
@@ -517,6 +566,57 @@ mod tests {
         assert_eq!(
             super::encode_uri("https://yume.wiki/images/a/夢.png"),
             "https://yume.wiki/images/a/%E5%A4%A2.png"
+        );
+    }
+
+    /// The published order is the game's map numbering, not this program's history: the origin
+    /// first, then earliest map, then title. Nothing about it reads the last dump, which is what
+    /// makes a run that comes up with nothing publish the same ids as one that did not.
+    #[test]
+    fn the_worlds_are_published_in_the_order_the_game_made_them() {
+        let world = |title: &str, map_ids: &[u32]| crate::smw::Location {
+            title: title.to_owned(),
+            map_ids: map_ids.to_vec(),
+            location_image: String::new(),
+            original_name: None,
+            primary_author: None,
+            bgms: Vec::new(),
+            location_maps: Vec::new(),
+            version_added: String::new(),
+            versions_updated: Vec::new(),
+            version_removed: None,
+            version_gaps: Vec::new(),
+        };
+        let published = super::published_worlds(vec![
+            // Map 1: the game never walks the player here, but the dump still carries it -- it
+            // is published as a secret, and hiding it is the client's job. See [`SECRET_MAPS`].
+            world("Debug Room", &[1]),
+            world("Nexus", &[10, 11]),
+            // The earliest of its maps places it, not the first one the wiki lists.
+            world("Chocolate World", &[620, 12]),
+            world("Urotsuki's Room", &[2, 224]),
+            // Named no map at all: after everything, and after each other by title.
+            world("River Road", &[]),
+            world("FC Caverns", &[]),
+            // Shares its earliest map with Nexus, so the title separates the two.
+            world("Hand Hub", &[10, 99]),
+        ]);
+        assert_eq!(
+            published
+                .iter()
+                .map(|location| location.title.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "Urotsuki's Room",
+                // Named rather than earned: map 1 is lower than the origin's map 2, so only the
+                // origin coming first by rule keeps the debug room from opening the dump.
+                "Debug Room",
+                "Hand Hub",
+                "Nexus",
+                "Chocolate World",
+                "FC Caverns",
+                "River Road",
+            ]
         );
     }
 

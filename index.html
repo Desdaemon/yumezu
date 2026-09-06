@@ -12,5 +12,18 @@
   </head>
   <body>
     <canvas id="canvas"></canvas>
+    <!-- What the page says before the app is here to say it. The wasm is a few megabytes, and
+         until it has come down, compiled and reached its first frame the canvas is a black
+         rectangle -- so a start would otherwise open on nothing at all. This is the same line the
+         app's own loading frame shows, in the same place, and the first frame takes it off the
+         page: see `App::draw`. -->
+    <div id="loading"><span id="loading-text">Loading worlds…</span></div>
+    <script>
+      // The same choice `src/i18n.rs` makes, made before the code that makes it is here. The
+      // words are `dump-loading` in `locales/`, and are written out again here because a `.ftl`
+      // cannot be read without the app that reads it.
+      if ((navigator.language || "").startsWith("ja"))
+        document.getElementById("loading-text").textContent = "読み込み中...";
+    </script>
   </body>
 </html>

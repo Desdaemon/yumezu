@@ -143,8 +143,8 @@ pub async fn locations(http: &reqwest::Client) -> Result<Vec<Location>> {
     let rows = askargs::<LocationRow>(
         http,
         "Category:Yume 2kki Locations",
-        "Has location image|Has primary author|Japanese name|Has BGM|Has location map|Version \
-         added|Versions updated|Version removed|Version gaps",
+        "Has location image|Has primary author|Japanese name|Has BGM|Has location map|Map \
+         IDs|Version added|Versions updated|Version removed|Version gaps",
         "",
     )
     .await?;
@@ -171,7 +171,11 @@ pub async fn authors(http: &reqwest::Client) -> Result<Vec<Author>> {
         .filter_map(|(_, row)| {
             Some(Author {
                 name: row.name?,
-                original_name: row.original.and_then(|original| original.text),
+                original_name: row
+                    .original
+                    .into_iter()
+                    .flat_map(|original| original.text)
+                    .collect(),
             })
         })
         .collect())
@@ -244,8 +248,8 @@ pub struct Version {
 /// A world, as its wiki page describes it.
 ///
 /// Only the fields the dump carries are named. The store also holds the colours a world's wiki page
-/// is themed in, the RPG Maker map numbers it is built out of and the authors beyond the primary
-/// one; [`locations`] does not ask for what nothing reads.
+/// is themed in and the authors beyond the primary one; [`locations`] does not ask for what nothing
+/// reads.
 pub struct Location {
     /// The English page title, which is the identity everything else refers to it by.
     pub title: String,
@@ -258,6 +262,9 @@ pub struct Location {
     pub primary_author: Option<String>,
     pub bgms: Vec<Bgm>,
     pub location_maps: Vec<LocationMap>,
+    /// The RPG Maker maps the world is built out of, by the number the game gives each. Empty for
+    /// the three pages in the category whose infobox names none.
+    pub map_ids: Vec<u32>,
     /// The release the world first appeared in, as the version history names it. Empty for a page
     /// in the Locations category that carries no infobox at all.
     pub version_added: String,
@@ -317,7 +324,7 @@ pub struct Author {
     /// As the English wiki writes the name.
     pub name: String,
     /// As the author writes it themselves, where that differs.
-    pub original_name: Option<String>,
+    pub original_name: Vec<String>,
 }
 
 /// One page of the wiki's answer to [`changed_since`].
@@ -459,7 +466,7 @@ where
         type Value = Option<T>;
 
         fn expecting(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
-            fmt.write_str("a sequence of zero or one element")
+            fmt.write_str("a sequence of at most one element")
         }
 
         fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
@@ -472,7 +479,7 @@ where
                 count += 1;
             }
             if count > 1 {
-                if cfg!(debug_assertions) {
+                if cfg!(any(test, debug_assertions)) {
                     return Err(serde::de::Error::invalid_length(count, &self));
                 }
                 tracing::warn!("expected at most one element, got {count}");
@@ -550,6 +557,8 @@ struct LocationRow {
     bgms: Vec<BgmRow>,
     #[serde(rename = "Has location map", default)]
     maps: Vec<MapRow>,
+    #[serde(rename = "Map IDs", default)]
+    map_ids: Vec<MapIdRow>,
     #[serde(rename = "Version added", default, deserialize_with = "first")]
     added: Option<String>,
     #[serde(rename = "Versions updated", default)]
@@ -573,6 +582,7 @@ impl LocationRow {
             primary_author: (!self.authors.is_empty()).then(|| self.authors.join(", ")),
             bgms: self.bgms.into_iter().map(BgmRow::bgm).collect(),
             location_maps: self.maps.into_iter().map(MapRow::map).collect(),
+            map_ids: self.map_ids.into_iter().filter_map(|row| row.id).collect(),
             // Empty rather than absent for the handful of pages that are in the Locations
             // category and carry no infobox at all: they are worlds the wiki has not written up,
             // not worlds this program failed to read.
@@ -582,6 +592,17 @@ impl LocationRow {
             version_gaps: self.gaps,
         }
     }
+}
+
+/// One RPG Maker map a world is built out of, likewise.
+///
+/// The store also writes an annotation beside the number -- `Main Area`, `Entrance`, and so on for
+/// about a sixth of them -- naming which part of the world that map is. Not read: what the number
+/// is for is saying which maps a world is, and nothing published names them one at a time.
+#[derive(Deserialize)]
+struct MapIdRow {
+    #[serde(rename = "Has map ID", default, deserialize_with = "first_in_cell")]
+    id: Option<u32>,
 }
 
 /// One track heard in a world, as a subobject of the world's page.
@@ -638,8 +659,8 @@ impl MapRow {
 struct AuthorRow {
     #[serde(rename = "Author/Name", default, deserialize_with = "first")]
     name: Option<String>,
-    #[serde(rename = "Author/Original Name", default, deserialize_with = "first")]
-    original: Option<Monolingual>,
+    #[serde(rename = "Author/Original Name", default)]
+    original: Vec<Monolingual>,
 }
 
 /// One passage's subobject, in the store's own property names.
@@ -734,7 +755,6 @@ mod tests {
     /// widened rather than the second value quietly lost. A release build takes the first and
     /// carries on, which is why this is pinned only where the check is on.
     #[test]
-    #[cfg(debug_assertions)]
     fn a_property_the_dump_publishes_once_is_refused_when_the_wiki_writes_two() {
         let one_each = r#"{"query":{"results":[{"Yume 2kki:Authors# 56aa30":{"printouts":{
             "Author/Name":["kirin"]}}}]}}"#;
@@ -748,7 +768,7 @@ mod tests {
             Ok(_) => panic!("two names read into a field that publishes one"),
         };
         assert!(
-            complaint.contains("2") && complaint.contains("at most once"),
+            complaint.contains("2") && complaint.contains("at most one"),
             "the complaint says what was written and what was expected: {complaint}"
         );
     }
@@ -772,6 +792,12 @@ mod tests {
                     "item":["Map of 3D Structures Path"]},
                 "Has image path":{"label":"Has image path","typeid":"_uri",
                     "item":["https://yume.wiki/images/3/3c/3D_Structures_Path_map.png"]}}],
+            "Map IDs":[{
+                "Has map ID":{"label":"Has map ID","typeid":"_num","item":[1344]},
+                "Map ID annotation":{"label":"Map ID annotation","typeid":"_txt","item":[]}},{
+                "Has map ID":{"label":"Has map ID","typeid":"_num","item":[884]},
+                "Map ID annotation":{"label":"Map ID annotation","typeid":"_txt",
+                    "item":["Main Area"]}}],
             "Version added":["0.116a"],
             "Versions updated":["0.122g","0.124f patch 2"],
             "Version removed":[],
@@ -800,6 +826,9 @@ mod tests {
         let map = world.location_maps.first().expect("the one map");
         assert_eq!(map.caption, "Map of 3D Structures Path");
         assert!(map.path.ends_with("3D_Structures_Path_map.png"));
+        // A number rather than a string, in the order the wiki lists them, and the annotation
+        // beside it is read past rather than into: see [`MapIdRow`].
+        assert_eq!(world.map_ids, [1344, 884]);
     }
 
     /// The store writes a world's several primary authors as several values; the dump publishes
@@ -812,6 +841,7 @@ mod tests {
             authors: authors.iter().map(|name| (*name).to_owned()).collect(),
             japanese: None,
             bgms: Vec::new(),
+            map_ids: Vec::new(),
             maps: Vec::new(),
             added: None,
             updated: Vec::new(),
@@ -854,8 +884,12 @@ mod tests {
             .expect("the one author");
         assert_eq!(row.name.as_deref(), Some("kirin"));
         assert_eq!(
-            row.original.and_then(|original| original.text),
-            Some("キリン".to_owned())
+            row.original
+                .as_slice()
+                .iter()
+                .flat_map(|it| it.text.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["キリン"]
         );
     }
 

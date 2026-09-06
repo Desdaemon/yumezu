@@ -216,6 +216,21 @@ const UNREACHED_COLOR: Srgba = Srgba::new(110, 110, 120, 255);
 /// Time constant of the frame-rate smoothing, in milliseconds. The per-frame number swings far too
 /// much to read from a moving graph.
 const FPS_WINDOW_MS: f32 = 500.0;
+
+/// How long the loading frame takes to fade off the graph behind it. See [`App::veil`].
+const LOADING_FADE_SECONDS: f32 = 0.5;
+
+/// How often the server is asked what it is building, while there is nothing to draw.
+///
+/// A stage lasts tens of seconds -- see `dreamweaver`'s `progress` -- so this is about how soon a
+/// stage that has changed is said rather than about following anything closely.
+const BUILDING_ASKED_EVERY_SECONDS: f32 = 1.0;
+/// How long a run waits before asking for the dump again, after the server said it is building
+/// one. See [`Dump::Waiting`].
+///
+/// Longer than the ask above, because this one is not for the screen: nothing about the wait
+/// looks different for having asked, and the server is being polled about its progress anyway.
+const DUMP_ASKED_EVERY_SECONDS: f32 = 3.0;
 /// How many worlds the search box offers at once.
 const SEARCH_CANDIDATES: usize = 10;
 /// How many of a release's worlds the catalog shows it by, and how tall it draws those pictures,
@@ -280,6 +295,24 @@ pub(super) struct App {
     overlay: Option<Overlay>,
     /// The world dump, which everything in [`AppEntities`] is built out of. See [`Dump`].
     dump: Dump,
+    /// What the server says it is building, while the dump is still on its way. See [`Building`].
+    building: Building,
+    /// What was lit when the drawing surface was last given back, to light again once there is a
+    /// graph to light it in.
+    ///
+    /// Kept out here for the same reason the dump is: on a phone the entities holding it are
+    /// dropped every time the app leaves the screen -- see [`App::release`] -- and a selection is
+    /// something the reader made rather than something the surface owned. The layout underneath
+    /// it is built afresh, so the camera is sent to the selection again rather than left where it
+    /// was: see [`App::build`].
+    selected: Option<Highlight>,
+    /// How much of the loading frame is still on screen, 1 for all of it and 0 for none.
+    ///
+    /// The frame is not switched off when the dump lands: it is faded off over the graph that
+    /// replaced it, so the graph is uncovered rather than dropped on screen. Written back to 1 by
+    /// every [`App::draw_loading`], so a run that has to wait again -- a dump that has not landed
+    /// by the time a phone comes back to the screen -- gets the reveal again rather than once.
+    veil: f32,
 }
 
 /// The dump, at whatever stage of arriving it has reached.
@@ -294,10 +327,64 @@ pub(super) struct App {
 /// dump it would have to fetch again has not changed in the meantime.
 enum Dump {
     /// On its way in. See [`fetch`].
-    Loading(fetch::Pending<Result<world::Dump, String>>),
+    Loading(fetch::Pending<Result<Option<world::Dump>, String>>),
+    /// The server is building one and said so rather than answering with a dump. Seconds until
+    /// this run asks again -- see [`world::load`] and [`DUMP_ASKED_EVERY_SECONDS`].
+    Waiting(f32),
     Ready(world::Dump),
     /// Why there is no dump, in the words the loading frame says it in.
     Failed(String),
+}
+
+/// What the server says it is building, for the loading frame to say instead of the plain wait.
+///
+/// A server with no dump yet answers the fetch with `needs update` rather than a document, so that
+/// fetch is not an account of how the wait is going -- this is. Asked for on its own clock rather than per frame,
+/// and only ever one ask at a time: see [`Building::tick`] and [`world::building`].
+#[derive(Default)]
+struct Building {
+    /// What the last answer said, as the name of the message to say.
+    task: Option<&'static str>,
+    /// The ask in flight, if there is one.
+    asking: Option<fetch::Pending<Option<&'static str>>>,
+    /// Seconds until the next ask. Starts at zero, so the first frame of a wait asks.
+    until: f32,
+}
+
+impl Building {
+    /// Reads whatever the last ask came back with, and starts the next one when it is due.
+    fn tick(&mut self, seconds: f32) {
+        if let Some(asking) = &self.asking {
+            if let Some(said) = asking.take() {
+                // Only when it moves on, and worth logging at all because it is the only account
+                // a run leaves of a wait that can last a minute.
+                let moved_on = said.is_some() && said != self.task;
+                self.task = said;
+                // What the frame now says, rather than the name behind it: this is the only
+                // account a run leaves of a wait that can last a minute, and it is worth reading
+                // as the same thing that is on screen.
+                if moved_on {
+                    log::info!("the server is building the dump: {}", self.says());
+                }
+                self.asking = None;
+            }
+            // One at a time: an ask still in flight is the answer to how long to wait for it.
+            return;
+        }
+        self.until -= seconds;
+        if self.until <= 0.0 {
+            self.until = BUILDING_ASKED_EVERY_SECONDS;
+            self.asking = Some(fetch::spawn(world::building()));
+        }
+    }
+
+    /// The line the loading frame says: the stage the server named, or the plain wait.
+    fn says(&self) -> String {
+        match self.task {
+            Some(said) => super::i18n::format(said, None),
+            None => t!("dump-loading"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -901,6 +988,9 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 self.draw();
+                // After the frame rather than before it, so the page never has neither.
+                #[cfg(target_family = "wasm")]
+                take_placeholder();
                 self.ctx.wctx.as_ref().unwrap().swap_buffers().unwrap();
                 self.ctx.window.as_ref().unwrap().request_redraw();
             }
@@ -935,6 +1025,8 @@ impl App {
     /// the screen, and everything built on it dies with it, so it is all built again by
     /// [`App::resumed`] -- the same path a first start takes, and therefore a fresh layout.
     fn release(&mut self) {
+        // Read before the entities holding it go: see [`App::selected`].
+        self.selected = self.data.as_ref().and_then(|data| data.selected);
         self.data = None;
         // The painter holds buffers of the context's, and a dropped [`gui::Gui`] does not give
         // them back on its own.
@@ -977,6 +1069,9 @@ impl App {
             },
             data: None,
             overlay: None,
+            building: Building::default(),
+            selected: None,
+            veil: 1.0,
         }
     }
     fn reset(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, window: Window) {
@@ -1001,7 +1096,14 @@ impl App {
             return;
         };
         let ctx = self.ctx.wctx.as_ref().unwrap();
-        self.data = Some(entities(dump, ctx));
+        let mut data = entities(dump, ctx);
+        // Lit again where a resume dropped it, which also aims the camera at it: the layout this
+        // is a selection in is a new one, so where the camera was looking is nowhere in
+        // particular. See [`App::selected`].
+        if self.selected.is_some() {
+            data.select(self.selected);
+        }
+        self.data = Some(data);
     }
 }
 
@@ -1247,14 +1349,35 @@ impl App {
     /// laid out here -- only the one message, over the same cleared background the graph is drawn
     /// on, so that the window does not change colour when the graph arrives.
     fn draw_loading(&mut self) {
+        // Whole, for as long as this is the frame: what fades is what is left of it once the
+        // graph is drawing. See [`App::veil`].
+        self.veil = 1.0;
         let ctx = self.ctx.wctx.as_ref().unwrap();
         let frame_input = self.ctx.fig.as_mut().unwrap().generate(ctx);
         let window = self.ctx.window.as_ref().unwrap();
-        let overlay = self.overlay.as_mut().unwrap();
+        // Only while there is still something coming: a run that has given up has nothing to ask
+        // about, and the line it says is its own.
+        let seconds = (frame_input.elapsed_time as f32 * 1e-3).min(0.05);
+        if !matches!(self.dump, Dump::Failed(_)) {
+            self.building.tick(seconds);
+            // The other clock this frame runs: the server said it is building, and this is the
+            // run waiting that out before asking for the dump again.
+            if let Dump::Waiting(until) = &mut self.dump {
+                *until -= seconds;
+                if *until <= 0.0 {
+                    self.dump = Dump::Loading(fetch::spawn(world::load()));
+                }
+            }
+        }
+        let says = match &self.dump {
+            Dump::Failed(_) => t!("dump-failed"),
+            _ => self.building.says(),
+        };
         let failed = match &self.dump {
             Dump::Failed(error) => Some(error.as_str()),
             _ => None,
         };
+        let overlay = self.overlay.as_mut().unwrap();
         // The same scale the panel is laid out at, so the message is the size the rest of the
         // interface will be. See [`Overlay::panel`].
         overlay.gui.context().set_zoom_factor(overlay.ui_scale);
@@ -1262,24 +1385,9 @@ impl App {
         // the first that may want it.
         let context = overlay.gui.context().clone();
         overlay.japanese.serve(&context);
-        overlay.gui.run(window, |ui| {
-            egui::Area::new(egui::Id::new("loading"))
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ui.ctx(), |ui| {
-                    ui.horizontal(|ui| match failed {
-                        // What went wrong is logged in full; on screen it is the one line, since
-                        // there is nothing the reader can do with a URL and a status code beyond
-                        // knowing the server is not answering.
-                        Some(error) => {
-                            ui.label(t!("dump-failed")).on_hover_text(error);
-                        }
-                        None => {
-                            ui.add(egui::Spinner::new());
-                            ui.label(t!("dump-loading"));
-                        }
-                    });
-                });
-        });
+        overlay
+            .gui
+            .run(window, |ui| loading_frame(ui.ctx(), &says, failed, 1.0));
         frame_input
             .screen()
             .clear(ClearState::color_and_depth(
@@ -1307,7 +1415,10 @@ impl App {
             };
             if let Some(loaded) = arrived {
                 self.dump = match loaded {
-                    Ok(dump) => Dump::Ready(dump),
+                    Ok(Some(dump)) => Dump::Ready(dump),
+                    // Not an error and not a dump: the server is building one, and asking again
+                    // in a moment is the whole of what this run has to do about it.
+                    Ok(None) => Dump::Waiting(DUMP_ASKED_EVERY_SECONDS),
                     Err(error) => {
                         log::error!("{error}");
                         Dump::Failed(error)
@@ -1324,6 +1435,16 @@ impl App {
         let mut frame_input = self.ctx.fig.as_mut().unwrap().generate(ctx);
         let window = self.ctx.window.as_ref().unwrap();
 
+        // What is left of the loading frame, worn down by however long this frame took. Clamped
+        // as the layout's own step is: the frame the graph was built on is a long one, and the
+        // reveal should not be spent paying for it.
+        if self.veil > 0.0 {
+            let step = (frame_input.elapsed_time as f32 * 1e-3).min(0.05);
+            self.veil = (self.veil - step / LOADING_FADE_SECONDS).max(0.0);
+        }
+        // Whatever the frame was saying when the dump landed, still saying it as it goes: a line
+        // that changed on the way out would read as a new thing to look at.
+        let fading = (self.veil > 0.0).then(|| (self.building.says(), self.veil));
         let data = self.data.as_mut().unwrap();
         self.statics.camera.set_viewport(frame_input.viewport);
         // egui marks what it uses as handled, so a click on the panel must not also reach the graph behind it.
@@ -1331,7 +1452,7 @@ impl App {
             .overlay
             .as_mut()
             .unwrap()
-            .run(window, &mut frame_input, data)
+            .run(window, &mut frame_input, data, fading)
         {
             // Repulsion acts along the offset between two nodes, so a layout flattened onto the
             // plane has no depth for the forces to reinflate: leaving two dimensions has to
@@ -1504,6 +1625,7 @@ impl Overlay {
         window: &Window,
         frame_input: &mut FrameInput,
         data: &AppEntities,
+        fading: Option<(String, f32)>,
     ) -> Panel {
         // egui's own way of being asked for a bigger interface: it multiplies whatever the window
         // says a point is worth, which is exactly what this scale means. So the panel is laid out
@@ -1577,6 +1699,12 @@ impl Overlay {
                 guide.reopen();
             }
             guide.show(ui.ctx());
+            // Last of all, and over the panel as much as over the graph: what is fading is the
+            // frame that stood in for the whole interface, so the whole interface comes out from
+            // under it. See [`App::veil`].
+            if let Some((says, opacity)) = &fading {
+                loading_frame(ui.ctx(), says, None, *opacity);
+            }
         });
         // What `three_d`'s `GUI` used to return from its own update. Asked of egui after the
         // frame, which is the only point at which it knows what was laid out under the pointer.
@@ -1601,12 +1729,13 @@ impl Overlay {
         window: &Window,
         frame_input: &mut FrameInput,
         data: &mut AppEntities,
+        fading: Option<(String, f32)>,
     ) -> bool {
         // Guard the very first frame, which reports no elapsed time at all.
         let elapsed = (frame_input.elapsed_time as f32).max(1e-3);
         self.fps += (1000.0 / elapsed - self.fps) * (elapsed / FPS_WINDOW_MS).min(1.0);
 
-        let panel = self.panel(window, frame_input, data);
+        let panel = self.panel(window, frame_input, data, fading);
         if let Some(language) = panel.language {
             i18n::speak(language);
         }
@@ -3307,6 +3436,77 @@ fn worlds(count: usize) -> String {
 }
 
 /// A colour at a fraction of its own opacity, whatever it was drawn at before.
+/// Takes the page's own loading line off the document, the once.
+///
+/// The wasm is a few megabytes, and the canvas is black until it has come down and drawn -- so
+/// `index.html` carries the same line the loading frame does, to stand in until this frame. Called
+/// after every frame and does nothing after the first: the element is gone, and a lookup that
+/// finds nothing is not worth doing sixty times a second.
+#[cfg(target_family = "wasm")]
+fn take_placeholder() {
+    static TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if TAKEN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Some(placeholder) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id("loading"))
+    {
+        placeholder.remove();
+    }
+}
+
+/// The loading frame's own drawing: the background it stands on, and the one line it says.
+///
+/// Drawn at `opacity` rather than always whole, because the frame is not switched off when the
+/// dump lands. [`App::draw_loading`] draws it whole over a cleared screen, and [`Overlay::panel`]
+/// draws what is left of it over the graph and the panel that replaced it, so those are uncovered
+/// rather than dropped on screen. See [`App::veil`].
+///
+/// The veil goes on the foreground layer, which is over the panel and over every window on it,
+/// and the words go a layer above that. Two orders rather than two layers of the same one: a
+/// layer painted straight through [`egui::Context::layer_painter`] is not one of the areas egui
+/// sorts among itself, so within an order it is drawn last -- which put the veil over the words
+/// it was supposed to be behind, and made the loading frame a black screen.
+fn loading_frame(ctx: &egui::Context, says: &str, failed: Option<&str>, opacity: f32) {
+    let opacity = opacity.clamp(0.0, 1.0);
+    let channel = |channel: usize| (BACKGROUND_COLOR[channel] * 255.0) as u8;
+    ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("loading-veil"),
+    ))
+    .rect_filled(
+        // The whole window, notches and status bar included: the graph is drawn under those too,
+        // and a veil that stopped at the safe area would uncover a stripe of it early.
+        ctx.viewport_rect(),
+        egui::CornerRadius::ZERO,
+        egui::Color32::from_rgba_unmultiplied(
+            channel(0),
+            channel(1),
+            channel(2),
+            (opacity * 255.0) as u8,
+        ),
+    );
+    egui::Area::new(egui::Id::new("loading"))
+        .order(egui::Order::Tooltip)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.set_opacity(opacity);
+            ui.horizontal(|ui| match failed {
+                // What went wrong is logged in full; on screen it is the one line, since there is
+                // nothing the reader can do with a URL and a status code beyond knowing the
+                // server is not answering.
+                Some(error) => {
+                    ui.label(says).on_hover_text(error);
+                }
+                None => {
+                    ui.add(egui::Spinner::new());
+                    ui.label(says);
+                }
+            });
+        });
+}
+
 fn fade(color: egui::Color32, opacity: u8) -> egui::Color32 {
     let [r, g, b, a] = color.to_srgba_unmultiplied();
     egui::Color32::from_rgba_unmultiplied(r, g, b, (a as u16 * opacity as u16 / 255) as u8)

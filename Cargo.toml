@@ -75,6 +75,13 @@ tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
 reqwest-middleware = "0.5.2"
 http-cache-reqwest = "=1.0.0-alpha.8"
 
+[target.'cfg(all(not(target_family = "wasm"), not(target_os = "android")))'.dependencies]
+# Somewhere for `log` to go on a desktop. The page has `console_log` and the phone has
+# `android_logger`; without this the third platform is the one where a failed dump and a server
+# saying what it is building are both written to nobody. Off unless `RUST_LOG` asks, which is
+# `env_logger`'s own default and the right one for a windowed app.
+env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
+
 [target.'cfg(target_family = "wasm")'.dependencies]
 # The page keeps the reader's languages on `navigator`, which is only reachable through js.
 sys-locale = { version = "0.3", features = ["js"] }

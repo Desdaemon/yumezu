@@ -10,3 +10,36 @@ body {
   width: 100% !important;
   height: 100% !important;
 }
+
+// What stands in for the app's loading frame until there is an app: see `index.html`. Centred
+// and coloured to match what replaces it, so the first frame is a handover rather than a change
+// of screen. `pointer-events: none` because it is a picture of an interface, not one.
+#loading {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55em;
+  pointer-events: none;
+  font: 16px system-ui, sans-serif;
+  // egui's dark theme, which is what the frame this stands in for is drawn in.
+  color: #8c8c8c;
+}
+
+// egui draws a turning arc beside the words, and so does this.
+#loading::before {
+  content: "";
+  width: 1em;
+  height: 1em;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: loading-spin 1s linear infinite;
+}
+
+@keyframes loading-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}

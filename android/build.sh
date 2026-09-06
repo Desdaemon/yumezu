@@ -36,7 +36,10 @@ readonly BIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$BIN/$TRIPLE$MIN_SDK-clang
 export CC_aarch64_linux_android=$BIN/$TRIPLE$MIN_SDK-clang
 export AR_aarch64_linux_android=$BIN/llvm-ar
-cargo build --release --lib --target "$TRIPLE"
+# `production` for the same reason `just dist` builds with it: it is what points the app at the
+# published dump rather than at a `dreamweaver` on localhost, and there is no localhost on a
+# phone. See `world::DUMP`.
+cargo build --release --lib --features production --target "$TRIPLE"
 
 # The apk is assembled in a staging tree whose layout *is* the apk's: `lib/<abi>` is where the
 # framework looks for the library named in the manifest, and `assets` is what the AssetManager in

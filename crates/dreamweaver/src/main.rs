@@ -10,18 +10,26 @@
 //! see [`model::Dump`]. Nothing here parses HTML, and nothing here should: none of those four says
 //! anything about how the worlds join up, which is the whole of what this dump is read for.
 //!
-//! There is nothing to run but the server, and nothing to tell it to do. It builds the dump when
-//! it comes up and keeps it current by itself: every few hours it asks the wiki what has been
-//! edited since the dump was built, and rebuilds out of the answer -- reading again only the parts
-//! of the wiki those pages belong to. See [`Sync`] and [`sync::Fetched`]. Rebuilding all of it
-//! regardless is the one thing it waits to be asked for, and `POST /update` is the asking.
+//! There is nothing to run but the server, and nothing to tell it to do. It keeps the dump current
+//! out of the requests for it: a `GET /data` that arrives more than `--sync-every` hours after the
+//! wiki was last asked about starts a sync and answers `503 needs update` instead of the dump, and
+//! the client waits that sync out on `POST /pollUpdate` before asking again. Every other `GET
+//! /data` is answered from the file. See [`Due`] and [`data`].
+//!
+//! A sync asks the wiki what has been edited since the dump was built and rebuilds out of the
+//! answer, re-reading only the parts of the wiki those pages belong to -- see [`sync::Fetched`].
+//! A run with no dump to compare against reads all of it.
 //!
 //! ```text
-//! dreamweaver [--listen ADDR] [--data PATH] [--sync-every HOURS]
+//! dreamweaver [--listen ADDR|PATH] [--data PATH] [--sync-every HOURS]
 //! ```
+//!
+//! `--listen` takes either a `host:port` or, so that nginx can reach it the other way its
+//! `proxy_pass` knows, the path of a Unix socket -- see [`Listen`].
 
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::extract::State;
 use axum::http::{StatusCode, header};
@@ -30,6 +38,7 @@ use axum::routing::{get, post};
 
 mod depth;
 mod model;
+mod progress;
 mod smw;
 mod store;
 mod sync;
@@ -60,6 +69,10 @@ struct Server {
     store: Arc<store::Store>,
     http: reqwest::Client,
     fetched: Arc<tokio::sync::Mutex<sync::Fetched>>,
+    /// Where the running sync has got to. See [`progress`].
+    progress: Arc<progress::Progress>,
+    /// Whether the wiki is worth asking about again. See [`Due`].
+    due: Arc<Due>,
 }
 
 #[tokio::main]
@@ -77,21 +90,29 @@ async fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
 
+    let store = Arc::new(store::Store::open(&options.data));
+    // A run that read a dump off disk is as up to date as that dump says it is, so it is not due
+    // a sync the moment it comes up. One that read nothing is.
+    let due = Arc::new(Due::new(options.sync_every, &store.snapshot().dump));
     let server = Server {
-        store: Arc::new(store::Store::open(&options.data)),
+        store,
         http: reqwest::Client::new(),
         fetched: Arc::default(),
+        progress: Arc::default(),
+        due,
     };
     serve(server, options).await;
     std::process::ExitCode::SUCCESS
 }
 
-const USAGE: &str = "dreamweaver [--listen ADDR] [--data PATH] [--sync-every HOURS]";
+const USAGE: &str = "dreamweaver [--listen ADDR|PATH] [--data PATH] [--sync-every HOURS]";
 
 /// The switches, and their defaults.
 struct Options {
+    /// A `host:port` or a socket path; [`Listen`] is which.
     listen: String,
     data: String,
+    /// How long a sync stands for. See [`Due`].
     sync_every: u64,
 }
 
@@ -116,9 +137,14 @@ impl Options {
                 "--listen" => self.listen = value()?,
                 "--data" => self.data = value()?,
                 "--sync-every" => {
-                    self.sync_every = value()?
-                        .parse()
-                        .map_err(|_| "--sync-every wants a whole number of hours".to_owned())?
+                    // Refused rather than clamped, and refused here rather than found out later:
+                    // zero hours is a sync that is due again the moment it ends, and a server
+                    // whose dump is always due never serves it at all. See [`Due`] and [`data`].
+                    self.sync_every = match value()?.parse() {
+                        Ok(hours) if hours > 0 => hours,
+                        _ => return Err("--sync-every wants a whole number of hours, at least one"
+                            .to_owned()),
+                    }
                 }
                 other => return Err(format!("no such switch: {other}")),
             }
@@ -127,50 +153,110 @@ impl Options {
     }
 }
 
-/// How hard a refresh tries.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Sync {
-    /// Ask the wiki what has changed, and rebuild out of the answer.
-    ///
-    /// Most passes end at that first request with nothing to do, which on a wiki whose worlds
-    /// arrive weekly is most of them. A pass that does have something to do re-reads the parts of
-    /// the wiki the edited pages belong to and keeps the rest of the last fetch -- see
-    /// [`sync::Fetched`] -- so a week's editing costs a couple of requests rather than thirty.
-    Soft,
-    /// Rebuild, whatever the wiki says about itself.
-    ///
-    /// What a run does when it comes up, since there may be no dump at all to keep, and what
-    /// `POST /update` asks for.
-    Full,
+/// Whether the wiki is worth asking about again, and so whether the next `GET /data` is answered
+/// with the dump or with `needs update`.
+///
+/// The mark is when a sync last *ran*, not when the dump last changed. Most syncs find the wiki
+/// unmoved and publish nothing -- see [`plan`] -- so dating this from the dump's own stamp would
+/// leave every one of those due again immediately, and a busy server would ask the wiki about
+/// every request it got.
+///
+/// A run that came up with a dump on disk inherits that dump's stamp, so restarting the server is
+/// not a way to make it re-read the wiki, and a host that restarts it hourly does not read the
+/// wiki hourly.
+struct Due {
+    /// When the wiki was last asked, or `None` for a server that has never asked it.
+    asked: std::sync::Mutex<Option<time::OffsetDateTime>>,
+    /// How long that answer stands for: `--sync-every`.
+    every: time::Duration,
 }
 
-/// Fetches a new dump and publishes it.
+impl Due {
+    fn new(hours: u64, previous: &model::Dump) -> Self {
+        Due {
+            asked: std::sync::Mutex::new(previous.last_update.as_deref().and_then(sync::moment)),
+            every: time::Duration::hours(hours as i64),
+        }
+    }
+
+    /// Whether a sync is due now.
+    fn now(&self) -> bool {
+        match *self.asked.lock().unwrap() {
+            Some(asked) => time::OffsetDateTime::now_utc() - asked >= self.every,
+            None => true,
+        }
+    }
+
+    /// Says the wiki has just been asked, whatever came of it.
+    ///
+    /// A failed sync counts. The wiki being unreachable is not something a tighter loop fixes,
+    /// and a server that retried every request would answer `needs update` to all of them while
+    /// hammering a host that is already having a bad day.
+    fn met(&self) {
+        *self.asked.lock().unwrap() = Some(time::OffsetDateTime::now_utc());
+    }
+}
+
+/// Starts a sync, unless one is already running.
 ///
-/// `Ok(None)` means a soft sync found nothing to do, which is not a failure and not a dump: the
-/// one already published is still the right one, down to the byte.
-async fn refresh(server: &Server, sync: Sync) -> smw::Result<Option<usize>> {
-    let mut fetched = server.fetched.lock().await;
+/// The lock the sync holds is taken here, so "is one running" and "what keeps two from running"
+/// are one fact rather than two that can disagree. A caller that does not get it has nothing to
+/// do: the sync already running is the one it wanted started.
+///
+/// `Ok(None)` from [`build`] means the wiki had nothing to say, which is not a failure and not a
+/// dump: the one already published is still the right one, down to the byte.
+fn start(server: &Server) {
+    let Ok(mut fetched) = server.fetched.clone().try_lock_owned() else {
+        return;
+    };
+    let server = server.clone();
+    tokio::spawn(async move {
+        let built = build(&server, &mut fetched).await;
+        // However it went: the wiki has been asked, and nothing is being fetched any more.
+        server.due.met();
+        server.progress.done();
+        match built {
+            Ok(Some(worlds)) => tracing::info!("published {worlds} worlds"),
+            Ok(None) => tracing::info!("the wiki has not changed; the dump stands"),
+            // Debug rather than Display: `reqwest` names the request either way, but what it
+            // will not put in a line is which field of the answer it could not read, and on a
+            // failed sync that is the whole of what there is to go on.
+            Err(error) => tracing::error!("sync failed: {error:?}"),
+        }
+    });
+}
+
+/// The work [`start`] reports on. Split out so that every way out of it -- a sync with nothing to
+/// do, a failed fetch, a published dump -- passes back through the same clearing up.
+async fn build(server: &Server, fetched: &mut sync::Fetched) -> smw::Result<Option<usize>> {
     let previous = server.store.snapshot();
-    let plan = match plan(server, sync, &previous.dump).await {
+    let plan = match plan(server, &previous.dump).await {
         Some(plan) => plan,
         None => return Ok(None),
     };
-    let dump = sync::run(&server.http, &previous.dump, plan, &mut fetched).await?;
+    let dump = sync::run(
+        &server.http,
+        &previous.dump,
+        plan,
+        fetched,
+        &server.progress,
+    )
+    .await?;
     Ok(Some(server.store.publish(dump).dump.worlds.len()))
 }
 
 /// How much of the wiki this refresh should read, or `None` for one that need not run at all.
 ///
-/// A soft sync is the only one with a choice to make. It asks the wiki which pages have moved
-/// since the dump was built -- a little before that, in fact, since the store is indexed after the
-/// fact and the question is worth overlapping. Three answers stand the sync down or widen it:
-/// nothing has changed, so there is nothing to build; the dump is old enough that the wiki no
-/// longer remembers that far back, so the honest answer is to read all of it; and the wiki cannot
-/// be asked at all, likewise.
-async fn plan(server: &Server, sync: Sync, previous: &model::Dump) -> Option<sync::Refresh> {
-    // Nothing to compare against is a first sync, and a first sync is a full one however it was
-    // asked for.
-    let (Sync::Soft, Some(built)) = (sync, previous.last_update.as_deref()) else {
+/// A sync with a dump to compare against is the only one with a choice to make. It asks the wiki
+/// which pages have moved since that dump was built -- a little before that, in fact, since the
+/// store is indexed after the fact and the question is worth overlapping. Three answers stand the
+/// sync down or widen it: nothing has changed, so there is nothing to build; the dump is old
+/// enough that the wiki no longer remembers that far back, so the honest answer is to read all of
+/// it; and the wiki cannot be asked at all, likewise.
+async fn plan(server: &Server, previous: &model::Dump) -> Option<sync::Refresh> {
+    server.progress.at(progress::CHANGES);
+    // Nothing to compare against is a first sync, and a first sync reads all of it.
+    let Some(built) = previous.last_update.as_deref() else {
         return Some(sync::Refresh::Everything);
     };
     if previous.worlds.is_empty() {
@@ -196,6 +282,29 @@ async fn plan(server: &Server, sync: Sync, previous: &model::Dump) -> Option<syn
     }
 }
 
+/// What `--listen` named.
+///
+/// nginx reaches an upstream by `proxy_pass http://127.0.0.1:5000` or by
+/// `proxy_pass http://unix:/run/dreamweaver.sock:`, and which of the two a host wants is the
+/// host's business: a socket in a directory only nginx and this program can enter needs no
+/// loopback port left open, which for a server whose `/update` is unguarded is the safer half.
+///
+/// The two are told apart by the `/`, since no `host:port` has one -- not even an IPv6 literal,
+/// which brackets its colons instead.
+enum Listen<'a> {
+    Tcp(&'a str),
+    Unix(&'a Path),
+}
+
+impl<'a> Listen<'a> {
+    fn read(listen: &'a str) -> Self {
+        match listen.contains('/') {
+            true => Listen::Unix(Path::new(listen)),
+            false => Listen::Tcp(listen),
+        }
+    }
+}
+
 /// Runs the server until it is asked to stop.
 async fn serve(server: Server, options: Options) {
     let app = axum::Router::new()
@@ -203,27 +312,68 @@ async fn serve(server: Server, options: Options) {
         // implementation serves it as, and `/data.json` is what a build script would rather save.
         .route("/data", get(data))
         .route("/data.json", get(data))
-        .route("/update", post(update))
-        .with_state(server.clone());
+        .route("/pollUpdate", post(poll_update))
+        .with_state(server);
 
-    let listener = match tokio::net::TcpListener::bind(&options.listen).await {
-        Ok(listener) => listener,
-        Err(error) => {
-            tracing::error!("cannot listen on {}: {error}", options.listen);
-            return;
+    match Listen::read(&options.listen) {
+        Listen::Tcp(address) => {
+            let listener = match tokio::net::TcpListener::bind(address).await {
+                Ok(listener) => listener,
+                Err(error) => {
+                    tracing::error!("cannot listen on {address}: {error}");
+                    return;
+                }
+            };
+            tracing::info!("listening on http://{address}");
+            run(listener, app).await;
         }
-    };
-    tracing::info!("listening on http://{}", options.listen);
+        Listen::Unix(path) => {
+            let listener = match bind(path) {
+                Ok(listener) => listener,
+                Err(error) => {
+                    tracing::error!("cannot listen on {}: {error}", path.display());
+                    return;
+                }
+            };
+            tracing::info!("listening on unix:{}", path.display());
+            run(listener, app).await;
+            // A socket outlives the process that bound it, and the one left behind is both a
+            // door that answers nothing and the file the next run has to clear before it can
+            // bind. Tidying up here covers the graceful stop; `bind` covers every other ending.
+            if let Err(error) = std::fs::remove_file(path) {
+                tracing::warn!("cannot remove {}: {error}", path.display());
+            }
+        }
+    }
+}
 
-    // The refresher runs alongside rather than inside a request, so a client is never made to
-    // wait for the wiki and a wiki that is down costs nothing but a stale dump. It is also why
-    // the port is open before the first sync: a run that comes up with a dump on disk serves it
-    // straight away rather than after several minutes of paging.
-    tokio::spawn(refresher(
-        server,
-        Duration::from_secs(options.sync_every * 3600),
-    ));
+/// Opens the socket `--listen` named, clearing a stale one out of the way.
+///
+/// The socket is made world-reachable. The permissions on a socket that arrived with the default
+/// umask would let nothing but this program's own user connect, which is not what a host putting
+/// nginx in front of it is asking for, and nginx's own user is not something this program can
+/// guess. What decides who may connect is the directory the socket sits in -- which is the usual
+/// arrangement, and the one the host is already making when it chooses the path.
+fn bind(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
+    // Only a socket, and only one nothing is listening on: `bind` fails with "address in use"
+    // against a live one, which is the right answer for a second copy started by mistake, and
+    // refusing to unlink anything else keeps a mistyped `--listen` from eating a real file.
+    if std::os::unix::net::UnixStream::connect(path).is_err()
+        && std::fs::symlink_metadata(path).is_ok_and(|file| file.file_type().is_socket())
+    {
+        std::fs::remove_file(path)?;
+    }
+    let listener = tokio::net::UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;
+    Ok(listener)
+}
 
+/// Serves until Ctrl-C, whichever kind of door the requests come through.
+async fn run<L>(listener: L, app: axum::Router)
+where
+    L: axum::serve::Listener,
+    L::Addr: std::fmt::Debug,
+{
     if let Err(error) = axum::serve(listener, app)
         .with_graceful_shutdown(async {
             _ = tokio::signal::ctrl_c().await;
@@ -234,51 +384,42 @@ async fn serve(server: Server, options: Options) {
     }
 }
 
-/// Keeps the dump current, for as long as the server runs.
+/// `GET /data` -- the dump, exactly as it sits on disk, or `503 needs update`.
 ///
-/// The first pass is a full one, because a run that has just come up does not know how old what it
-/// read off disk is, and may have read nothing at all. Every pass after it is soft, and most of
-/// them end at the first request with the wiki saying nothing has changed.
+/// The second is what makes the server keep up at all: there is no clock in here, only requests,
+/// and a request arriving after the last sync has gone stale is what starts the next one. The
+/// client is told to wait rather than handed the old dump so that it has one story for both of
+/// the waits it can meet -- the first sync of a server with nothing to serve, and a routine
+/// refresh -- and `POST /pollUpdate` is how it waits: poll it until `done`, then ask again.
 ///
-/// A failed refresh is logged and waited out rather than retried straight away: the wiki being
-/// unreachable is not something a tighter loop fixes, and the dump already being served stays
-/// perfectly good in the meantime.
-async fn refresher(server: Server, every: Duration) {
-    let mut sync = Sync::Full;
-    loop {
-        match refresh(&server, sync).await {
-            Ok(Some(worlds)) => tracing::info!("published {worlds} worlds"),
-            Ok(None) => tracing::info!("the wiki has not changed; the dump stands"),
-            Err(error) => tracing::error!("sync failed: {error}"),
-        }
-        sync = Sync::Soft;
-        tokio::time::sleep(every).await;
+/// An empty dump is never served. A client cannot tell it from a wiki with no worlds in it and
+/// would draw the second, so a server that has never built one answers `needs update` however
+/// recently it last tried.
+async fn data(State(server): State<Server>) -> axum::response::Response {
+    let snapshot = server.store.snapshot();
+    if server.due.now() || snapshot.dump.worlds.is_empty() {
+        // Nothing is awaited: the sync outlives this request, which is the whole point of
+        // answering rather than holding the connection open for the minute it takes.
+        start(&server);
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "5")],
+            "needs update\n",
+        )
+            .into_response();
     }
-}
-
-/// `GET /data` -- the dump, exactly as it sits on disk.
-async fn data(State(server): State<Server>) -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "application/json")],
-        server.store.snapshot().json.to_string(),
+        snapshot.json.to_string(),
     )
+        .into_response()
 }
 
-/// `POST /update` -- rebuild now, and say how it went.
+/// `POST /pollUpdate` -- what the sync is doing, in the reference implementation's own shape.
 ///
-/// A full sync, not a soft one: this is the one way to have the dump rebuilt without the wiki
-/// first agreeing that it needs to be, which is what makes it worth having at all. Everything else
-/// the server does to keep up it does on its own.
-///
-/// Unguarded, and so meant for a host that is not exposing this port to the world. It costs the
-/// wiki a few dozen requests and cannot damage anything: the worst a caller can do is make the
-/// server fetch a dump it was going to fetch anyway.
-async fn update(State(server): State<Server>) -> impl IntoResponse {
-    match refresh(&server, Sync::Full).await {
-        Ok(worlds) => (
-            StatusCode::OK,
-            format!("published {} worlds\n", worlds.unwrap_or_default()),
-        ),
-        Err(error) => (StatusCode::BAD_GATEWAY, format!("sync failed: {error}\n")),
-    }
+/// `done` is that no sync is running, not that there is a dump: a server between syncs answers
+/// `{"task": null, "done": true}` whether or not it has ever built one. See [`progress`].
+async fn poll_update(State(server): State<Server>) -> impl IntoResponse {
+    let task = server.progress.task();
+    axum::Json(serde_json::json!({ "task": task, "done": task.is_none() }))
 }

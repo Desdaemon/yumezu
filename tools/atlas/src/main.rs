@@ -3,9 +3,11 @@
 //! Run from the repository root, through `just thumbnails`. Downloads are cached under
 //! `tools/atlas/cache`, so a re-run after a layout change costs nothing but the packing.
 //!
-//! A world's thumbnail is its cell of the grid, and its cell is its index in `data.json`: the
-//! app derives the same mapping from the atlas it loads, so there is no manifest to keep in step.
-//! Only [`CELL`] is shared knowledge, and the app checks the atlas against it on load.
+//! A world's thumbnail is its cell of the grid, and its cell is its index among the worlds the
+//! app draws: the app derives the same mapping from the atlas it loads, so there is no manifest
+//! to keep in step. What the two sides share is [`CELL`], which the app checks the atlas against
+//! on load, and which worlds are left out -- the secrets, which the app drops on reading the dump
+//! and this has to drop in the same place, or every cell after the first of them is off by one.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -37,6 +39,7 @@ fn main() {
         .as_array()
         .expect("data.json has no worldData")
         .iter()
+        .filter(|world| !world["secret"].as_bool().unwrap_or(false))
         .map(|world| world["filename"].as_str().unwrap_or_default().to_owned())
         .collect();
 
