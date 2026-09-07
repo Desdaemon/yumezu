@@ -5,12 +5,10 @@
 
 use crate::LANES;
 
-/// Bodies per leaf.
-///
-/// This is the group a single tree walk serves, so it trades walk count against interaction-list
-/// length. Measured on a 4000-node graph at the default opening angle: 8 bodies costs 3.5 ms per
-/// step, 32 costs 2.2 ms, 64 costs 2.5 ms. A multiple of [`LANES`] keeps a leaf's bodies filling
-/// whole iterations of the repulsion kernel.
+/// The group a single tree walk serves, so it trades walk count against interaction-list length.
+/// Measured on a 4000-node graph at the default opening angle: 8 bodies costs 3.5 ms per step, 32
+/// costs 2.2 ms, 64 costs 2.5 ms. A multiple of [`LANES`], so a leaf's bodies fill whole
+/// iterations of the repulsion kernel.
 const LEAF_CAPACITY: usize = LANES * 4;
 /// Coincident bodies would subdivide forever. At this depth the leaf keeps them all instead.
 const MAX_DEPTH: u32 = 20;
@@ -25,14 +23,13 @@ pub(crate) struct Octree {
     com_z: Vec<f32>,
     /// Total mass of the cell.
     mass: Vec<f32>,
-    /// Number of bodies in the cell, which is how many pair interactions it stands in for.
+    /// How many pair interactions the cell stands in for.
     count: Vec<f32>,
     /// Full width of the cell, for the `width / distance < theta` acceptance test.
     width: Vec<f32>,
     children: Vec<[u32; 8]>,
-    /// `(start, count)` into `order`, for every cell: a cell owns one contiguous run of bodies.
-    /// The traversal needs this for internal cells too, to recognize the ones that enclose the
-    /// node it is gathering for.
+    /// `(start, count)` into `order`: a cell owns one contiguous run of bodies. Kept for internal
+    /// cells too, so the traversal can recognize the ones enclosing the node it gathers for.
     bodies: Vec<(u32, u32)>,
     /// Whether the cell stopped subdividing, and so owns its bodies directly.
     is_leaf: Vec<bool>,
@@ -43,8 +40,8 @@ pub(crate) struct Octree {
 }
 
 impl Octree {
-    /// Rebuilds the tree over every slot with mass. A massless slot neither exerts nor feels a
-    /// force, so leaving it out also keeps the root cube tight around the live nodes.
+    /// Over every slot with mass: a massless slot neither exerts nor feels a force, so leaving it
+    /// out also keeps the root cube tight around the live nodes.
     pub fn build(&mut self, x: &[f32], y: &[f32], z: &[f32], mass: &[f32]) {
         self.com_x.clear();
         self.com_y.clear();
@@ -192,17 +189,17 @@ impl Octree {
         self.is_leaf[cell].then(|| &self.order[start as usize..(start + count) as usize])
     }
 
-    /// Collects the bodies and cell aggregates that everything inside the box `lo..hi` interacts
-    /// with, together with the force each entry may contribute.
+    /// Collects the bodies and cell aggregates everything inside the box `lo..hi` interacts with,
+    /// together with the force each entry may contribute.
     ///
     /// A cell stands in for its bodies once its width subtends less than `theta` from the whole
-    /// box, measured from the nearest corner, so the list is valid for every node in the box.
-    /// One walk then serves a leaf's worth of nodes instead of one node.
+    /// box, measured from the nearest corner, so the list is valid for every node in the box and
+    /// one walk serves a leaf's worth of nodes.
     ///
     /// `query` is the leaf the box was measured from. Its own bodies must reach the kernel as
-    /// bodies, never folded into an aggregate: only an exactly zero offset makes a node's pull
-    /// on itself zero, and an aggregate standing in for the node itself sits a rounding error
-    /// away from it, which the softened inverse square turns into a full-strength kick.
+    /// bodies, never folded into an aggregate: only an exactly zero offset makes a node's pull on
+    /// itself zero, and an aggregate standing in for the node itself sits a rounding error away,
+    /// which the softened inverse square turns into a full-strength kick.
     #[allow(clippy::too_many_arguments)]
     pub fn gather(
         &self,
@@ -235,16 +232,16 @@ impl Octree {
                 distance_sqrd += gap * gap;
             }
             let width = self.width[cell];
-            // The acceptance test cannot recognize an enclosing cell on its own: it measures
-            // from the center of mass, which can lie outside the box while the cell encloses
-            // it, and a cell of coincident bodies has no width to fail the test with.
+            // The acceptance test cannot recognize an enclosing cell on its own: it measures from
+            // the center of mass, which can lie outside the box while the cell encloses it, and a
+            // cell of coincident bodies has no width to fail the test with.
             let (start, count) = self.bodies[cell];
             let encloses_query = start <= query_start && query_start < start + count;
             if !encloses_query && width * width < theta_sqrd * distance_sqrd {
                 // The aggregate replaces `count` pairs, each of which the exact pass would have
                 // clamped to `force_max` on its own, so it carries that many pairs' worth of
-                // headroom. Clamping it as if it were a single pair is what makes an aggregate
-                // under-report a crowded cell.
+                // headroom. Clamping it as one pair is what makes an aggregate under-report a
+                // crowded cell.
                 out.push(
                     com[0],
                     com[1],

@@ -1,43 +1,30 @@
-//! The Android app, offered to the phone that could be running it instead.
+//! The bar offering the Android apk, which draws the same graph faster than the page does.
 //!
-//! The page is the whole of this app on a desktop, but on a phone it is the slower half of one:
-//! the apk served at [`URL`] draws the same graph with nothing between it and the device. So a
-//! phone that arrives at the page is told the apk exists, in a bar it can put away for good.
-//!
-//! Only on the page, and only on Android. A desktop has nothing here to install, an iPhone cannot
-//! install this, and the phone build is already the thing being offered -- so on all three there
-//! is nothing to say, and [`on_android_browser`] is what tells them apart.
+//! Shown only on the page and only on Android: a desktop has nothing to install, an iPhone
+//! cannot install this, and the apk itself is already what is being offered.
 
 use egui_material_icons::icons::{ICON_ANDROID, ICON_CLOSE};
 
 use super::i18n::t;
 
-/// Where the apk is served from. Relative to the page, so it is whichever host served the page.
 const URL: &str = "/android";
 
-/// What the dismissal is kept under. The presence of the value *is* the answer, so there is
-/// nothing to parse and nothing that can be half-written. See [`super::store`].
+// Presence is the whole answer; the value is always empty.
 const DISMISSED: &str = "download-dismissed";
 
-/// The bar, and whether it is still being shown.
 pub(super) struct Offer {
-    /// Whether it is on screen this frame. False for good once it is put away, and false from the
-    /// start on every platform and every later run that has no offer to make.
     open: bool,
 }
 
 impl Offer {
-    /// Opens on a phone reading the page that was never told to stop offering.
     pub(super) fn new() -> Self {
         Self {
             open: on_android_browser() && super::store::read(DISMISSED).is_none(),
         }
     }
 
-    /// Draws it, if there is anything to offer.
-    ///
     /// `insets` is what the system's own furniture covers: the bar stands off the bottom of the
-    /// safe area rather than the bottom of the window, which on a phone is behind the navigation.
+    /// safe area, not of the window, which on a phone sits behind the navigation bar.
     pub(super) fn show(&mut self, ctx: &egui::Context, insets: egui::Margin) {
         if !self.open {
             return;
@@ -59,8 +46,7 @@ impl Offer {
                             .clicked()
                         {
                             super::open_in_browser(URL);
-                            // Taking the offer ends it as surely as refusing it does: whatever
-                            // comes of the download, there is no second apk to hand out.
+                            // Taking the offer ends it too: there is no second apk to hand out.
                             self.dismiss();
                         }
                         if ui
@@ -75,19 +61,14 @@ impl Offer {
             });
     }
 
-    /// Takes the bar off the screen and writes that it is not to come back.
     fn dismiss(&mut self) {
         self.open = false;
         super::store::write(DISMISSED, Some(""));
     }
 }
 
-/// Whether this is a device that could run the apk: the page, on Android.
-///
-/// The user agent is the only thing a page is told about the device reading it. It is a string
-/// anything can claim anything in, but nothing here rests on it: a browser that lies about being
-/// Android is offered a download it can ignore, and one that lies the other way is left with the
-/// page it already has.
+/// The user agent is all a page is told about the device, and anything can claim anything in it.
+/// Nothing rests on it: a browser that lies is offered a download it can ignore.
 fn on_android_browser() -> bool {
     #[cfg(target_family = "wasm")]
     {

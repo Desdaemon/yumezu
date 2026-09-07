@@ -17,13 +17,12 @@ use crate::model::ConnType;
 /// The world the game starts in, and so the world every distance is measured from.
 const START: &str = "Urotsuki's Room";
 
-/// One world, as this module needs it.
 pub struct Node {
     pub title: String,
     /// A world the game no longer has. A route may walk into one but never back out into a world
     /// that still exists, so a removed world cannot shorten a live world's distance.
     pub removed: bool,
-    /// The passages this world lists, as `(index of the world it leads to, what it is like)`.
+    /// `(index of the world it leads to, what the passage is like)`.
     pub out: Vec<(usize, ConnType)>,
 }
 
@@ -52,7 +51,7 @@ pub fn of(worlds: &[Node]) -> Vec<(i32, i32)> {
     deep.into_iter().zip(shallow).collect()
 }
 
-/// Distances from [`START`] under one set of refused conditions, giving up conditions until
+/// Distances from [`START`] under one set of refused conditions, giving conditions up until
 /// nothing more can be reached.
 fn distances(worlds: &[Node], refused: ConnType) -> Vec<i32> {
     let mut depth: Vec<Option<i32>> = vec![None; worlds.len()];
@@ -68,8 +67,7 @@ fn distances(worlds: &[Node], refused: ConnType) -> Vec<i32> {
     };
     depth[start] = Some(0);
 
-    // The first pass is the measurement proper, and everything it reaches is measured under the
-    // conditions asked for.
+    // The measurement proper: everything it reaches is measured under the conditions asked for.
     relax(worlds, refused, &mut depth, &mut through_removed, false);
 
     let mut refused = refused;
@@ -112,13 +110,10 @@ fn give_up(refused: ConnType) -> Option<ConnType> {
     None
 }
 
-/// Spreads the distances already known outward until nothing gets closer.
-///
-/// Nearest first out of a heap rather than a breadth-first sweep, because the pass after the
-/// first starts from everything the previous ones reached rather than from a single source, and
-/// those seeds sit at every distance at once. Taking the nearest each time is what makes the
-/// distance a world is first given the shortest one it has, which matters when `keep` forbids
-/// improving it afterwards.
+/// Nearest first out of a heap rather than a breadth-first sweep, because every pass after the
+/// first starts from everything the previous ones reached and those seeds sit at every distance at
+/// once. Taking the nearest each time is what makes the distance a world is first given the
+/// shortest one it has, which matters when `keep` forbids improving it afterwards.
 ///
 /// `keep` leaves the worlds that already have a distance exactly as they are, and is how a pass
 /// that has given up a condition reaches further without rewriting what a stricter pass decided.

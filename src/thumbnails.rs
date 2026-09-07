@@ -1,69 +1,52 @@
 //! The thumbnail atlas: one image carrying a picture of every world, packed by `tools/atlas`.
 //!
-//! One image rather than one texture per world, because the nodes are drawn as a single instanced
-//! mesh: fifteen hundred textures would be fifteen hundred draw calls, whereas an atlas is one,
-//! with each instance carrying the corner of it that its own world sits in.
+//! One image rather than a texture per world, because the nodes are drawn as a single instanced
+//! mesh: fifteen hundred textures would be fifteen hundred draw calls.
 //!
-//! A world's cell is its index in the dump, so nothing has to be carried alongside the atlas to
-//! say which picture belongs to which world. Its index in the dump rather than its node index,
-//! because a run drawing only what one player has seen draws a part of the dump and numbers its
-//! nodes afresh -- see `world::Dump::showing`, and `world::World::cell`, which is what a node
-//! carries. One cell holds no world at all: the last of the grid is the placeholder a world the
-//! player has not been to is drawn as. What the two sides have to agree on is [`CELL`], and
-//! [`cells`] checks that they still do rather than trusting it.
+//! A world's cell is its index in the *dump*, not its node index, so nothing has to travel
+//! alongside the atlas to say which picture belongs to which world -- a run drawing only what one
+//! player has seen draws a part of the dump and numbers its nodes afresh. The last cell of the
+//! grid holds no world; it is the placeholder an unvisited world is drawn as. Both sides have to
+//! agree on [`CELL`], which [`cells`] checks rather than trusts.
 
 use three_d::renderer::*;
 
 use super::fetch;
 
-/// Where the atlas is served from: alongside the page on the web, under the working directory
-/// natively, and inside the apk on Android, which the same relative path reaches on all three.
+// The same relative path reaches all three: beside the page, under the working directory, and
+// inside the apk.
 const PATH: &str = "static/thumbnails.jpg";
-/// The picture an unvisited world is drawn as, shipped beside the atlas by the same command that
-/// packs it. Whole rather than the cell of it the atlas also carries: see [`placeholder`].
+// Shipped beside the atlas by the same command that packs it. Whole rather than the cell of it
+// the atlas also carries -- see [`placeholder`].
 const UNKNOWN: &str = "static/unknown_location.png";
-/// Size of one thumbnail in the atlas, in texels. Must match `tools/atlas`, which writes it.
+/// Size of one thumbnail in texels. Must match `tools/atlas`, which writes the atlas.
 pub const CELL: [u32; 2] = [64, 48];
-/// How much wider a thumbnail is than it is tall, which is the shape a node is drawn in.
 pub const ASPECT: f32 = CELL[0] as f32 / CELL[1] as f32;
-/// How many mipmaps the atlas keeps.
+/// Mipmapped because nodes are only a few pixels wide until the view comes in on them, and
+/// minifying that far unmipmapped makes the thumbnails crawl as the layout moves.
 ///
-/// Nodes are drawn only a few pixels wide until the view comes in on them, and minifying an
-/// unmipmapped texture that far makes the thumbnails crawl as the layout moves. Capped, because a
-/// mip texel averages a square of the atlas without knowing where one world's picture stops: at
-/// this level a texel spans 16 of the atlas's own, which still divides both sides of a cell, so
-/// no world ends up sampling its neighbour's picture. A full chain would end up averaging the
-/// whole atlas into one texel.
+/// Capped because a mip texel averages a square of the atlas without knowing where one world's
+/// picture stops. At this level a texel spans 16 of the atlas's own, which still divides both
+/// sides of a cell, so no world samples its neighbour's picture.
 const MIP_LEVELS: u32 = 5;
 
-/// Starts loading the atlas. See [`fetch`].
-///
-/// `None` if it cannot be had, which is not fatal: the app draws the graph without pictures. That
-/// is also the state a fresh checkout is in until `just thumbnails` has been run.
+/// `None` is not fatal: the app draws the graph without pictures, which is also where a fresh
+/// checkout stands until `just thumbnails` has been run.
 pub fn load() -> fetch::Pending<Option<CpuTexture>> {
-    // Capped for the reason [`MIP_LEVELS`] gives: a mip texel averages a square of the atlas
-    // without knowing where one world's picture stops.
     picture(PATH, Some(MIP_LEVELS))
 }
 
-/// Starts loading the picture an unvisited world is drawn as. See [`fetch`].
+/// The picture an unvisited world is drawn as: its own file as well as its own cell of the atlas,
+/// because the graph draws it at every size and the atlas is a jpeg -- the worst thing to put a
+/// hard white shape on black through. The catalog draws the cell, at about the size it is packed
+/// at.
 ///
-/// Its own file as well as its own cell of the atlas, because the two are read for different
-/// things. The cell is what the sidebar's catalog draws, at about the size it is packed at. The
-/// file is what the graph draws, at every size: there is no sharper version of this picture for a
-/// closer look to switch to -- it is not a photograph of somewhere, it is the mark that stands in
-/// for one -- and the atlas is a jpeg, which is the worst thing to put a hard white shape on black
-/// through. See `detail`, which draws it.
-///
-/// `None` if it cannot be had, which is not fatal: an unvisited world keeps its node with nothing
-/// on it, the same way a world whose picture the wiki no longer serves does.
+/// `None` is not fatal: an unvisited world keeps its bare node.
 pub fn placeholder() -> fetch::Pending<Option<CpuTexture>> {
-    // A full chain, unlike the atlas: this picture is one picture rather than a grid of them, so
-    // there is no neighbour for a mip texel to bleed in from.
+    // A full chain, unlike the atlas: one picture, so no neighbour to bleed in from.
     picture(UNKNOWN, None)
 }
 
-/// One picture shipped beside the app, decoded and made samplable.
 fn picture(path: &'static str, mip_levels: Option<u32>) -> fetch::Pending<Option<CpuTexture>> {
     fetch::spawn(async move {
         match read(path).await {
@@ -73,8 +56,8 @@ fn picture(path: &'static str, mip_levels: Option<u32>) -> fetch::Pending<Option
                         max_levels: mip_levels.unwrap_or(u32::MAX),
                         ..Default::default()
                     }),
-                    // A cell reaches the edge of the atlas, so a sample that falls off it has to
-                    // be pinned to the edge rather than wrapped around to the far side.
+                    // Cells reach the edge of the atlas, so an off-edge sample must pin rather
+                    // than wrap round to the far side.
                     wrap_s: Wrapping::ClampToEdge,
                     wrap_t: Wrapping::ClampToEdge,
                     ..picture
@@ -92,10 +75,6 @@ fn picture(path: &'static str, mip_levels: Option<u32>) -> fetch::Pending<Option
     })
 }
 
-/// The atlas's bytes, however this platform stores them.
-///
-/// A relative path off the working directory natively and a request beside the page on the web,
-/// both of which the asset loader already knows how to tell apart on its own.
 #[cfg(not(target_os = "android"))]
 async fn read(path: &str) -> Result<Vec<u8>, String> {
     let mut assets = three_d_asset::io::load_async(&[path])
@@ -105,8 +84,7 @@ async fn read(path: &str) -> Result<Vec<u8>, String> {
 }
 
 /// An apk holds its assets compressed inside itself rather than as files, so there is no path to
-/// hand the loader and nothing to await: the framework unpacks the whole of one on demand, and
-/// only the manager it is asked through has to be reached for. See `app`'s `ANDROID`.
+/// hand the loader: the framework unpacks one on demand, through the manager reached here.
 #[cfg(target_os = "android")]
 async fn read(path: &str) -> Result<Vec<u8>, String> {
     use std::io::Read as _;
@@ -126,17 +104,13 @@ async fn read(path: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-/// Per world, the uv transform that lands its quad on its cell of the atlas.
+/// Per world, the uv transform landing its quad on its cell. `of` holds `None` for a world the
+/// player has not been to, which draws the placeholder.
 ///
-/// `of` says which cell each world draws out of: its own, or `None` for a world the player has
-/// not been to, which draws the placeholder instead. `packed` is how many worlds the atlas was
-/// packed for, which is what the atlas has to be big enough for however few of them this graph is
-/// drawing -- a cell is a world's place in the whole dump, not in the part of it on screen. See
-/// `world::World::cell`.
-///
-/// `None` if the atlas cannot hold that many, which means it was packed against a different
-/// [`CELL`] or a different dump: sampling it anyway would give every world a picture of somewhere
-/// else, which is worse than giving it none.
+/// `packed` is how many worlds the atlas was packed for, which it must be big enough for however
+/// few of them this graph draws -- a cell is a world's place in the whole dump. `None` if the
+/// atlas cannot hold that many, meaning it was packed against a different [`CELL`] or a different
+/// dump: sampling it anyway would give every world a picture of somewhere else.
 pub fn cells(packed: usize, of: &[Option<usize>], atlas: &CpuTexture) -> Option<Vec<Mat3>> {
     let (columns, rows) = grid(packed, atlas)?;
     let unknown = unknown(columns, rows);
@@ -147,35 +121,26 @@ pub fn cells(packed: usize, of: &[Option<usize>], atlas: &CpuTexture) -> Option<
     )
 }
 
-/// The uv transform that lands a quad on one cell.
 fn uv(cell: usize, columns: u32, rows: u32) -> Mat3 {
     let size = vec2(1.0 / columns as f32, 1.0 / rows as f32);
     let (column, row) = (cell as u32 % columns, cell as u32 / columns);
-    // Rows are counted from the bottom of the atlas, because the uv coordinates this transform is
-    // composed with are already flipped in v: three-d builds a mesh's uv buffer as `1 - v` (see
-    // its `renderer::geometry` docs), so a quad's top edge arrives here as v = 1. Only the offset
-    // turns over; the direction within a cell is right as it stands, which is why the pictures are
-    // not upside down.
+    // Rows count from the bottom because three-d builds a mesh's uv buffer as `1 - v`, so a
+    // quad's top edge arrives here as v = 1. Only the offset turns over -- the direction within a
+    // cell is already right, which is why the pictures are not upside down.
     let row = rows - 1 - row;
     Mat3::from_translation(vec2(column as f32 * size.x, row as f32 * size.y))
         * Mat3::from_nonuniform_scale(size.x, size.y)
 }
 
-/// The cell holding the picture drawn for a world the player has not been to: the last of the
-/// grid, wherever the grid ends.
-///
-/// The corner rather than a cell counted off the worlds, so the atlas says where it is by its own
-/// shape and neither side has to carry a number the other could get wrong. `tools/atlas` packs it
-/// there, and sizes the grid so that there is a corner left over to pack it into.
+/// The last cell of the grid, rather than one counted off the worlds, so neither side carries a
+/// number the other could get wrong. `tools/atlas` packs the placeholder there and sizes the grid
+/// to leave the corner free.
 fn unknown(columns: u32, rows: u32) -> usize {
     (columns * rows) as usize - 1
 }
 
-/// How the atlas divides into cells, if it divides into enough of them for `packed` worlds and the
-/// placeholder that follows them.
-///
-/// `None` if it does not, which means it was packed against a different [`CELL`] or a different
-/// dump: sampling it anyway would give every world a picture of somewhere else.
+/// `None` unless the atlas divides into enough cells for `packed` worlds and the placeholder
+/// after them. See [`cells`] for why that is checked.
 fn grid(packed: usize, atlas: &CpuTexture) -> Option<(u32, u32)> {
     let (columns, rows) = (atlas.width / CELL[0], atlas.height / CELL[1]);
     if columns * CELL[0] != atlas.width
@@ -195,11 +160,7 @@ fn grid(packed: usize, atlas: &CpuTexture) -> Option<(u32, u32)> {
     Some((columns, rows))
 }
 
-/// A decoded picture as egui holds them, or `None` for one stored in a format it has no pixel
-/// for.
-///
-/// The one place a [`CpuTexture`] is turned into something egui can show, which the atlas needs
-/// for its [`Sheet`] and the map window needs for every map it opens. See [`super::map`].
+/// `None` for a picture stored in a format egui has no pixel for.
 pub fn color_image(picture: &CpuTexture) -> Option<egui::ColorImage> {
     let size = [picture.width as usize, picture.height as usize];
     match &picture.data {
@@ -212,12 +173,8 @@ pub fn color_image(picture: &CpuTexture) -> Option<egui::ColorImage> {
     }
 }
 
-/// The atlas again, as egui holds it: what the sidebar's catalog draws its pictures out of.
-///
-/// A second upload of the same image, because the two sides own their textures separately — egui
-/// hands out its own ids and manages its own uploads, and there is no seam between it and the
-/// renderer's [`Texture2DRef`] to share one across. One extra copy of a single image, held for the
-/// life of the app, against a catalog that can show what a release actually looks like.
+/// The atlas again, as egui holds it: a second upload of the same image, because egui hands out
+/// its own ids and there is no seam between it and the renderer's [`Texture2DRef`] to share one.
 pub struct Sheet {
     texture: egui::TextureHandle,
     columns: u32,
@@ -225,9 +182,7 @@ pub struct Sheet {
 }
 
 impl Sheet {
-    /// `None` if the atlas cannot be read as this many cells, or is stored in a format egui has
-    /// no pixel for — the same failure the renderer's own side takes, and just as survivable: the
-    /// catalog lists releases without pictures.
+    /// `None` is survivable either way: the catalog lists worlds without pictures.
     pub fn new(egui: &egui::Context, packed: usize, atlas: &CpuTexture) -> Option<Self> {
         let (columns, rows) = grid(packed, atlas)?;
         let Some(image) = color_image(atlas) else {
@@ -235,21 +190,15 @@ impl Sheet {
             return None;
         };
         Some(Self {
-            // Linear, and no mipmaps: the cells are drawn at about their own size, so there is
-            // nothing to filter between.
+            // No mipmaps: the cells are drawn at about their own size.
             texture: egui.load_texture(PATH, image, egui::TextureOptions::LINEAR),
             columns,
             rows,
         })
     }
 
-    /// One world's picture, `height` points tall and in the shape the atlas crops to.
-    ///
-    /// `cell` is the world's cell of the atlas, or `None` for a world the player has not been to,
-    /// which draws the placeholder: the same reading `cells` makes for the graph itself.
-    ///
-    /// Counted from the top left, unlike [`cells`]: egui's images are the right way up, so only
-    /// the renderer has a flip to undo.
+    /// `cell` reads as in [`cells`], but counts from the top left: egui's images are the right
+    /// way up.
     pub fn picture(&self, cell: Option<usize>, height: f32) -> egui::Image<'static> {
         let cell = cell.unwrap_or_else(|| unknown(self.columns, self.rows));
         let (column, row) = (cell as u32 % self.columns, cell as u32 / self.columns);

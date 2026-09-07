@@ -1,38 +1,29 @@
 //! Loading something off the network without stalling the frame that asked for it.
 //!
-//! The app draws on one thread and never blocks, so a load cannot be awaited where it is wanted.
-//! It is started instead, and the caller keeps a [`Pending`] to look in on each frame until the
-//! value turns up. The two platforms have different executors and no shared way to reach one, so
-//! [`spawn`] is the seam: everything above it is the same on both.
+//! The app draws on one thread and never blocks, so a load is started rather than awaited and the
+//! caller keeps a [`Pending`] to look in on each frame. The two platforms have different
+//! executors and no shared way to reach one, so [`spawn`] is the seam: everything above it is the
+//! same on both.
 
 use std::sync::{Arc, Mutex};
 
-/// Something being loaded, which the draw loop polls until it arrives.
-///
-/// A slot rather than a channel: nothing here waits, and nothing needs the load's history — only
-/// whether it has finished.
+/// A slot rather than a channel: nothing here waits, and nothing needs the load's history.
 pub struct Pending<T>(Arc<Mutex<Option<T>>>);
 
 impl<T> Pending<T> {
-    /// The loaded value, the once it is there. `None` while the load is still running, and `None`
-    /// forever after it has been taken, so a caller can poll this every frame and act once.
+    /// `None` while the load is still running, and `None` forever after it has been taken, so a
+    /// caller can poll every frame and act once.
     pub fn take(&self) -> Option<T> {
         self.0.lock().unwrap().take()
     }
 }
 
-/// Starts `work` and hands back the slot its result will land in.
-///
-/// The future is dropped along with its result if the [`Pending`] outlives the app, which is the
-/// whole of the cancellation this needs: a load nobody is waiting for costs a wasted download and
-/// nothing else.
+/// No cancellation: a load nobody is waiting for costs a wasted download and nothing else.
 #[cfg(not(target_family = "wasm"))]
 pub fn spawn<T: Send + 'static>(
     work: impl std::future::Future<Output = T> + Send + 'static,
 ) -> Pending<T> {
-    // Downloads drive their sockets through a tokio reactor, so the future needs one running
-    // under it. One runtime serves every load the app ever starts; it is built on the first,
-    // because most runs never fetch anything at all.
+    // One runtime serves every load, built on the first because most runs fetch nothing at all.
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     let slot = Pending(Arc::default());
     let into = slot.0.clone();
@@ -42,11 +33,9 @@ pub fn spawn<T: Send + 'static>(
     slot
 }
 
-/// Starts `work` and hands back the slot its result will land in.
-///
-/// On the page there is only ever the one thread, and the browser is already running the executor
-/// the future needs, so this hands it over rather than starting one. [`Send`] is therefore not
-/// asked for, which is the only way the signature differs from the native one.
+/// The browser already runs the executor the future needs, so this hands it over rather than
+/// starting one. [`Send`] is therefore not asked for, the only way this differs from the native
+/// signature.
 #[cfg(target_family = "wasm")]
 pub fn spawn<T: 'static>(work: impl std::future::Future<Output = T> + 'static) -> Pending<T> {
     let slot = Pending(Arc::default());
@@ -55,20 +44,17 @@ pub fn spawn<T: 'static>(work: impl std::future::Future<Output = T> + 'static) -
     slot
 }
 
-/// What a download is made with, and what one fails with.
-///
 /// The middleware carrying the cache wraps the client in a type of its own, so the two platforms
-/// no longer name the same one. Aliases rather than the types themselves, so everything above
-/// this is written once: the surface a caller touches -- `get`, `header`, `send` -- is identical,
-/// and [`Error`] converts from `reqwest`'s own, so `?` still reaches it from a `send` or an
-/// `error_for_status`.
+/// no longer name the same one. Aliased so everything above is written once: the surface a caller
+/// touches -- `get`, `header`, `send` -- is identical, and [`Error`] converts from `reqwest`'s
+/// own, so `?` still reaches it.
 #[cfg(not(target_family = "wasm"))]
 pub type Client = reqwest_middleware::ClientWithMiddleware;
 /// See [`Client`].
 #[cfg(target_family = "wasm")]
 pub type Client = reqwest::Client;
-/// One request being put together, which is the type a caller has to name to hand one on before
-/// sending it. See [`Client`], and `yno`'s `session::sign`, which is what does the handing on.
+/// Named so a caller can hand a half-built request on before sending it -- see `yno`'s
+/// `session::sign`. Aliased for the reason in [`Client`].
 #[cfg(not(target_family = "wasm"))]
 pub type RequestBuilder = reqwest_middleware::RequestBuilder;
 /// See [`RequestBuilder`].
@@ -81,38 +67,30 @@ pub type Error = reqwest_middleware::Error;
 #[cfg(target_family = "wasm")]
 pub type Error = reqwest::Error;
 
-/// The client every download goes through, built once and handed out by the clone.
-///
-/// The clone is cheap -- everything behind it is shared -- and sharing is the point: one client
-/// keeps a connection pool, so the second picture off the wiki reuses the first one's socket and
-/// its TLS session rather than starting a handshake of its own. Built lazily, and so on the
-/// executor [`spawn`] put the first request on, which is where the native one has to be.
-///
-/// On the page this is [`reqwest::Client`] unchanged. There it is a wrapper over the browser's
-/// `fetch`, which pools connections and keeps an HTTP cache without being asked, so there is
-/// nothing here worth building once and nothing to add.
+/// Unbuilt and unwrapped on the page: this is a thin cover over the browser's `fetch`, which
+/// pools connections and keeps an HTTP cache without being asked.
 #[cfg(target_family = "wasm")]
 pub fn client() -> Client {
     reqwest::Client::new()
 }
 
-/// The client every download goes through. See the page's [`client`] above.
+/// Built once and handed out by the clone, which is cheap because everything behind it is shared.
+/// Sharing is the point: one connection pool, so the second picture off the wiki reuses the
+/// first's socket and TLS session. Built lazily, and so on the executor [`spawn`] put the first
+/// request on, which is where it has to be.
 #[cfg(not(target_family = "wasm"))]
 pub fn client() -> Client {
     static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(build).clone()
 }
 
-/// Assembles it: the transport, the cache over the top, and [`judged`] over that.
-///
-/// Order is the whole of it. A builder runs its middleware outermost first, so `judged` is added
-/// before the cache and therefore wraps it, which is the only position the cache's verdict can be
-/// read from -- it is written onto the response on the way back out.
+/// Order is the whole of it. A builder runs its middleware outermost first, so [`judged`] is added
+/// before the cache and therefore wraps it, the only position the cache's verdict can be read
+/// from -- it is written onto the response on the way back out.
 #[cfg(not(target_family = "wasm"))]
 fn build() -> Client {
     let mut middleware = reqwest_middleware::ClientBuilder::new(transport()).with(judged);
-    // Skipped rather than fatal where there is nowhere to keep it: a run with no cache fetches
-    // everything it needs anyway, which is exactly what every run did before there was one.
+    // Skipped rather than fatal: a run with no cache fetches everything it needs anyway.
     match cache() {
         Some(cache) => middleware = middleware.with(cache),
         None => log::warn!("downloads will not be cached between runs"),
@@ -120,21 +98,15 @@ fn build() -> Client {
     middleware.build()
 }
 
-/// Logs what the cache made of every request, which is otherwise not observable at all: the store
-/// is one opaque file, and the whole point of a hit is that no traffic leaves the device to watch.
+/// Logs what the cache made of every request, which is otherwise unobservable: the store is one
+/// opaque file, and the point of a hit is that no traffic leaves the device to watch. At `info`
+/// because that is the level Android is set to, and a phone has no proxy to watch and no cache
+/// directory to look in without a debug build.
 ///
-/// Written at `info` because that is the level Android is set to -- see `lib`'s `android_main` --
-/// and a phone is where this is hardest to answer any other way: there is no proxy to watch and no
-/// cache directory to look in without a debug build. The volume is a few requests a run plus one
-/// per picture the view comes close enough to sharpen, which is the traffic being asked about.
-///
-/// The two headers are the cache's own account of itself, stamped onto the response by
-/// `http-cache` on the way out: `x-cache-lookup` says whether the store had anything for the
-/// address at all and `x-cache` whether that thing was served. So `HIT`/`HIT` is a free answer,
-/// `HIT`/`MISS` is one the store held but had to revalidate or could not use, and `MISS`/`MISS`
-/// went to the network cold. Neither header means there is no cache in this client, which is what
-/// [`build`] warns about. Named here rather than imported: the crate keeps its own constants for
-/// them behind a private re-export.
+/// `x-cache-lookup` says whether the store had anything for the address at all and `x-cache`
+/// whether that thing was served, so `HIT`/`MISS` was held but had to be revalidated or could not
+/// be used. Neither header means this client has no cache, which is what [`build`] warns about.
+/// Named here rather than imported: the crate keeps its own constants behind a private re-export.
 #[cfg(not(target_family = "wasm"))]
 fn judged<'a>(
     request: reqwest::Request,
@@ -165,21 +137,15 @@ fn judged<'a>(
     })
 }
 
-/// The client underneath, which is the whole of it on every platform but Android.
 #[cfg(not(target_family = "wasm"))]
 fn transport() -> reqwest::Client {
     let builder = reqwest::Client::builder();
-    // Android alone, and only since reqwest 0.13
-    // (<https://github.com/seanmonstar/reqwest/pull/2891>) made `rustls-platform-verifier` the
-    // one way it checks a certificate. That verifier reaches the system trust store through a
-    // Java class which has to be in the apk and initialised over JNI before the first request;
-    // this apk is native the whole way down and has no Java in it at all -- see
-    // `android/build.sh` -- so the call would panic on the first picture the app fetches.
-    // Compiled-in roots instead: the same Mozilla set the page's own browser would use, which is
-    // enough for the one host this build ever asks for anything (see `detail::ORIGIN`). The cost
-    // is that they only change when a build does, so a root withdrawn or added between releases
-    // is missed. Every other platform is left with the OS verifier, which knows more than a fixed
-    // list can.
+    // reqwest 0.13 made `rustls-platform-verifier` its one way to check a certificate, and that
+    // verifier reaches the system trust store through a Java class which must be in the apk and
+    // initialised over JNI before the first request. This apk has no Java in it at all -- see
+    // `android/build.sh` -- so the call would panic on the first picture fetched. Compiled-in
+    // roots instead, at the cost of only changing when a build does. Every other platform keeps
+    // the OS verifier. <https://github.com/seanmonstar/reqwest/pull/2891>
     #[cfg(target_os = "android")]
     let builder = builder.tls_certs_only(
         webpki_root_certs::TLS_SERVER_ROOT_CERTS
@@ -189,18 +155,13 @@ fn transport() -> reqwest::Client {
     builder.build().expect("cannot build an http client")
 }
 
-/// The store the cache is kept in, and the rules it is kept under.
+/// Ordinary HTTP rules, which is all the wiki needs: it serves its pictures with a `max-age` and
+/// an `ETag`, so a picture fetched once is reused without a request until it goes stale, then
+/// revalidated conditionally. Nothing here caps the size -- the system empties the directory
+/// holding the store when the device wants the room, and that is the whole of the policy.
 ///
-/// [`CacheMode::Default`] rather than anything of this app's own devising, which is to say the
-/// ordinary HTTP rules: the wiki serves its pictures with a `max-age` and an `ETag`, so a picture
-/// fetched once is reused without a request until it goes stale and revalidated with a
-/// conditional one after that, which comes back empty unless the picture really did change. A
-/// single file, and the system empties the directory holding it when the device wants the room --
-/// see [`super::store::cache_directory`], which is the whole of the size policy.
-///
-/// `None` if there is nowhere to keep it or it cannot be opened -- a directory that cannot be
-/// made, or a store left corrupt by a run that died mid-write. Losing the cache is not worth
-/// failing a run over.
+/// `None` if there is nowhere to keep it or it cannot be opened, which is not worth failing a run
+/// over.
 #[cfg(not(target_family = "wasm"))]
 fn cache() -> Option<http_cache_reqwest::Cache<http_cache_reqwest::RedbManager>> {
     Some(http_cache_reqwest::Cache(http_cache_reqwest::HttpCache {
@@ -210,15 +171,9 @@ fn cache() -> Option<http_cache_reqwest::Cache<http_cache_reqwest::RedbManager>>
     }))
 }
 
-/// The open store itself, kept apart from [`cache`] so that [`clear`] can reach the same one.
-///
-/// Opened once. Two handles on one redb file is a lock the second would fail on, and a second
-/// store would in any case be a second answer: emptying it would leave the client still serving
-/// out of the first.
-///
-/// `None` if there is nowhere to keep it or it cannot be opened -- a directory that cannot be
-/// made, or a store left corrupt by a run that died mid-write. Losing the cache is not worth
-/// failing a run over.
+/// Kept apart from [`cache`] so [`clear`] reaches the same store. Opened once: two handles on one
+/// redb file is a lock the second would fail on, and emptying a second store would leave the
+/// client serving out of the first.
 #[cfg(not(target_family = "wasm"))]
 fn store() -> Option<&'static http_cache_reqwest::RedbManager> {
     static STORE: std::sync::OnceLock<Option<http_cache_reqwest::RedbManager>> =
@@ -233,61 +188,48 @@ fn store() -> Option<&'static http_cache_reqwest::RedbManager> {
         .as_ref()
 }
 
-/// How far the cache has got with emptying itself, which is the whole of what the button in the
-/// settings tab draws. See [`clear`].
-///
-/// Not on the page: there is no store of this app's own there. The browser keeps the HTTP cache,
-/// and only the person reading can empty that.
+/// How far [`clear`] has got, which is what the button in the settings tab draws. Absent on the
+/// page, which has no store of this app's own -- the browser keeps that HTTP cache, and only the
+/// person reading can empty it.
 #[cfg(not(target_family = "wasm"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Cleared {
     /// Nobody has asked this run.
     Never,
-    /// Asked, and still going.
     Clearing,
-    /// Emptied. Every later request goes to the network cold, and fills the store again as it
-    /// comes back.
     Done,
-    /// Could not be. The store's own complaint is logged rather than shown: there is nothing a
-    /// person can do about a redb error, and the log is where the rest of the cache's account of
-    /// itself already goes -- see [`judged`].
+    /// The store's own complaint is logged rather than shown: there is nothing a person can do
+    /// about a redb error.
     Failed,
 }
 
-/// What [`clear`] has come to. Global, because the cache is: one store behind one client, so one
-/// answer however many places ask for it.
+/// Global because the cache is: one store behind one client, so one answer however many places
+/// ask.
 #[cfg(not(target_family = "wasm"))]
 static CLEARED: Mutex<Cleared> = Mutex::new(Cleared::Never);
 
-/// See [`Cleared`].
 #[cfg(not(target_family = "wasm"))]
 pub fn cleared() -> Cleared {
     *CLEARED.lock().unwrap()
 }
 
-/// Empties the store, off the drawing thread.
+/// Started rather than awaited, like every other load here: one redb transaction, but over a file
+/// that may hold every picture the run has fetched. [`cleared`] is how later frames find out.
 ///
-/// Started rather than awaited, like every other load here: the work is one redb transaction, but
-/// it is a transaction over a file that may hold every picture the run has fetched, and the frame
-/// that asked cannot wait on a disk. [`cleared`] is how the asking frame's successors find out.
+/// The client is left alone -- it holds a clone of the same [`store`], so the next request finds
+/// nothing and fills it again.
 ///
-/// The client is left alone. It holds a clone of the same [`store`], so it is serving out of the
-/// store this empties and needs no rebuilding: the next request finds nothing, goes to the
-/// network, and fills it again.
-///
-/// What this frees is the cache, not the disk. redb hands the emptied pages back to its own free
-/// list and leaves the file the size it had grown to, and shrinking it is a compaction the manager
-/// keeps no way to ask for. So the room comes back as the next downloads are written into it
-/// rather than at the press, and a device short of space empties the whole directory itself -- see
-/// [`super::store::cache_directory`].
+/// What this frees is the cache, not the disk: redb hands the emptied pages back to its own free
+/// list, leaves the file the size it had grown to, and the manager offers no compaction. The room
+/// comes back as later downloads are written into it.
 #[cfg(not(target_family = "wasm"))]
 pub fn clear() {
     *CLEARED.lock().unwrap() = Cleared::Clearing;
     spawn(async {
         let outcome = match store() {
             Some(store) => store.clear().await.map_err(|error| error.to_string()),
-            // Not a failure of the clearing so much as of the cache, which said so when it could
-            // not be opened. Reported the same way regardless: there is still nothing kept.
+            // Really a failure of [`cache`], which said so when it could not be opened, but
+            // reported the same way: there is still nothing kept.
             None => Err("there is no cache to clear".to_owned()),
         };
         *CLEARED.lock().unwrap() = match outcome {

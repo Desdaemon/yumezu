@@ -1,15 +1,9 @@
 //! Full-size world pictures, for the few worlds the view has come close enough to.
 //!
-//! The atlas holds every world at [`super::thumbnails::CELL`], which is all a node drawn a handful
-//! of pixels wide can show. Come close enough and the screen starts asking for more texels than
-//! the atlas has, and the picture goes soft. That is what this module answers: past
-//! [`SWITCH_PIXELS`] a world's picture is fetched from the wiki at the size the wiki keeps it, and
-//! drawn over the world's own atlas quad.
-//!
-//! Only a handful are ever held at once — see [`HELD`] — because a full picture is a texture and a
-//! draw call of its own, where the atlas is one of each for the whole graph. Which handful is the
-//! view's to say, frame by frame, so this module holds no opinion about the layout: it is told
-//! what to show and where.
+//! Past [`SWITCH_PIXELS`] the screen asks for more texels than the atlas cell has, so the wiki's
+//! own copy is fetched and drawn over the world's atlas quad. Only [`HELD`] at once, because each
+//! is a texture and a draw call of its own where the atlas is one of each for the whole graph.
+//! Which handful is the view's to say, frame by frame.
 
 use std::collections::HashMap;
 
@@ -17,49 +11,32 @@ use three_d::renderer::*;
 
 use super::{fetch, thumbnails};
 
-/// How wide a node has to come out on screen, in physical pixels, before its picture is worth
-/// fetching at full size.
+/// Node width on screen, in physical pixels, at which the full picture becomes worth fetching.
 ///
-/// Rather more than the [`super::thumbnails::CELL`] width the atlas holds, which is the point
-/// where magnification technically begins: a thumbnail stretched a little is not visibly soft, and
-/// switching at the first texel of magnification would spend a download on a node nobody is
-/// looking at yet. This is the width the softness starts to read at.
+/// Well past the [`super::thumbnails::CELL`] width where magnification begins: a thumbnail
+/// stretched a little is not visibly soft, and switching at the first magnified texel would spend
+/// a download on a node nobody is looking at yet.
 pub const SWITCH_PIXELS: f32 = 160.0;
-/// How many full pictures are held at once.
-///
-/// A ceiling on the cost rather than on the view: the widest nodes are served first, so coming in
-/// on a crowd sharpens the ones nearest the camera and leaves the rest on the atlas. Small,
-/// because each one is a texture upload and a draw call, and because a view that has this many
-/// nodes above [`SWITCH_PIXELS`] is a view of a wall of pictures rather than of a world.
+/// A ceiling on cost, not on the view: the widest nodes are served first, so coming in on a crowd
+/// sharpens the ones nearest the camera and leaves the rest on the atlas.
 const HELD: usize = 8;
-/// Which site the wiki serves pictures to.
-///
-/// Its edge answers a request with no `Origin` at all with a challenge page rather than the
-/// picture, and answers this one with the picture and a header allowing it. On the page the
-/// browser sets this itself, and refuses to let it be set — so this only carries the native build,
-/// and a page served from anywhere else is on its own for cross-origin permission.
+/// The wiki's edge answers a request with no `Origin` at all with a challenge page rather than the
+/// picture. Only the native build sets it -- on the page the browser sets its own and refuses to
+/// let it be overridden.
 const ORIGIN: &str = "https://explorer.yume.wiki";
 /// How far in front of its own atlas quad a full picture is drawn, as a fraction of the node's
-/// radius.
-///
-/// The two quads are the same size in the same place, so without this they would be coplanar and
-/// the depth test would pick between them per pixel. Toward the camera, and small enough that the
-/// picture neither grows visibly nor pulls out of a node the layout has crowded.
+/// radius. The two are otherwise coplanar and the depth test would pick between them per pixel.
+/// Small enough that the picture neither grows visibly nor pulls out of a crowded node.
 pub const LIFT: f32 = 0.02;
 
-/// One world's picture, at whatever stage it has reached.
 enum Held {
-    /// On its way in. See [`fetch`].
     Loading(fetch::Pending<Option<CpuTexture>>),
-    /// Ready to draw, cropped and sized to stand exactly over the world's atlas quad. Boxed
-    /// because it is far the largest of these, and the other two are what most of them are.
+    /// Boxed because it dwarfs the other two variants, which are the common ones.
     Ready(Box<Gm<Mesh, ColorMaterial>>),
-    /// The wiki has no picture here, or none this can read. Kept so it is not asked for again
-    /// every time the view comes back.
+    /// Kept so the wiki is not asked again every time the view comes back.
     Missing,
 }
 
-/// The full-size pictures currently held, and what to draw them on.
 pub struct Detail {
     /// Per world, where the wiki serves its picture from. Empty for a world the player has not
     /// been to, which has no picture of its own to fetch: see [`Unvisited`].
@@ -71,41 +48,32 @@ pub struct Detail {
     unvisited: Unvisited,
 }
 
-/// The picture every world the player has not been to is drawn as, and where it is drawn.
+/// The picture every world the player has not been to is drawn as. One picture however many
+/// worlds wear it, so it is held once and drawn as a single instanced mesh -- a frontier can put
+/// hundreds on screen at once.
 ///
-/// One picture however many worlds wear it, so it is held once and drawn as a single instanced
-/// mesh: a frontier can put hundreds of these on screen at once, and a texture and a draw call
-/// each is the very thing the atlas exists to avoid.
-///
-/// Unlike everything else in this module it is not a level of detail. It is the world's picture,
-/// and it is the only one there will ever be, so it is drawn at every size rather than past
-/// [`SWITCH_PIXELS`] and it spends none of the [`HELD`] budget: there is nothing sharper for a
-/// closer look to switch to, and nothing worth freeing when the view moves away. The atlas carries
-/// a cell of it too, which this stands in front of -- that cell is for the sidebar's catalog,
-/// which reads the atlas and nothing else. See `thumbnails::placeholder`.
+/// Not a level of detail, unlike everything else here: it is the world's only picture, so it is
+/// drawn at every size rather than past [`SWITCH_PIXELS`] and spends none of the [`HELD`] budget.
+/// The atlas carries a cell of it too, for the catalog, which this stands in front of.
 #[derive(Default)]
 struct Unvisited {
-    /// On its way in, until it arrives or turns out not to be there. See [`fetch`].
     loading: Option<fetch::Pending<Option<CpuTexture>>>,
-    /// The quads, once there is a picture to put on them. `None` before that, and forever if the
-    /// picture cannot be had -- which leaves these worlds their bare nodes and nothing worse.
+    /// `None` until the picture arrives, and forever if it cannot be had, which leaves these
+    /// worlds their bare nodes.
     quads: Option<Gm<InstancedMesh, ColorMaterial>>,
 }
 
-/// A world the view is asking for at full size, and how its quad is drawn.
 pub struct Magnified {
     pub world: usize,
-    /// Where and how big, taken from the world's own atlas quad so the switch changes the detail
-    /// and nothing else.
+    /// Taken from the world's own atlas quad, so the switch changes the detail and nothing else.
     pub transformation: Mat4,
-    /// What the atlas quad is tinted with, so a picture dims along with the graph around it.
+    /// The atlas quad's tint, so a picture dims along with the graph around it.
     pub color: Srgba,
 }
 
 impl Detail {
-    /// `unvisited` is whether any world here is one the player has not been to, which is the only
-    /// thing that decides whether the placeholder is worth fetching: a run drawing the whole game
-    /// has nothing to draw it on.
+    /// `unvisited` is whether any world here is one the player has not been to, and so whether
+    /// the placeholder is worth fetching at all.
     pub fn new(images: Vec<String>, unvisited: bool) -> Self {
         Self {
             images,
@@ -118,20 +86,15 @@ impl Detail {
         }
     }
 
-    /// Stands the placeholder on the quads it was handed, which are the nodes of every world the
-    /// player has not been to.
-    ///
-    /// Every frame: the layout moves the nodes under it and the camera turns them, and a selection
-    /// dims them, all of which the caller has already worked out for the nodes themselves. See
-    /// `app`'s `AppEntities::place_unvisited`, which is where the quads come from.
+    /// Stands the placeholder on the quads it was handed -- the nodes of every world the player
+    /// has not been to. Every frame, because the layout moves the nodes, the camera turns them,
+    /// and a selection dims them.
     pub fn place_unvisited(&mut self, context: &Context, quads: &Instances) {
         if let Some(loading) = &self.unvisited.loading
             && let Some(loaded) = loading.take()
         {
-            // Whatever came of it, there is nothing left to poll for.
             self.unvisited.loading = None;
-            // The failure is logged where it is found, and leaves these worlds drawn the way every
-            // world was before there were any pictures at all.
+            // Failures are logged where they are found, and leave these worlds their bare nodes.
             if let Some(picture) = loaded {
                 self.unvisited.quads = Some(Gm::new(
                     InstancedMesh::new(context, quads, &CpuMesh::square()),
@@ -144,34 +107,26 @@ impl Detail {
         }
     }
 
-    /// Brings the held pictures in line with what the view is asking for, and places the ones that
-    /// have arrived.
-    ///
     /// `magnified` is every world drawn wider than [`SWITCH_PIXELS`], widest first. Anything past
-    /// [`HELD`] of it is left on the atlas, and anything held but no longer asked for is dropped —
-    /// which is the whole of the eviction policy, because what the view is not looking at costs
-    /// nothing to fetch again if it looks back.
+    /// [`HELD`] of it is left on the atlas, and anything held but no longer asked for is dropped:
+    /// what the view is not looking at costs nothing to fetch again if it looks back.
     pub fn track(&mut self, context: &Context, magnified: &[Magnified]) {
-        // A world with no picture to fetch is passed over before the budget is counted rather
-        // than after: it is one the player has not been to, already drawn from the whole
-        // placeholder at every size, and letting it take a slot would leave a world that does
-        // have a picture of its own on the atlas. See [`Unvisited`].
+        // Filtered before the budget is counted, not after: a world with no picture of its own
+        // already has the placeholder, and a slot spent on it would push out a world that has one.
         let magnified: Vec<&Magnified> = magnified
             .iter()
             .filter(|it| !self.images[it.world].is_empty())
             .take(HELD)
             .collect();
         let wanted: Vec<usize> = magnified.iter().map(|it| it.world).collect();
-        // Before the new ones are started, so a picture on its way out frees its budget for one
-        // on its way in within the same frame. A world with no picture is kept either way: it
-        // holds nothing, and forgetting it would mean asking the wiki again on every visit.
+        // Before the new ones start, so a picture on its way out frees its slot in the same frame.
         self.held
             .retain(|world, held| matches!(held, Held::Missing) || wanted.contains(world));
         self.wanted = wanted;
 
         for it in magnified {
-            // Taken out of the store rather than looked at in it, so whatever it has turned into
-            // can go back in its place without the store being borrowed twice.
+            // Removed rather than borrowed, so whatever it turns into goes back in its place
+            // without a second borrow.
             let mut held = match self.held.remove(&it.world) {
                 None => Held::Loading(load(self.images[it.world].clone())),
                 Some(Held::Loading(pending)) => match pending.take() {
@@ -181,8 +136,8 @@ impl Detail {
                 },
                 Some(held) => held,
             };
-            // Every frame, not just on arrival: the layout moves under the nodes and the camera
-            // turns the quads, and this one has to stay over the atlas quad it stands in for.
+            // Every frame, not just on arrival: the quad has to keep up with the atlas quad it
+            // stands over as the layout and the camera move.
             if let Held::Ready(quad) = &mut held {
                 quad.set_transformation(it.transformation);
                 quad.material.color = it.color;
@@ -191,15 +146,12 @@ impl Detail {
         }
     }
 
-    /// The pictures ready to draw, widest first. See [`Detail::track`], which is what decides both.
+    /// Widest first, the order [`Detail::track`] left them in.
     pub fn drawn(&self) -> impl Iterator<Item = &dyn Object> {
-        // The placeholders first: they are one draw call for however many worlds wear them. One
-        // world can wear both for a moment -- a world turning over is still under the placeholder
-        // while its own picture is being fetched for the way back up -- and the placeholder is
-        // meant to win there. It does: both are lifted off the node quad by [`LIFT`], but the
-        // placeholder is lifted against the node's whole radius while the picture is lifted
-        // against the radius it is being drawn at, which is shrinking. See `app`'s
-        // `AppEntities::place_unvisited` and `AppEntities::magnified`.
+        // Placeholders first: one draw call for however many worlds wear them. A world turning
+        // over wears both for a moment, and the placeholder wins because [`LIFT`] lifts it
+        // against the node's whole radius while the picture is lifted against the shrinking
+        // radius it is drawn at.
         self.unvisited
             .quads
             .iter()
@@ -215,9 +167,7 @@ impl Detail {
     }
 }
 
-/// A quad carrying `picture`, cropped the way the atlas crops its cells.
-///
-/// The crop is what makes the switch invisible: `tools/atlas` centre-crops every picture to
+/// Cropping is what makes the switch invisible: `tools/atlas` centre-crops every picture to
 /// [`thumbnails::ASPECT`] before packing it, and the node's quad is that shape, so a full picture
 /// shown whole would jump to a different framing of the same screenshot.
 fn quad(context: &Context, picture: &CpuTexture) -> Gm<Mesh, ColorMaterial> {
@@ -227,14 +177,11 @@ fn quad(context: &Context, picture: &CpuTexture) -> Gm<Mesh, ColorMaterial> {
     )
 }
 
-/// What such a quad is painted with: the picture, cropped and sampled the way the atlas cells it
-/// stands in for are. Apart from [`quad`] because the placeholder wears the same paint on an
-/// instanced mesh -- see [`Unvisited`].
+/// Apart from [`quad`] because the placeholder wears the same paint on an instanced mesh.
 fn quad_material(context: &Context, picture: &CpuTexture) -> ColorMaterial {
     let (width, height) = (picture.width as f32, picture.height as f32);
-    // Whichever side is long for the shape wanted is the one that gives, centred: the other is
-    // kept whole. A symmetric crop, so it does not matter which end of the picture the uv
-    // coordinates count from — which they do differently here than in the atlas.
+    // The long side gives, centred, and the other is kept whole. Symmetric, so it does not matter
+    // which end the uv coordinates count from -- not the same end as in the atlas.
     let visible = if width > height * thumbnails::ASPECT {
         vec2(height * thumbnails::ASPECT / width, 1.0)
     } else {
@@ -243,9 +190,8 @@ fn quad_material(context: &Context, picture: &CpuTexture) -> ColorMaterial {
     let mut texture = Texture2DRef::from_cpu_texture(
         context,
         &CpuTexture {
-            // A full picture is minified onto the node at every size below the one it was fetched
-            // for, which is most of them: the switch happens where the atlas runs out, not where
-            // this picture is finally shown at its own size.
+            // The switch happens where the atlas runs out, not where this picture reaches its own
+            // size, so it is minified onto the node at every size below that.
             mipmap: Some(Mipmap::default()),
             wrap_s: Wrapping::ClampToEdge,
             wrap_t: Wrapping::ClampToEdge,
@@ -260,12 +206,9 @@ fn quad_material(context: &Context, picture: &CpuTexture) -> ColorMaterial {
     }
 }
 
-/// Starts loading one picture from the wiki. See [`fetch`].
-///
-/// `None` for anything that cannot be had or read, which is not fatal anywhere it is called from:
-/// a world keeps the atlas cell it already had, a little soft, and a map says it has no picture.
-/// The map window loads through here too — the wiki serves both from the same edge, and it is
-/// [`ORIGIN`] and the decoder that make the difference between a picture and a challenge page.
+/// `None` for anything that cannot be had or read, which is not fatal anywhere this is called
+/// from: a world keeps its slightly soft atlas cell, and a map says it has no picture. [`ORIGIN`]
+/// and the decoder are what separate a picture from a challenge page.
 pub fn load(url: String) -> fetch::Pending<Option<CpuTexture>> {
     fetch::spawn(async move {
         let bytes = match download(&url).await {
@@ -275,8 +218,7 @@ pub fn load(url: String) -> fetch::Pending<Option<CpuTexture>> {
                 return None;
             }
         };
-        // Through the same decoder the atlas goes through, which picks its format off the path —
-        // the wiki's own, extension and all.
+        // The same decoder the atlas goes through, which picks the format off the path.
         let mut assets = three_d_asset::io::RawAssets::new();
         assets.insert(&url, bytes);
         match assets.deserialize::<CpuTexture>(&url) {
@@ -289,11 +231,10 @@ pub fn load(url: String) -> fetch::Pending<Option<CpuTexture>> {
     })
 }
 
-/// Fetches one picture's bytes.
 async fn download(url: &str) -> Result<Vec<u8>, fetch::Error> {
     Ok(fetch::client()
         .get(url)
-        // See [`ORIGIN`]. Dropped by the browser, which sets its own.
+        // Dropped by the browser, which sets its own. See [`ORIGIN`].
         .header("origin", ORIGIN)
         .send()
         .await?

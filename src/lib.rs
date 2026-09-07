@@ -4,10 +4,9 @@
 #[path = "main.rs"]
 mod entry;
 
-// See the same line in `main.rs`, which is the other root [`i18n::t`] has to resolve against.
+// `t!` expands to `$crate::i18n`, and this crate has two roots, so each names the module.
 pub(crate) use entry::i18n;
 
-// Entry point for wasm
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
@@ -23,11 +22,6 @@ pub fn start() -> Result<(), JsValue> {
     Ok(())
 }
 
-/// Entry point for Android, called by the NativeActivity glue on the thread it starts for it.
-///
-/// The apk carries no Java of its own, so this library *is* the app: see `android/`. The handle
-/// the glue passes in is the only way to reach anything the framework owns, which is why it is
-/// both given to winit and kept for everything under `app` that needs the framework later.
 #[allow(unsafe_code)]
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
@@ -38,6 +32,7 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
 
+    // The only route to anything the framework owns, and needed after startup too.
     entry::app::use_android_app(app.clone());
     entry::run(
         winit::event_loop::EventLoop::builder()

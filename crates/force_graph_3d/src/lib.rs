@@ -76,9 +76,9 @@ use petgraph::{
 
 pub type DefaultNodeIdx = NodeIndex<petgraph::stable_graph::DefaultIx>;
 
-/// Added to every squared distance so that a pair at zero distance yields a finite force instead
-/// of a NaN. The pair's direction vector is zero there, so the resulting force is still zero -
-/// this only replaces the branch the scalar version needed.
+/// Added to every squared distance so a pair at zero distance yields a finite force rather than a
+/// NaN. The direction vector is zero there, so the force is still zero: this only replaces the
+/// branch the scalar version needed.
 const SOFTENING: f32 = 1e-6;
 
 /// Number of lanes the repulsion loop accumulates into.
@@ -155,7 +155,6 @@ pub enum Dimensions {
     Three,
 }
 
-/// Parameters to control the simulation of the force graph.
 #[derive(Clone, Debug)]
 pub struct SimulationParameters {
     pub force_charge: f32,
@@ -248,28 +247,20 @@ impl Default for SimulationParameters {
     }
 }
 
-/// Stores data associated with a node that can be modified by the user.
 pub struct NodeData<UserNodeData = ()> {
-    /// The horizontal position of the node.
     pub x: f32,
-    /// The vertical position of the node.
     pub y: f32,
-    /// The depth position of the node.
     pub z: f32,
     /// Which depth layer the node belongs to, in layered mode.
     ///
     /// Read only while [`SimulationParameters::dag_level_distance`] is set, which turns it into
     /// a y coordinate. What a layer counts is the caller's to decide.
     pub level: f32,
-    /// The mass of the node.
-    ///
-    /// Increasing the mass of a node increases the force with which it repels other nearby nodes.
+    /// A heavier node repels its neighbours harder.
     pub mass: f32,
     /// Whether the node is fixed to its current position.
     pub is_anchor: bool,
-    /// Arbitrary user data.
-    ///
-    /// Defaults to `()` if not specified.
+    /// Defaults to `()`.
     pub user_data: UserNodeData,
 }
 
@@ -290,7 +281,6 @@ where
     }
 }
 
-/// Stores data associated with an edge that can be modified by the user.
 pub struct EdgeData<UserEdgeData = ()> {
     /// This edge's own ceiling, as a multiple of [`SimulationParameters::link_distance_max`].
     ///
@@ -300,9 +290,7 @@ pub struct EdgeData<UserEdgeData = ()> {
     /// apart. `f32::INFINITY` exempts the edge from the ceiling altogether, which leaves it the
     /// plain linear spring however far it stretches.
     pub reach: f32,
-    /// Arbitrary user data.
-    ///
-    /// Defaults to `()` if not specified.
+    /// Defaults to `()`.
     pub user_data: UserEdgeData,
 }
 
@@ -499,7 +487,6 @@ impl Rest {
     }
 }
 
-/// The main force graph structure.
 pub struct ForceGraph<UserNodeData = (), UserEdgeData = ()> {
     parameters: SimulationParameters,
     /// Every path that can disturb the layout wakes this, which is why
@@ -520,9 +507,7 @@ pub struct ForceGraph<UserNodeData = (), UserEdgeData = ()> {
 }
 
 impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
-    /// Constructs a new force graph.
-    ///
-    /// Use the following syntax to create a graph with default parameters:
+    /// With default parameters:
     /// ```
     /// use force_graph_3d::ForceGraph;
     /// let graph = <ForceGraph>::new(Default::default());
@@ -576,9 +561,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         self.rest.settled
     }
 
-    /// Provides access to the raw graph structure if required.
-    ///
-    /// The graph holds the topology and the user data; node positions live in the arrays behind
+    /// The topology and the user data. Node positions live in the arrays behind
     /// [`ForceGraph::visit_nodes`].
     pub fn get_graph(&self) -> &StableUnGraph<UserNodeData, EdgeData<UserEdgeData>> {
         &self.graph
@@ -592,7 +575,6 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         self.graph.edge_count()
     }
 
-    /// Adds a new node and returns an index that can be used to reference the node.
     pub fn add_node(&mut self, node_data: NodeData<UserNodeData>) -> DefaultNodeIdx {
         let NodeData {
             x,
@@ -610,7 +592,6 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         idx
     }
 
-    /// Removes a node by index.
     pub fn remove_node(&mut self, idx: DefaultNodeIdx) {
         if self.graph.remove_node(idx).is_some() {
             self.nodes.release(idx.index());
@@ -618,7 +599,6 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         }
     }
 
-    /// Adds or updates an edge connecting two nodes by index.
     pub fn add_edge(
         &mut self,
         n1_idx: DefaultNodeIdx,
@@ -629,7 +609,6 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         self.rest.wake();
     }
 
-    /// Removes all nodes from the force graph.
     pub fn clear(&mut self) {
         self.graph.clear();
         self.nodes.clear();
@@ -959,7 +938,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         reached
     }
 
-    /// Borrows one node by index, or `None` if it has been removed.
+    /// `None` for a node that has been removed.
     pub fn node(&self, idx: DefaultNodeIdx) -> Option<NodeRef<'_, UserNodeData>> {
         Some(NodeRef {
             index: idx,
@@ -968,7 +947,6 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         })
     }
 
-    /// Processes each node with a user-defined callback `cb`.
     pub fn visit_nodes<F: FnMut(NodeRef<'_, UserNodeData>)>(&self, mut cb: F) {
         for idx in self.graph.node_indices() {
             cb(NodeRef {
@@ -979,7 +957,6 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         }
     }
 
-    /// Mutates each node with a user-defined callback `cb`.
     pub fn visit_nodes_mut<F: FnMut(NodeMut<'_, UserNodeData>)>(&mut self, mut cb: F) {
         for idx in self.graph.node_indices().collect::<Vec<_>>() {
             cb(NodeMut {
@@ -991,8 +968,6 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         }
     }
 
-    /// Mutates each edge with a user-defined callback `cb`, given the two nodes it joins.
-    ///
     /// Wakes the layout whether or not the callback changes anything, the same way
     /// [`ForceGraph::parameters_mut`] does: what an edge carries is read every step, so there is
     /// no telling from here whether the next one still holds.
@@ -1013,7 +988,6 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         }
     }
 
-    /// Processes each edge and its associated nodes with a user-defined callback `cb`.
     pub fn visit_edges<
         F: FnMut(NodeRef<'_, UserNodeData>, NodeRef<'_, UserNodeData>, &EdgeData<UserEdgeData>),
     >(
@@ -1039,31 +1013,26 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
     }
 }
 
-/// Borrows one node of a [`ForceGraph`]. Can not be constructed by the user.
+/// Cannot be constructed by the user.
 pub struct NodeRef<'a, UserNodeData = ()> {
-    /// The node data provided by the user.
     pub user_data: &'a UserNodeData,
     index: DefaultNodeIdx,
     nodes: &'a NodeStore,
 }
 
 impl<UserNodeData> NodeRef<'_, UserNodeData> {
-    /// The horizontal position of the node.
     pub fn x(&self) -> f32 {
         self.nodes.x[self.index.index()]
     }
 
-    /// The vertical position of the node.
     pub fn y(&self) -> f32 {
         self.nodes.y[self.index.index()]
     }
 
-    /// The depth position of the node.
     pub fn z(&self) -> f32 {
         self.nodes.z[self.index.index()]
     }
 
-    /// The position of the node.
     pub fn position(&self) -> [f32; 3] {
         [self.x(), self.y(), self.z()]
     }
@@ -1076,15 +1045,13 @@ impl<UserNodeData> NodeRef<'_, UserNodeData> {
         self.nodes.mobility[self.index.index()] == 0.0
     }
 
-    /// The index used to reference the node in the [ForceGraph].
     pub fn index(&self) -> DefaultNodeIdx {
         self.index
     }
 }
 
-/// Mutably borrows one node of a [`ForceGraph`]. Can not be constructed by the user.
+/// Cannot be constructed by the user.
 pub struct NodeMut<'a, UserNodeData = ()> {
-    /// The node data provided by the user.
     pub user_data: &'a mut UserNodeData,
     slot: usize,
     nodes: &'a mut NodeStore,
@@ -1125,8 +1092,6 @@ impl<UserNodeData> NodeMut<'_, UserNodeData> {
         self.nodes.mass[self.slot] = mass;
     }
 
-    /// Adds a force to the node, to be applied by the next [`ForceGraph::update`].
-    ///
     /// See [`ForceGraph::apply_force`].
     pub fn apply_force(&mut self, force: [f32; 3]) {
         self.rest.wake();
@@ -1214,7 +1179,6 @@ fn repulsion_on(
     [reduce(fx), reduce(fy), reduce(fz)]
 }
 
-/// Borrows `LANES` values starting at `base` as a fixed-size array.
 fn lane(values: &[f32], base: usize) -> &[f32; LANES] {
     values[base..base + LANES].try_into().unwrap()
 }

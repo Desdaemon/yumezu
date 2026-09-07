@@ -16,35 +16,28 @@ use world::{Ask, Gate};
 
 /// Side of the cube nodes are scattered over at the start of a layout, in simulation units.
 const SPAWN_EXTENT: f32 = 1000.0;
-/// World units per simulation unit. [`world_pos`] multiplies a layout by it. [`sim_pos`] divides
-/// by it to return a point to simulation space.
+/// World units per simulation unit: [`world_pos`] multiplies by it, [`sim_pos`] divides.
 ///
-/// Simulation coordinates are pixel-sized. A graph a thousand of them across has to stand in
-/// front of a camera that measures in tens. This factor is what puts it there.
+/// Simulation coordinates are pixel-sized, so a graph a thousand of them across has to stand in
+/// front of a camera that measures in tens.
 ///
-/// The name is about the space, not about the thing in it. Everywhere else in this file a
-/// "world" is one of the game's worlds, which is a node. [`NODE_LEAF_RADIUS`] sizes those.
+/// "World" here is the rendering space, not one of the game's worlds -- which is what the name
+/// means everywhere else in this file.
 const SIM_TO_WORLD: f32 = 0.012;
-/// The size of a world with nothing behind it: the smallest node the graph draws, and the radius
-/// every other size and every mass is read against. See [`NODE_HUB_RADIUS`] for the other end of
-/// the scale and [`node_mass`] for the masses.
+/// The smallest node the graph draws, and the radius every other size and mass is read against.
 const NODE_LEAF_RADIUS: f32 = 1.1;
-/// The size of a world with [`NODE_HUB_DESCENDANTS`] worlds behind it. Together with
-/// [`NODE_LEAF_RADIUS`] these are the two anchors the whole scale is drawn through: a size is the
-/// point between them that a world's descendant count reaches on a logarithmic curve.
+/// The size of a world with [`NODE_HUB_DESCENDANTS`] worlds behind it. With [`NODE_LEAF_RADIUS`]
+/// the two anchors the whole scale is drawn through, a size being the point between them a world's
+/// descendant count reaches on a logarithmic curve.
 ///
-/// Not a cap. The curve passes through this anchor rather than stopping at it, so the origin, with
+/// Not a cap: the curve passes through this anchor rather than stopping at it, so the origin, with
 /// the whole game behind it, is larger still.
 const NODE_HUB_RADIUS: f32 = 1.7;
-/// Mass of a world of [`NODE_LEAF_RADIUS`], which is the smallest there is. [`node_mass`] scales
-/// every bigger world up from it.
+/// Mass of a world of [`NODE_LEAF_RADIUS`]. [`node_mass`] scales every bigger world up from it.
 const NODE_BASE_MASS: f32 = 21.0;
-/// Where the panel's hub-push knob starts, and so the value [`AppEntities::hub_repulsion`] holds
-/// until somebody drags it. It decides how much of a world's size settles how hard the world
-/// pushes. See [`node_mass`].
-///
-/// At `0.0` every world pushes alike. At `1.0` the push is proportional to the size. The higher
-/// value spaces the hubs generously, and the rest of the layout with them.
+/// How much of a world's size settles how hard it pushes, until the panel's knob is dragged. At
+/// `0.0` every world pushes alike; at `1.0` the push is proportional to the size, which spaces the
+/// hubs generously and the rest of the layout with them.
 const HUB_REPULSION_DEFAULT: f32 = 0.83;
 
 const FORCE_CHARGE: f32 = 1800.0;
@@ -53,196 +46,161 @@ const SETTLE_AFTER: f32 = 32.0;
 
 /// How long one world takes to grow from nothing to its own size when it arrives.
 const ARRIVAL_SECONDS: f32 = 0.45;
-/// The longest the whole of an arrival takes, however many worlds are in it: a refresh that turns
-/// up two worlds should not take as long as one that turns up four hundred, and one that turns up
-/// four hundred should not be watched for a minute. See [`Arrivals::new`].
+/// The longest a whole arrival takes, however many worlds are in it: two worlds should not take as
+/// long as four hundred, and four hundred should not be watched for a minute. See [`Arrivals::new`].
 const ARRIVAL_WINDOW: f32 = 1.6;
-/// How far apart worlds arrive while there are few enough of them for [`ARRIVAL_WINDOW`] to allow
-/// it, which is what makes it a drip rather than a single pop.
+/// How far apart worlds arrive while [`ARRIVAL_WINDOW`] still allows it, which is what makes an
+/// arrival a drip rather than a single pop.
 const ARRIVAL_STAGGER: f32 = 0.05;
-/// How long the camera goes on following what arrived after the last of it has finished growing.
+/// How long the camera goes on following what arrived after the last of it finished growing.
 ///
-/// An arrival is not over when the growing is: worlds dropped into a settled layout push their
-/// neighbours around for a while afterwards, and a camera handed back the moment the last one
-/// reached full size would leave what it was showing to drift out of frame. So it keeps hold while
-/// that works itself out. A pan or an orbit takes it back at any point, as it does from any other
-/// framing move.
+/// Worlds dropped into a settled layout go on pushing their neighbours around, so a camera handed
+/// back the moment the last one reached full size would leave what it was showing to drift out of
+/// frame. A pan or an orbit takes it back at any point.
 const ARRIVAL_TRACKED_SECONDS: f32 = 4.0;
 
-/// How many worlds behind a world put it at [`NODE_HUB_RADIUS`]. It is what fixes where on the
-/// descendant counts the far anchor sits, and so how quickly the sizes climb: the curve keeps the
-/// ranks a player can act on apart, and the origin still fits on the same scale.
+/// Where on the descendant counts [`NODE_HUB_RADIUS`] sits, and so how quickly the sizes climb.
 ///
-/// The two radii are near each other on purpose. A wider range than this is more than the layout
-/// can hold without the hubs eating their neighbours.
+/// The two radii are near each other on purpose: a wider range is more than the layout can hold
+/// without the hubs eating their neighbours.
 const NODE_HUB_DESCENDANTS: f32 = 4.0;
 /// How much of a world's size goes into how far its connections may stretch, on top of the reach
 /// every connection has and of the hub push. See [`edge_reach`] and [`LINK_REACH_DEFAULT`].
 ///
 /// A hub seats a crowd of connections where a leaf seats one or two, and one ceiling for both
-/// packs that crowd into the same sphere a single connection gets: the children end up shoulder
-/// to shoulder and pulling on the hub from every side at once. Giving the bigger world the
-/// bigger ceiling hands the crowd the room it needs.
+/// packs that crowd into the sphere a single connection gets: the children end up shoulder to
+/// shoulder, pulling on the hub from every side at once.
 ///
-/// Half of the size difference rather than all of it. The sizes span more than threefold across
-/// the graph, and a ceiling that followed them the whole way would put the origin's children as
-/// far out as the ceiling is meant to stop them going. The hub push scales what is left, because
-/// the knob that decides how hard a hub holds its neighbours off has to decide how far it may
-/// hold them too: turning it up against a fixed ceiling only presses the crowd into it harder.
-/// See [`HUB_REPULSION_DEFAULT`] and [`node_mass`].
+/// Half of the size difference rather than all of it, the sizes spanning more than threefold: a
+/// ceiling following them the whole way would put the origin's children as far out as it is meant
+/// to stop them going. The hub push scales what is left, because turning that knob up against a
+/// fixed ceiling only presses the crowd into it harder.
 const HUB_REACH: f32 = 0.5;
 /// How thick a connection is drawn.
 const EDGE_RADIUS: f32 = 0.05;
-/// A connection a player can only walk one way is drawn as a run of marching dashes rather than
-/// a solid line, and which way they march is which way it goes. This is how many dashes, fixed
-/// rather than paced by a fixed dash length so that the count is settled when the graph is built
-/// and never moves with the layout: the dashes stretch with the connection instead.
+/// A connection a player can only walk one way is drawn as marching dashes. A fixed count rather
+/// than a fixed dash length, so it is settled when the graph is built and never moves with the
+/// layout -- the dashes stretch with the connection instead.
 const EDGE_DASHES: usize = 7;
-/// How much of its own slot a dash fills, the rest of the slot being the gap behind it. Short:
-/// what a reader has to see is a dash moving, and a dash is only seen to move against the gap it
-/// leaves behind.
+/// How much of its own slot a dash fills. Short, because a dash is only seen to move against the
+/// gap it leaves behind.
 const EDGE_DASH_FILL: f32 = 0.25;
-/// How much wider than a solid line a dash is. Wider, because it is so much shorter: a dash as
-/// thin as the line it stands in for reads as a line worn away rather than as a mark travelling
-/// along one.
+/// Wider than a solid line because it is so much shorter: a dash as thin as the line it stands in
+/// for reads as a worn-away line rather than a mark travelling along one.
 const EDGE_DASH_WIDTH: f32 = 1.6;
-/// How fast the dashes march, in slots a second: at `1.0` a dash takes a second to reach where
-/// the dash ahead of it started. The marching carries the direction on its own, so the dashes are
-/// plain lines and nothing about a still frame of them points anywhere.
+/// Slots a second: at `1.0` a dash takes a second to reach where the dash ahead of it started. The
+/// marching carries the direction on its own, so nothing about a still frame points anywhere.
 const EDGE_DASH_SPEED: f32 = 0.8;
 /// Spacing between depth layers in layered mode, in simulation units.
 ///
-/// Measured against how wide a layer actually settles, rather than picked for looks. The busiest
-/// layers hold a few hundred worlds and spread to a radius near 7000. Anything much smaller than
-/// this stacks sixteen layers into a pancake, which reads as one thickened cloud, not as layers.
+/// Measured against how wide a layer actually settles rather than picked for looks: the busiest
+/// hold a few hundred worlds and spread to a radius near 7000, and anything much smaller stacks
+/// sixteen layers into one thickened cloud.
 const DAG_LEVEL_DISTANCE: f32 = 1300.0;
-/// The same spacing in two dimensions, where a layer is a line rather than a plane.
+/// Wider than [`DAG_LEVEL_DISTANCE`] because a flat layer is a line rather than a plane: it
+/// carries the whole crowd on one line and may stack either side of it, so the gap has to hold
+/// that stack and still read as a gap.
 ///
-/// Wider than [`DAG_LEVEL_DISTANCE`]. A flat layer carries the whole crowd on one line, and it
-/// may also stack either side of that line. The gap has to hold the stack and still read as a gap:
-/// this one holds the band the slack below allows, plus about three worlds of clear air.
-///
-/// Not much wider than it has to be, though. The gaps multiply over sixteen layers, and a tree
-/// taller than it is wide takes scrolling to read rather than one glance.
+/// Not much wider than it has to be: the gaps multiply over sixteen layers, and a tree taller than
+/// it is wide takes scrolling to read rather than one glance.
 const DAG_LEVEL_DISTANCE_2D: f32 = 1900.0;
 /// How far a world may sit from its layer per microstep of slack, in simulation units.
 ///
-/// Two worlds across, which is what makes a microstep worth taking. A step of one world leaves
-/// the worlds it separates touching, and that reads as one clump rather than as a stack.
-///
-/// Read off the node sizes rather than written as a number, because that is what it means. The
-/// sizes have been retuned more than once, and a microstep fixed in simulation units silently
-/// stopped being a step at all: it was worth two worlds when a leaf measured a fifth of a world
-/// unit, and under a third of one world by the time a leaf measured six times that.
+/// Two worlds across: a step of one leaves the worlds it separates touching, which reads as one
+/// clump rather than a stack. Read off the node sizes rather than written as a number, because
+/// those have been retuned more than once and a fixed microstep silently stopped being a step.
 const DAG_LEVEL_MICROSTEP: f32 = 4.0 * NODE_LEAF_RADIUS / SIM_TO_WORLD;
-/// How many [`DAG_LEVEL_MICROSTEP`]s of slack a layer has in two dimensions. This constant is a
-/// count. The microstep it multiplies is a distance. [`Overlay::run`] uses only their product.
+/// How many [`DAG_LEVEL_MICROSTEP`]s of slack a flat layer has -- a count, not a distance.
 ///
-/// A layer in three dimensions is a plane, and it spreads a crowd across that plane. In two
-/// dimensions a layer is a line. A busy line has nowhere for the overflow but on top of itself,
-/// so it may stack this far either side. Keep the band well under [`DAG_LEVEL_DISTANCE_2D`], or
-/// the layers meet and stop reading as layers.
+/// A layer in three dimensions is a plane and spreads a crowd across it; in two it is a line, with
+/// nowhere for the overflow but on top of itself. The band has to stay well under
+/// [`DAG_LEVEL_DISTANCE_2D`] or the layers meet and stop reading as layers.
 const DAG_LEVEL_SLACK_MICROSTEPS_2D: f32 = 3.0;
-/// Where the panel's link-reach knob starts: how far a connection may stretch before its spring
-/// stiffens, as a multiple of the spacing between layers. See
+/// How far a connection may stretch before its spring stiffens, as a multiple of the spacing
+/// between layers, until the panel's knob is dragged. See
 /// [`SimulationParameters::link_distance_max`].
 ///
-/// Without a ceiling the length of a connection is decided by how crowded the graph is rather
-/// than by the connection: the busiest layers hold a few hundred worlds and spread to a radius
-/// near 7000, so two worlds a single door apart could settle most of a layer away from each
-/// other and read as unrelated. Written against the layer spacing because that is the distance
-/// the eye already has to measure against: a connection may reach about this many layers, in
-/// layered mode and out of it alike.
+/// Without a ceiling the length of a connection is decided by how crowded the graph is rather than
+/// by the connection: two worlds a single door apart could settle most of a layer away from each
+/// other and read as unrelated. Written against the layer spacing because that is the distance the
+/// eye already measures against.
 const LINK_REACH_DEFAULT: f32 = 2.0;
 /// Force per unit of distance between a grabbed node and the cursor.
 ///
-/// The cursor pulls the node rather than places it, so the graph attached to the node travels
-/// with it. Momentum makes the response second order. The gain has to stay well under the value
-/// that would close the gap in a single frame.
+/// The cursor pulls the node rather than placing it, so the graph attached to it travels along.
+/// Momentum makes the response second order, so the gain has to stay well under what would close
+/// the gap in a single frame.
 const GRAB_STIFFNESS: f32 = 0.5;
-/// Ceiling on that force. A grabbed node and a cursor flung across the window cannot throw the
-/// node clear of the layout.
+/// So a cursor flung across the window cannot throw a grabbed node clear of the layout.
 const GRAB_FORCE_MAX: f32 = 2000.0;
-/// How far from a node a press may land and still count as over it, in physical pixels. It
-/// applies to a node drawn smaller than that.
+/// How far from a node a press may land and still count as over it, in physical pixels, for a node
+/// drawn smaller than that.
 ///
-/// The tolerance is measured on screen rather than in the world. A world-space radius is a
-/// cylinder through the whole depth of the layout, and in a cloud this dense it catches a node
-/// under nearly every press.
+/// On screen rather than in the world: a world-space radius is a cylinder through the whole depth
+/// of the layout, and in a cloud this dense it catches a node under nearly every press.
 ///
-/// A press on a node drawn wider than this has to land inside the node's own drawn edge. Without
-/// that, a close enough zoom would leave a plate that fills the window pickable only near its
-/// centre.
+/// A press on a node drawn wider than this has to land inside the node's own drawn edge, or a
+/// close enough zoom would leave a plate that fills the window pickable only near its centre.
 const GRAB_TOLERANCE_PIXELS: f32 = 14.0;
-/// How far the cursor may travel between press and release and still count as a click, in
-/// physical pixels.
+/// How far the cursor may travel between press and release and still count as a click, in physical
+/// pixels.
 const GESTURE_SLOP_PIXELS: f32 = 6.0;
 /// How many worlds the panel names out of a highlighted subtree.
 const NOTABLE_WORLDS: usize = 10;
-/// A world with at least this many connections counts as a "notable" descendant.
+/// Connections a world needs to count as a "notable" descendant.
 const NOTABLE_HUB_CONNECTIONS: usize = 3;
-/// How many worlds the panel names as still having ways out of them nobody has walked. See
+/// How many worlds the panel names as still having ways out nobody has walked. See
 /// [`AppEntities::untaken`].
 const UNTAKEN_WORLDS: usize = 10;
 /// Vertical field of view. The camera uses it, and so does the pan, which converts cursor pixels
 /// into world units through it.
 const FOV_Y_DEGREES: f32 = 45.0;
-/// The color the frame clears to. [`panorama_texture`] also lays the backdrop's glows over it.
-/// Both readings want sRGB, so the value is sRGB.
+/// sRGB, which is what both the clear and [`panorama_texture`]'s glows over it want.
 const BACKGROUND_COLOR: [f32; 3] = [0.03, 0.03, 0.05];
-/// Side of the backdrop's repeating tile in texels, and the spacing of the lattice of glows
-/// inside it. Four glows lie across the tile, each with its own brightness, so the lattice does
-/// not read as one cell stamped over and over.
-///
-/// [`PANORAMA_TILE_PIXELS`] gives the size on screen, which is a separate matter. The tile
-/// stretches to that size whatever number of texels it holds.
+/// Side of the backdrop's repeating tile in texels, and the spacing of the lattice of glows inside
+/// it. Four glows lie across the tile, each with its own brightness, so the lattice does not read
+/// as one cell stamped over and over. Its size on screen is [`PANORAMA_TILE_PIXELS`].
 const PANORAMA_TILE_TEXELS: usize = 256;
 const PANORAMA_CELL_TEXELS: usize = 64;
-/// How far a glow reaches, in texels, and how sharply it fades over that reach. The reach is
-/// most of a cell, so neighbouring glows almost meet.
+/// How far a glow reaches, in texels, and how sharply it fades over that reach. Most of a cell, so
+/// neighbouring glows almost meet.
 const PANORAMA_GLOW_RADIUS_TEXELS: f32 = 52.0;
 const PANORAMA_GLOW_FALLOFF: f32 = 2.2;
-/// Which norm measures the distance to a glow's centre. It sits between the diamond a norm of 1
-/// draws and the circle a norm of 2 draws. That is the rounded-square shape of the reference
-/// backdrop.
+/// Which norm measures the distance to a glow's centre. Between the diamond a norm of 1 draws and
+/// the circle a norm of 2 draws, which is the rounded square of the reference backdrop.
 const PANORAMA_GLOW_NORM: f32 = 1.5;
-/// Peak color of a glow, at the brightest cell. It is blue and dim on purpose. It has to stay
-/// visible past a graph whose own edges are only a little brighter, and it must not compete
-/// with them.
+/// Blue and dim on purpose: it has to stay visible past a graph whose own edges are only a little
+/// brighter, without competing with them.
 const PANORAMA_GLOW_COLOR: [f32; 3] = [3.0 / 255.0, 6.0 / 255.0, 42.0 / 255.0];
-/// Peak brightness per cell of the tile, as a fraction of [`PANORAMA_GLOW_COLOR`]. The values are
-/// irregular. They belong to the tile rather than to the screen, so the pattern repeats
-/// seamlessly.
+/// Peak brightness per cell, as a fraction of [`PANORAMA_GLOW_COLOR`]. Irregular, and belonging to
+/// the tile rather than the screen, so the pattern repeats seamlessly.
 const PANORAMA_CELL_PEAKS: [[f32; 4]; 4] = [
     [0.55, 0.30, 0.85, 0.40],
     [0.35, 1.00, 0.45, 0.65],
     [0.90, 0.50, 0.70, 0.30],
     [0.40, 0.75, 0.35, 0.95],
 ];
-/// Side of the tile on screen, in logical pixels. It is independent of the texel size, so the
-/// backdrop keeps its scale on a high-density display rather than shrinking to half of it.
+/// Side of the tile on screen, in logical pixels: independent of the texel size, so the backdrop
+/// keeps its scale on a high-density display rather than shrinking to half of it.
 const PANORAMA_TILE_PIXELS: f32 = 260.0;
 /// How far the backdrop slides, in tiles, per unit of the view direction's horizontal or vertical
-/// component. A quarter turn of the camera moves it by this much.
+/// component.
 ///
-/// Small on purpose. A panorama sits far enough away that a turn toward it barely shifts it. Only
-/// that faint drift is wanted, so that the graph reads as turning in front of a scene rather than
-/// against a decal.
+/// Small on purpose: a panorama sits far enough away that a turn toward it barely shifts it, and
+/// that faint drift is what makes the graph read as turning in front of a scene rather than a
+/// decal.
 const PANORAMA_PARALLAX: f32 = 0.12;
-/// Brightness of the connection into a world with nothing behind it, against the one into the
-/// world the whole game is behind. See [`edge_colors`]. The connections carry the depth ramp, so
-/// this value is the range the ramp is drawn over rather than a color of their own.
+/// Brightness of the connection into a world with nothing behind it, against the one into the world
+/// the whole game is behind. The connections carry the depth ramp, so this is the range the ramp is
+/// drawn over rather than a color of its own. See [`edge_colors`].
 const EDGE_LEAF_BRIGHTNESS: f32 = 0.6;
-/// How far the connection colors move toward even apparent brightness. At 0 the ramp keeps its
-/// own stops. At 1 every stop takes the brightness of the dimmest.
+/// How far the connection colors move toward even apparent brightness: at 0 the ramp keeps its own
+/// stops, at 1 every stop takes the brightness of the dimmest.
 ///
-/// The ramp is picked for hue, and hue drags brightness with it. Most of what the eye reads as
-/// brightness is the green channel. So the green stop in the middle of the ramp looks glaring
-/// beside the magenta at the end, even though both are nominally full.
-///
-/// This value levels them part of the way. Far enough that no stop shouts over the others, and
-/// not so far that the ramp flattens into four shades of one brightness and stops reading as
-/// depth.
+/// The ramp is picked for hue, and hue drags brightness with it -- most of what the eye reads as
+/// brightness is the green channel, so the green stop in the middle looks glaring beside the
+/// magenta at the end even though both are nominally full. Levelled far enough that no stop shouts
+/// over the others, and not so far that the ramp flattens into four shades of one brightness.
 const EDGE_LUMINANCE_EVENNESS: f32 = 0.5;
 /// Warm and bright, for the edges of the route back to the origin world.
 const ROUTE_COLOR: Srgba = Srgba::new(255, 242, 194, 255);
@@ -252,13 +210,11 @@ const DIMMED_BRIGHTNESS: f32 = 0.25;
 /// How much of its own picture is added back over a world's node while a list row points at it.
 ///
 /// Added rather than multiplied, because a lit node is already painted white and there is nothing
-/// left to multiply it by: the brightening is a second pass of the same picture blended on top of
-/// the first. High enough to pick the node out of a crowd at a glance, low enough that the
-/// screenshot is still a screenshot rather than a white patch.
+/// left to multiply by. High enough to pick the node out of a crowd, low enough that the
+/// screenshot is still a screenshot.
 const POINTED_BRIGHTNESS: f32 = 0.85;
-/// Color for the worlds the origin cannot reach. It is deliberately off the distance ramp. Those
-/// worlds are at no distance at all rather than at a large one, and reading them as the far end
-/// of the ramp would be a lie.
+/// Deliberately off the distance ramp: the worlds the origin cannot reach are at no distance at
+/// all rather than at a large one, and reading them as the far end of the ramp would be a lie.
 const UNREACHED_COLOR: Srgba = Srgba::new(110, 110, 120, 255);
 /// Time constant of the frame-rate smoothing, in milliseconds. The per-frame number swings far too
 /// much to read from a moving graph.
@@ -267,24 +223,21 @@ const FPS_WINDOW_MS: f32 = 500.0;
 /// How long the loading frame takes to fade off the graph behind it. See [`App::veil`].
 const LOADING_FADE_SECONDS: f32 = 0.5;
 
-/// How often the server is asked what it is building, while there is nothing to draw.
-///
-/// A stage lasts tens of seconds -- see `dreamweaver`'s `progress` -- so this is about how soon a
-/// stage that has changed is said rather than about following anything closely.
+/// How often the server is asked what it is building, while there is nothing to draw. A stage
+/// lasts tens of seconds, so this is about how soon a change is said rather than about following
+/// anything closely.
 const BUILDING_ASKED_EVERY_SECONDS: f32 = 1.0;
-/// How long a run waits before asking for the dump again, after the server said it is building
-/// one. See [`Dump::Waiting`].
+/// How long a run waits before asking for the dump again, after the server said it is building one.
 ///
-/// Longer than the ask above, because this one is not for the screen: nothing about the wait
-/// looks different for having asked, and the server is being polled about its progress anyway.
+/// Longer than the ask above because this one is not for the screen: nothing about the wait looks
+/// different for having asked, and the server is being polled about its progress anyway.
 const DUMP_ASKED_EVERY_SECONDS: f32 = 3.0;
 /// How long a run waits before asking again, after the dump could not be had at all.
 ///
-/// Much longer than the ask above, which is the wait for a server that answered: that one is
-/// building a dump and will have it within the minute, whereas this is a host that is not there.
-/// Twice a minute is as much as asking one is worth, and it is short enough that a server coming
-/// back, or a laptop finding the network again, is picked up while the person is still looking at
-/// the window. See [`Dump::Waiting`].
+/// Much longer than the ask above, which waits on a server that answered and will have a dump
+/// within the minute, where this is a host that is not there. Still short enough that a server
+/// coming back, or a laptop finding the network again, is picked up while the person is still
+/// looking at the window.
 const DUMP_RETRIED_AFTER_SECONDS: f32 = 10.0;
 /// How many worlds the search box offers at once.
 const SEARCH_CANDIDATES: usize = 10;
@@ -293,12 +246,11 @@ const SEARCH_CANDIDATES: usize = 10;
 const CATALOG_THUMBNAILS: usize = 4;
 const CATALOG_THUMBNAIL_HEIGHT: f32 = 34.0;
 /// Time constant of the camera's ease onto a selected route, in milliseconds. Long enough that the
-/// move reads as travel across the graph rather than as a cut. That is the whole point: the
-/// person has to keep their bearings while the view changes.
+/// move reads as travel across the graph rather than a cut, so the person keeps their bearings.
 const FRAMING_WINDOW_MS: f32 = 600.0;
 /// Slack left around a framed route, as a fraction of the distance that would touch it to the
 /// window edges. The framed sphere already holds the whole of the pictures on its rim, so this is
-/// breathing room and nothing else: it can sit near one without cutting a world in half.
+/// breathing room and nothing more.
 const FRAMING_MARGIN: f32 = 1.1;
 
 /// How near the goal the camera has to be to count as arrived, as a fraction of the framed radius
@@ -308,38 +260,32 @@ const FRAMING_ARRIVAL_TOLERANCE: f32 = 0.01;
 mod detail;
 mod download;
 mod fetch;
-/// The overlay's input and painter, in place of `three_d`'s own. See [`gui::Gui`].
 mod gui;
 mod guide;
-/// Everything this app says. Re-exported from the crate root so that [`i18n::t`] resolves the
-/// same in both of this crate's targets: see `main.rs`.
+// Re-exported from the crate root so `t!` resolves the same in both of this crate's targets: see
+// `main.rs`.
 pub(crate) mod i18n;
 mod japanese;
 mod map;
 mod store;
-/// The page's input method, which no layer underneath this app provides. See
-/// [`text_agent::TextAgent`].
 #[cfg(target_family = "wasm")]
 mod text_agent;
 mod thumbnails;
 mod world;
-/// The player's own account on YNOproject, and the worlds it says they have been to. See
-/// [`yno::Account`].
 mod yno;
 
 use i18n::t;
 
 use crate::i18n::speaking_japanese;
 
-/// The handle the activity glue passed to `android_main`, which is the only way to reach anything
-/// the framework owns and is handed out exactly once, before any of this runs. Kept here because
-/// two things need it well after that: the assets in [`thumbnails`], and the window's safe area
-/// and soft keyboard in [`Overlay`].
+/// The handle the activity glue passed to `android_main`, which is handed out exactly once and is
+/// the only way to reach anything the framework owns. Kept because two things want it well after
+/// startup: the assets in [`thumbnails`], and the safe area and soft keyboard in [`Overlay`].
 #[cfg(target_os = "android")]
 static ANDROID: std::sync::OnceLock<winit::platform::android::activity::AndroidApp> =
     std::sync::OnceLock::new();
 
-/// Lends that handle to everything below, which all runs too late to be given it directly.
+/// Everything that wants the handle runs too late to be given it directly.
 #[cfg(target_os = "android")]
 pub(crate) fn use_android_app(app: winit::platform::android::activity::AndroidApp) {
     let _ = ANDROID.set(app);
@@ -351,66 +297,56 @@ pub(super) struct App {
     statics: AppStatics,
     /// Built with the graphics context, so it cannot exist before the window does.
     overlay: Option<Overlay>,
-    /// The world dump, which everything in [`AppEntities`] is built out of. See [`Dump`].
+    /// What everything in [`AppEntities`] is built out of. See [`Dump`].
     dump: Dump,
-    /// Whose game is being drawn: the whole of it, or only as much of it as one player has seen.
-    /// Kept beside the dump rather than in the entities, because it is one of the two things they
-    /// are built out of. See [`yno::Account`] and [`App::build`].
+    /// Whose game is being drawn: the whole of it, or as much as one player has seen. Kept beside
+    /// the dump because it is the other thing the entities are built out of. See [`App::build`].
     yno: yno::Account,
     /// What the graph being replaced was, held between the frame that throws it away and the one
-    /// that builds the next out of it. `None` at every other moment, which is every build that is
-    /// not a rebuild. See [`Before`].
+    /// that builds the next out of it. `None` at every other moment. See [`Before`].
     before: Option<Before>,
-    /// What the server says it is building, while the dump is still on its way. See [`Building`].
     building: Building,
     /// What was lit when the drawing surface was last given back, to light again once there is a
     /// graph to light it in.
     ///
     /// Kept out here for the same reason the dump is: on a phone the entities holding it are
     /// dropped every time the app leaves the screen -- see [`App::release`] -- and a selection is
-    /// something the reader made rather than something the surface owned. The layout underneath
-    /// it is built afresh, so the camera is sent to the selection again rather than left where it
-    /// was: see [`App::build`].
+    /// the reader's rather than the surface's. The layout underneath is built afresh, so the
+    /// camera is sent to the selection again rather than left where it was.
     selected: Option<Highlight>,
     /// The line the loading frame was last showing, which the fade carries out over the graph: a
     /// line that changed on the way out would read as a new thing to look at, and what is waited
-    /// for is not the same thing throughout. See [`App::draw_loading`] and [`App::veil`].
+    /// for is not the same thing throughout. See [`App::veil`].
     said: String,
     /// How much of the loading frame is still on screen, 1 for all of it and 0 for none.
     ///
-    /// The frame is not switched off when the dump lands: it is faded off over the graph that
+    /// The frame is not switched off when the dump lands but faded off over the graph that
     /// replaced it, so the graph is uncovered rather than dropped on screen. Written back to 1 by
-    /// every [`App::draw_loading`], so a run that has to wait again -- a dump that has not landed
-    /// by the time a phone comes back to the screen -- gets the reveal again rather than once.
+    /// every [`App::draw_loading`], so a run that has to wait again gets the reveal again.
     veil: f32,
 }
 
 /// The dump, at whatever stage of arriving it has reached.
 ///
-/// It comes off the network now rather than out of the binary -- see [`world::load`] -- so there
-/// is a stretch at the start of a run with a window on screen and nothing to draw in it. That is a
-/// state the app is in rather than a reason to fail: see [`App::draw_loading`], which is the frame
-/// it shows throughout.
+/// It comes off the network rather than out of the binary, so there is a stretch at the start of a
+/// run with a window on screen and nothing to draw in it: see [`App::draw_loading`].
 ///
-/// There is no state for having given up. A dump that could not be had is a dump that has not
-/// arrived yet, because every reason one fails to arrive is a reason that passes -- a server
-/// restarting, a laptop off the network, a phone in a tunnel -- and none of them is worth leaving
-/// a person with a window they have to close and open again. So the run keeps asking.
+/// There is no state for having given up. Every reason a dump fails to arrive is a reason that
+/// passes -- a server restarting, a laptop off the network, a phone in a tunnel -- and none is
+/// worth leaving a person with a window they have to close and open again.
 ///
 /// Kept once it arrives rather than dropped into the entities built from it, because a phone
-/// rebuilds those every time the app comes back to the screen -- see [`App::release`] -- and the
-/// dump it would have to fetch again has not changed in the meantime.
+/// rebuilds those every time the app comes back to the screen and the dump has not changed
+/// meanwhile. See [`App::release`].
 enum Dump {
-    /// On its way in. See [`fetch`].
     Loading(fetch::Pending<Result<Option<world::Dump>, String>>),
     /// Not this time, and this many seconds until the run asks again.
     ///
-    /// Two things put a run here and they are the same wait to sit through. The server may be
-    /// building a dump and have said so rather than serve one it is about to replace, which is
-    /// `why: None` and is over within the minute. Or the ask may have come to nothing at all, in
-    /// which case `why` is what went wrong, in the words the loading frame offers it in. That is
-    /// the only difference the frame draws, and the reason the two are waited out for different
-    /// lengths of time: see [`DUMP_ASKED_EVERY_SECONDS`] and [`DUMP_RETRIED_AFTER_SECONDS`].
+    /// Two things put a run here, and they are the same wait to sit through: the server building a
+    /// dump and saying so rather than serving one it is about to replace, which is `why: None` and
+    /// is over within the minute, or the ask coming to nothing at all, where `why` is what went
+    /// wrong in the words the loading frame offers it in. Hence the two waits, see
+    /// [`DUMP_ASKED_EVERY_SECONDS`] and [`DUMP_RETRIED_AFTER_SECONDS`].
     Waiting {
         why: Option<String>,
         until: f32,
@@ -421,30 +357,25 @@ enum Dump {
 /// What the server says it is building, for the loading frame to say instead of the plain wait.
 ///
 /// A server with no dump yet answers the fetch with `needs update` rather than a document, so that
-/// fetch is not an account of how the wait is going -- this is. Asked for on its own clock rather than per frame,
-/// and only ever one ask at a time: see [`Building::tick`] and [`world::building`].
+/// fetch is not an account of how the wait is going -- this is. Asked on its own clock rather than
+/// per frame, and only ever one ask at a time. See [`world::building`].
 #[derive(Default)]
 struct Building {
-    /// What the last answer said, as the name of the message to say.
+    /// The name of the message the last answer named.
     task: Option<&'static str>,
-    /// The ask in flight, if there is one.
     asking: Option<fetch::Pending<Option<&'static str>>>,
     /// Seconds until the next ask. Starts at zero, so the first frame of a wait asks.
     until: f32,
 }
 
 impl Building {
-    /// Reads whatever the last ask came back with, and starts the next one when it is due.
     fn tick(&mut self, seconds: f32) {
         if let Some(asking) = &self.asking {
             if let Some(said) = asking.take() {
-                // Only when it moves on, and worth logging at all because it is the only account
-                // a run leaves of a wait that can last a minute.
                 let moved_on = said.is_some() && said != self.task;
                 self.task = said;
-                // What the frame now says, rather than the name behind it: this is the only
-                // account a run leaves of a wait that can last a minute, and it is worth reading
-                // as the same thing that is on screen.
+                // The only account a run leaves of a wait that can last a minute. Logged as the
+                // line on screen rather than the message name behind it, so the two read alike.
                 if moved_on {
                     log::info!("the server is building the dump: {}", self.says());
                 }
@@ -460,7 +391,7 @@ impl Building {
         }
     }
 
-    /// The line the loading frame says: the stage the server named, or the plain wait.
+    /// The stage the server named, or the plain wait.
     fn says(&self) -> String {
         match self.task {
             Some(said) => super::i18n::format(said, None),
@@ -479,19 +410,15 @@ struct AppContext {
 struct AppStatics {
     control: OrbitControl,
     camera: Camera,
-    /// Whether a pan drag is under way. Raised once the drag actually moves the camera rather
-    /// than on the press, so a right-click that only opens a menu is not read as a pan.
+    /// Raised once a pan drag actually moves the camera rather than on the press, so a
+    /// right-click that only opens a menu is not read as a pan.
     panning: bool,
     /// The pointer the window was last given, so it is only set when it changes.
     cursor: CursorIcon,
-    /// The fingers on the screen, on a machine that has any. See [`Touches`].
     touches: Touches,
-    /// The WASD keys being held. See [`Walk`].
     walk: Walk,
 }
 
-/// The WASD keys, held down.
-///
 /// A key says only that it went down or came up, and walking has to carry on between the two, so
 /// what is held is kept here and read once a frame as the distance it stands for.
 #[derive(Default)]
@@ -503,8 +430,8 @@ struct Walk {
 }
 
 impl Walk {
-    /// Follows the keys down and up. Emptied while egui has the keyboard, so typing a world's
-    /// name into the search box does not also walk the view across the graph.
+    /// Emptied while egui has the keyboard, so typing a world's name into the search box does not
+    /// also walk the view across the graph.
     fn track(&mut self, events: &[Event], typing: bool) {
         if typing {
             *self = Self::default();
@@ -526,19 +453,19 @@ impl Walk {
         }
     }
 
-    /// How far the held keys walk over `dt` seconds: across the view, and into it. Both are
-    /// given in logical pixels, so that [`AppStatics::pan_by`] and [`AppStatics::dolly_by`] can
-    /// scale them the same way and a step sideways covers as much ground as a step forward.
+    /// How far the held keys walk over `dt` seconds: across the view, and into it.
     ///
-    /// Across is signed as a drag rather than as a move, because that is what a pan is given:
-    /// pushing the view right is pulling the graph left.
+    /// Both in logical pixels, so [`AppStatics::pan_by`] and [`AppStatics::dolly_by`] scale them
+    /// alike and a step sideways covers as much ground as a step forward. Across is signed as a
+    /// drag rather than a move, because that is what a pan is given: pushing the view right is
+    /// pulling the graph left.
     fn travel(&self, dt: f32) -> (f32, f32) {
         let (across, into) = (
             (self.left as i32 - self.right as i32) as f32,
             (self.forward as i32 - self.back as i32) as f32,
         );
-        // Normalized, so two keys held at once carry the view as far as one does rather than
-        // over the diagonal of it.
+        // Normalized, so two keys at once carry the view as far as one rather than over the
+        // diagonal.
         let step = WALK_SPEED * dt / across.hypot(into).max(1.0);
         (across * step, into * step)
     }
@@ -548,11 +475,11 @@ impl Walk {
 /// enough about.
 ///
 /// three-d turns a touch into a mouse: the first finger presses, drags and releases the left
-/// button, and a second one turns the pair into a wheel so that a pinch zooms. What it never
-/// carries is that the second finger is there at all. So a pinch ends with a left release that
-/// reads as a tap and throws the selection away, and the travel of the pair across the screen —
-/// the only pan gesture a screen with no second button has — is dropped. Both are read here
-/// instead, off the events winit delivers before three-d ever sees them.
+/// button, and a second turns the pair into a wheel so a pinch zooms. What it never carries is
+/// that the second finger is there at all, so a pinch ends with a left release that reads as a tap
+/// and throws the selection away, and the travel of the pair across the screen -- the only pan
+/// gesture a screen with no second button has -- is dropped. Both are read here instead, off the
+/// events winit delivers before three-d ever sees them.
 #[derive(Default)]
 struct Touches {
     /// Every finger down, by the id winit gave it, at its latest position in physical pixels.
@@ -570,9 +497,8 @@ struct Touches {
 }
 
 impl Touches {
-    /// Takes a finger's news, and says whether a pinch has just begun — which is the moment the
-    /// gesture the single finger before it had nominated stops being any of the things it could
-    /// have been.
+    /// Returns whether a pinch has just begun, which is the moment the gesture the single finger
+    /// before it had nominated stops being any of the things it could have been.
     fn track(&mut self, touch: &Touch) -> bool {
         let at = (touch.location.x as f32, touch.location.y as f32);
         match touch.phase {
@@ -600,7 +526,7 @@ impl Touches {
         began
     }
 
-    /// Where the fingers' midpoint is, once there are enough of them for it to mean anything.
+    /// `None` until there are enough fingers for a midpoint to mean anything.
     fn midpoint(&self) -> Option<(f32, f32)> {
         (self.fingers.len() > 1).then(|| {
             let sum = self
@@ -619,7 +545,7 @@ impl Touches {
     }
 }
 
-/// The sphere a framing move has to bring into view: where it sits and how far it reaches.
+/// The sphere a framing move has to bring into view.
 struct Bounds {
     center: Vec3,
     radius: f32,
@@ -627,30 +553,25 @@ struct Bounds {
 
 /// Gap the panel and the rocker keep off the edges of the safe area. See [`safe_insets`].
 const PANEL_MARGIN: i8 = 12;
-/// The file that does everything this app does with a YNOproject account, offered beside the
-/// sign-in: a promise about someone's account is worth no more than the code that keeps it.
+/// Everything this app does with a YNOproject account, offered beside the sign-in: a promise about
+/// someone's account is worth no more than the code that keeps it.
 const YNO_SOURCE: &str = "https://github.com/Desdaemon/yumezu/blob/main/src/yno.rs";
 
 /// Width of the sidebar before anyone drags its edge.
 const SIDEBAR_WIDTH: f32 = 280.0;
-/// How opaque the sidebar is, out of 255.
-///
-/// The graph runs underneath the sidebar rather than stopping at its edge. A sidebar that hid its
-/// own share of the layout would make the person move the camera to read what they had just
-/// selected. This value is still opaque enough to keep text legible over a bright stretch of the
-/// graph.
+/// The graph runs underneath the sidebar rather than stopping at its edge, so a sidebar that hid
+/// its share of the layout would make the person move the camera to read what they just selected.
+/// Still opaque enough to keep text legible over a bright stretch of graph.
 const SIDEBAR_OPACITY: u8 = 200;
-/// How fast the WASD keys walk the view, in logical pixels a second. The speed is read against
-/// the window rather than against the graph, because [`AppStatics::world_per_pixel`] already
-/// scales a screen distance into world units at whatever distance the camera stands.
+/// Logical pixels a second: read against the window rather than the graph, because
+/// [`AppStatics::world_per_pixel`] already scales a screen distance into world units at whatever
+/// distance the camera stands.
 const WALK_SPEED: f32 = 800.0;
-/// Width of the menu a right-click opens, and of the tooltip a hover opens, in egui's points.
-/// Each one carries a world's title, and a long title would otherwise stretch it across the
-/// window.
+/// Width of the right-click menu and the hover tooltip, in egui's points. Both carry a world's
+/// title, and a long one would otherwise stretch them across the window.
 const POPUP_WIDTH: f32 = 240.0;
-/// What the chosen UI scale is kept under. See [`store`].
 const UI_SCALE: &str = "ui-scale";
-/// What the layout choices are kept under. See [`Layout`].
+// The layout choices. See [`Layout`].
 const DIMENSIONS: &str = "dimensions";
 const LAYERED: &str = "layered";
 const HUB_REPULSION: &str = "hub-push";
@@ -663,13 +584,11 @@ const HUB_REPULSION_RANGE: std::ops::RangeInclusive<f32> = 0.5..=1.5;
 ///
 /// The low end is under one layer, which pulls a connected pair together hard enough to read as
 /// one clump. The high end is past the radius the busiest layer spreads to, which is the same as
-/// no ceiling at all: between them the knob covers everything from a knot to the layout the app
-/// had before there was a ceiling.
+/// no ceiling at all.
 const LINK_REACH_RANGE: std::ops::RangeInclusive<f32> = 0.5..=6.0;
 
-/// How far the UI scale can be taken either way, and where it starts. The far ends are a phone
-/// held at arm's length and a desk monitor read from close up; the middle is the size the system
-/// itself says a point is, which is already right for most screens.
+/// The far ends are a phone held at arm's length and a desk monitor read from close up. The middle
+/// is the size the system itself says a point is, which is already right for most screens.
 const UI_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.6..=2.0;
 const UI_SCALE_DEFAULT: f32 = 1.0;
 
@@ -677,82 +596,64 @@ const UI_SCALE_DEFAULT: f32 = 1.0;
 /// names the world under the pointer rather than covering it.
 const TOOLTIP_OFFSET: f32 = 16.0;
 
-/// How much larger than the rest of the interface the rocker's two arrows are drawn.
-///
-/// It is the one control with no words on it and the one a thumb goes for on a phone, where it
-/// stands alone in the corner with nothing beside it to be crowded by. A multiplier rather than a
-/// size, so it is still three times whatever the UI scale has made everything else.
+/// The rocker is the one control with no words on it and the one a thumb goes for on a phone. A
+/// multiplier rather than a size, so it stays this much of whatever the UI scale made everything
+/// else.
 const ROCKER_SCALE: f32 = 3.0;
 
-/// The on-screen readout: how fast the layout is drawing, and what is selected.
 struct Overlay {
     gui: gui::Gui,
-    /// Exponentially smoothed frame rate, over [FPS_WINDOW_MS].
+    /// Exponentially smoothed frame rate, over [`FPS_WINDOW_MS`].
     fps: f32,
-    /// What the sidebar was left showing and holding. See [`Sidebar`].
     sidebar: Sidebar,
     /// Whether the on-screen keyboard was last asked for. See [`track_keyboard`].
     keyboard: bool,
-    /// The controls, named on the first run. See [`guide::Guide`].
     guide: guide::Guide,
-    /// The offer of the phone build, made to the phones reading the page. See
-    /// [`download::Offer`].
+    /// The offer of the phone build, made to the phones reading the page.
     download: download::Offer,
-    /// The maps of whichever world they were last asked for. See [`map::Maps`].
     maps: map::Maps,
-    /// The face Japanese is drawn with, which is not one of egui's own and is only got hold of if
-    /// this run ever asks for Japanese. See [`japanese::Japanese`].
     japanese: japanese::Japanese,
     /// What the person has scaled the interface by, on top of whatever the system already says a
     /// point is worth. Multiplied into the pixel ratio the overlay is laid out and read at, and
-    /// into that alone: the graph is a place rather than an interface, and its distances are the
-    /// screen's own. Remembered between runs under [`UI_SCALE`].
+    /// nothing else -- the graph is a place rather than an interface, and its distances are the
+    /// screen's own.
     ui_scale: f32,
-    /// The scale the store was last written with, so that a drag writes once at the end of itself
+    /// The scale the store was last written with, so a drag writes once at the end of itself
     /// rather than once a frame all the way along it.
     ui_scale_stored: f32,
-    /// The layout choices the store was last written with, for the same reason. See [`Layout`].
+    /// The layout choices the store was last written with, for the same reason.
     layout: Layout,
 }
 
-/// What the sidebar keeps between frames.
-///
-/// Held apart from [`Panel`], which is this frame's decisions: these are the person's, and they
-/// outlive the frame that made them.
+/// What the sidebar keeps between frames: held apart from [`Panel`], which is this frame's
+/// decisions, because these are the person's and outlive the frame that made them.
 #[derive(Default)]
 struct Sidebar {
-    /// Whether the person has folded it away, leaving the graph the whole window. Kept this way
-    /// round so that the default is the sidebar open, which is where a person who has never
-    /// touched the button should find it.
+    /// This way round so that the default is open.
     closed: bool,
     tab: Tab,
-    /// What has been typed into each tab's own search box. Matched against every frame rather
-    /// than cached, and only for the tab that is open: a scan of a few thousand titles, or a few
-    /// hundred names, is far cheaper than the frame it happens in.
+    /// What has been typed into each tab's own box. Matched every frame rather than cached, and
+    /// only for the open tab: a scan of a few thousand titles is cheaper than the frame it happens
+    /// in.
     ///
-    /// One box per tab rather than one shared: they search different things, and carrying a
-    /// world's name over into the authors would only ever come up empty.
+    /// One box per tab rather than one shared: they search different things, and a world's name
+    /// carried over into the authors would only ever come up empty.
     worlds: String,
     authors: String,
     versions: String,
-    /// What has been typed into the sign-in fields, until the button is pressed. Held here with
-    /// the rest of what the sidebar is left holding; neither outlives the run, and the password
-    /// is not written down anywhere at all. See [`Panel::yno`].
+    /// What has been typed into the sign-in fields, until the button is pressed. Neither outlives
+    /// the run, and the password is never written down. See [`Panel::yno`].
     yno_user: String,
     yno_password: String,
 }
 
-/// Which of the sidebar's four readings is open.
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     /// The graph in front of the person: what is selected, and what to look at next.
     #[default]
     Worlds,
-    /// Who made the worlds.
     Authors,
-    /// What each release added.
     Versions,
-    /// The knobs, which are set once and then left alone.
     Settings,
 }
 
@@ -761,16 +662,15 @@ struct Panel {
     dimensions: Dimensions,
     hub_repulsion: f32,
     link_reach: f32,
-    /// The scale the settings tab was left at. See [`Overlay::ui_scale`].
     ui_scale: f32,
     layered: bool,
     /// A world picked out of one of the lists, to be routed to.
     chosen: Option<usize>,
-    /// A world a list row is pointing at, to be brightened where it sits in the graph. At most
-    /// one: the pointer is over one row or none. See [`AppEntities::pointed`].
+    /// A world a list row is pointing at, to be brightened where it sits in the graph. At most one:
+    /// the pointer is over one row or none.
     pointed: Option<usize>,
-    /// What the menu, a link, or the rocker asked to light, if any of them asked at all. The
-    /// inner `None` is the rocker's off position, which asks for nothing to be lit.
+    /// What the menu, a link, or the rocker asked to light, if any of them asked at all. The inner
+    /// `None` is the rocker's off position, which asks for nothing to be lit.
     lit: Option<Option<Highlight>>,
     /// Whether the menu was acted on and should close.
     menu_taken: bool,
@@ -780,18 +680,16 @@ struct Panel {
     guide: bool,
     /// Whether the framing button was pressed, asking for a route to be framed the other way.
     refit: bool,
-    /// The world whose maps were asked for, if the button was pressed. See [`map::Maps::toggle`],
-    /// which is what a second press on the same world reaches.
+    /// The world whose maps were asked for. A second press on the same world closes them again:
+    /// see [`map::Maps::toggle`].
     mapped: Option<usize>,
-    /// The world the menu was asked to pretend the player has been to. See
-    /// [`yno::Account::pretend`].
+    /// See [`yno::Account::pretend`].
     revealed: Option<usize>,
-    /// The language the picker was left set to, if it was changed. Applied after the frame, so a
-    /// frame is drawn in one language throughout. See [`Panel::language`], which sets it.
+    /// Applied after the frame, so a frame is drawn in one language throughout.
     language: Option<i18n::Language>,
 }
 
-/// Everything the panel reads, walked out of [AppEntities] before it is built.
+/// Everything the panel reads, walked out of [`AppEntities`] before it is built.
 struct PanelData<'a> {
     data: &'a AppEntities,
     fps: f32,
@@ -802,7 +700,6 @@ struct PanelData<'a> {
     /// The worlds a highlight names as a plain list: an author's work, a release's additions, a
     /// whole layer. Empty for the two highlights the panel reads some other way.
     listed: Vec<usize>,
-    /// What the worlds search box matches.
     candidates: Vec<usize>,
     /// What the open tab's box matches, as indices into [`AppEntities::authors`] or
     /// [`AppEntities::versions`]. Empty for the tab that is not open, and the whole list, in the
@@ -812,53 +709,46 @@ struct PanelData<'a> {
     selected: Option<Highlight>,
     /// The world a right-click opened a menu over, and where to draw it in egui's points.
     menu: Option<(usize, egui::Pos2)>,
-    /// The world the pointer is over, and where the pointer is in egui's points. `None` whenever
-    /// nothing is hovered, and on a touch screen throughout. See [`AppEntities::track_gesture`].
+    /// The world the pointer is over, and where it is in egui's points. `None` whenever nothing is
+    /// hovered, and on a touch screen throughout.
     hovered: Option<(usize, egui::Pos2)>,
 }
 
-/// What is lit, and which reading of it: the ways the graph can be cut down to a part worth
-/// looking at.
+/// The ways the graph can be cut down to a part worth looking at.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Highlight {
-    /// The way to the world: its canonical route back to the origin. A plain click.
+    /// The world's canonical route back to the origin. A plain click.
     Route(usize),
-    /// What the world is the way to: everything whose route home passes through it. Asked for
-    /// from the menu a right-click opens.
+    /// Everything whose route home passes through the world. Asked for from the right-click menu.
     Descendants(usize),
-    /// Who made it: every world an author is credited with, indexed into
-    /// [`AppEntities::authors`]. Asked for by clicking an author's name, in the panel or in the
-    /// catalog.
+    /// Every world an author is credited with, indexed into [`AppEntities::authors`]. Asked for by
+    /// clicking a name, in the panel or in the catalog.
     Author(usize),
     /// What a release added, indexed into [`AppEntities::versions`]. Asked for from the catalog.
     Version(usize),
-    /// A whole depth at once: every world exactly this many connections from the origin. Asked
-    /// for by the rocker in the bottom corner. See [`Panel::rocker`].
+    /// Every world exactly this many connections from the origin. Asked for by the rocker in the
+    /// bottom corner. See [`Panel::rocker`].
     Layer(u32),
-    /// One connection: the two worlds it joins and the line between them, and nothing else.
-    /// Asked for from the ways on a world offers, which is where which ways round it can be
-    /// walked and what it asks of a player are read out. See [`Panel::ways_on`].
+    /// The two worlds one connection joins and the line between them, and nothing else. Asked for
+    /// from the ways on a world offers: see [`Panel::ways_on`].
     ///
-    /// Held as the world it was picked from and the world at the far end, in that order. Not as a
-    /// direction: which ways round it can be walked is the connection's own and is read off it,
-    /// and holding it this way round is what keeps the panel on the world the reader is reading.
+    /// Held as the world it was picked from and then the world at the far end. Not a direction --
+    /// which ways round it can be walked is read off the connection itself -- but the order is
+    /// what keeps the panel on the world the reader is reading.
     Connection(usize, usize),
-    /// Where there is still somewhere to go: the worlds the player has stood in that have the
-    /// most ways out of them they have not walked, at most [`UNTAKEN_WORLDS`] of them. Asked for
-    /// from the panel with nothing selected, and offered only in a run drawing a frontier, since
-    /// a run drawing the whole game has no unwalked way in it to count. See
-    /// [`AppEntities::untaken`].
+    /// At most [`UNTAKEN_WORLDS`] of the worlds the player has stood in with the most unwalked
+    /// ways out. Asked for from the panel with nothing selected, and only in a run drawing a
+    /// frontier: the whole game has no unwalked way to count.
     Untaken,
 }
 
 impl Highlight {
-    /// The one world the highlight is about. `None` for the three that are about a set of
-    /// worlds rather than about a place in the graph: they have no world to name, and no route
-    /// home of their own for the panel to walk.
+    /// `None` for the highlights about a set of worlds rather than a place in the graph: no world
+    /// to name, and no route home for the panel to walk.
     fn world(self) -> Option<usize> {
         match self {
-            // The world a connection was picked from: the one whose ways on the panel is
-            // listing, so clicking through them leaves the reader where they started.
+            // A connection answers with the world it was picked from -- the one whose ways on the
+            // panel is listing -- so clicking through them leaves the reader where they started.
             Self::Route(world) | Self::Descendants(world) | Self::Connection(world, _) => {
                 Some(world)
             }
@@ -867,18 +757,16 @@ impl Highlight {
     }
 }
 
-/// The menu a right-click opened over a world, and where it opened.
 struct ContextMenu {
     world: usize,
     /// Where the click landed, in physical pixels, which is where the menu is drawn.
     at: PhysicalPoint,
 }
 
-/// A node being dragged by the cursor.
 struct Grab {
     node: DefaultNodeIdx,
-    /// Distance from the camera to the node when it was grabbed. Dragging slides the node across
-    /// the plane it was picked on; without this the node would be pulled toward the camera.
+    /// Distance from the camera to the node when it was grabbed, so dragging slides the node
+    /// across the plane it was picked on rather than pulling it toward the camera.
     depth: f32,
     /// Cursor position in physical pixels.
     cursor: PhysicalPoint,
@@ -893,98 +781,83 @@ enum Gesture {
         /// Where the press landed, in physical pixels, to measure travel against.
         origin: PhysicalPoint,
     },
-    /// Awarded to the node the press landed on.
     Moving(Grab),
-    /// Awarded to the camera: the motion is left unhandled for [OrbitControl].
+    /// Awarded to the camera: the motion is left unhandled for [`OrbitControl`].
     Orbiting,
 }
 
 /// The worlds and the connections between them, laid out by the simulation.
 ///
-/// Each connection carries whether a player can only walk it one way, which is both what decides
-/// how it is drawn and the one thing about it a frame has to know. Its stored direction is the
-/// walkable one, so a one-way connection's dashes march the way the player can go. See
-/// [`AppEntities::march_dashes`].
+/// A connection carries whether a player can only walk it one way, which is the one thing about it
+/// a frame has to know. Its stored direction is the walkable one, so a one-way connection's dashes
+/// march the way the player can go. See [`AppEntities::march_dashes`].
 type Graph = ForceGraph<(), bool>;
 
-/// Where the worlds of a graph were standing, by name, so the one built after it can start from
-/// there instead of from a fresh scatter.
+/// Where the worlds of a graph were standing, so the one built after it can start from there
+/// instead of from a fresh scatter.
 ///
 /// By name because that is the one thing two graphs of the same game share: a frontier is a part
-/// of the dump renumbered from zero, so a world's index means nothing across a rebuild. See
-/// [`AppEntities::before`] and [`world::Dump::showing`].
+/// of the dump renumbered from zero, so a world's index means nothing across a rebuild.
 type Standing = std::collections::HashMap<String, [f32; 3]>;
 
-/// The graph a new one is replacing, as much of it as the new one should carry on from.
+/// As much of the graph a new one is replacing as the new one should carry on from.
 ///
-/// A rebuild is not a new run: the person is still looking at the same map, still has it turned
-/// the way they turned it, and has only asked what else is on it. So the layout picks up where it
-/// left off and the controls are left where they were set -- everything here is something that was
-/// theirs rather than the dump's, and losing any of it would read as the app having restarted. See
-/// [`resume_from`] and [`Arrivals`].
+/// A rebuild is not a new run: the person is still looking at the same map and has only asked what
+/// else is on it. Everything here was theirs rather than the dump's, and losing any of it would
+/// read as the app having restarted. See [`resume_from`] and [`Arrivals`].
 struct Before {
-    /// Where each world stood, by name. See [`Standing`].
     standing: Standing,
-    /// Which of them were drawn as placeholders, by the same name. What a world has become is not
+    /// Which worlds were drawn as placeholders, by the same name. What a world has become is not
     /// readable from the new graph alone: a world with a picture may have had one all along. See
     /// [`Coming::Known`].
     unvisited: std::collections::HashSet<String>,
-    /// How it was being laid out, which the graph replacing it keeps: a refresh is the same map
-    /// with more of it known, not a reason to put someone back in a view they left. See [`Layout`].
+    /// A refresh is the same map with more of it known, not a reason to put someone back in a view
+    /// they left.
     layout: Layout,
 }
 
 /// What one world is doing while a graph settles in around the worlds that were already there.
 #[derive(Clone, Copy)]
 enum Coming {
-    /// Already standing there and unchanged, which is nearly every world: drawn at its own size
-    /// from the first frame, with nothing to wait for and nothing to animate.
+    /// Standing there and unchanged, which is nearly every world: drawn at its own size from the
+    /// first frame, with nothing to wait for and nothing to animate.
     Already,
-    /// Not in the graph before at all, and grows in from nothing this many seconds after it was
-    /// built.
+    /// Not in the graph before at all. Grows in from nothing this many seconds after it was built.
     New(f32),
-    /// Was standing there as a placeholder and is a world now: the player has been somewhere they
-    /// had only been shown the edge of. It shrinks away as the placeholder and grows back as
-    /// itself, so the swap happens at the moment there is nothing on screen to swap. See
-    /// [`Arrivals::veiled`].
+    /// Was a placeholder and is a world now: the player has been somewhere they had only been
+    /// shown the edge of. Shrinks away as the placeholder and grows back as itself, so the swap
+    /// happens when there is nothing on screen to swap. See [`Arrivals::veiled`].
     Known(f32),
 }
 
 /// The worlds coming into a graph that was already standing, and how far in each of them is.
 ///
 /// A refresh does not redraw the same graph: it builds another one, out of a dump cut back by an
-/// account that has been somewhere new since. Left alone, that lands as a jump -- a hundred worlds
-/// where a moment ago there were none, and a placeholder that is suddenly a photograph. So the
-/// ones that were not there before are grown in from nothing, a few at a time, the ones that have
-/// become known are turned over where they stand, and the rest of the graph is left exactly where
-/// it stood.
+/// account that has been somewhere new since. Left alone that lands as a jump -- a hundred worlds
+/// where a moment ago there were none, and a placeholder that is suddenly a photograph.
 ///
-/// `None` for the first graph of a run, where nothing arrives because everything is simply there.
-/// It is also what keeps the cost off every other frame of every other run: a graph with no
-/// arrivals has no vector, no clock, and nothing to ask.
+/// `None` for the first graph of a run, where everything is simply there. That also keeps the cost
+/// off every other frame: a graph with no arrivals has no vector, no clock, and nothing to ask.
 #[derive(Default)]
 struct Arrivals {
     /// Per world, what it is doing. `None` where nothing is doing anything.
     coming: Option<Vec<Coming>>,
     /// How long the graph has been standing.
     clock: f32,
-    /// When the last of them has finished, which is when there stops being anything to wait for.
+    /// When the last arrival finishes, which is when there stops being anything to wait for.
     last: f32,
 }
 
 impl Arrivals {
-    /// Works out which worlds are new, which have become known, and when each of them moves.
+    /// `before` is the graph this one replaces, and `None` -- a first build -- means nothing is
+    /// arriving. `unknown` says which worlds are placeholders now, which against
+    /// [`Before::unvisited`] tells a world that has become known from one that was always either.
     ///
-    /// `before` is the graph this one replaces; `None` -- a first build -- means nothing is
-    /// arriving, because there was nothing for it to arrive into. `unknown` says which worlds are
-    /// placeholders now, which against [`Before::unvisited`] is what tells a world that has become
-    /// known from one that was always either.
-    ///
-    /// The turning over goes first and the new worlds follow it, because that is the order the
-    /// thing actually happened in: the player walked into a world, and what lies past it is what
-    /// that opened. Arrivals are ordered by how deep a world sits, so they spread outward from
-    /// what the player already had rather than speckling the graph at random, and spaced to fit
-    /// [`ARRIVAL_WINDOW`] however many there are.
+    /// The turning over goes first and the new worlds follow, because that is the order it
+    /// happened in: the player walked into a world, and what lies past it is what that opened.
+    /// Arrivals are ordered by depth, so they spread outward from what the player already had
+    /// rather than speckling the graph, and spaced to fit [`ARRIVAL_WINDOW`] however many there
+    /// are.
     fn new(
         names: &[&str],
         unknown: &[bool],
@@ -1000,8 +873,8 @@ impl Arrivals {
         for (world, &name) in names.iter().enumerate() {
             match before.standing.contains_key(name) {
                 false => arriving.push(world),
-                // Both halves have to have changed: a world that is still a placeholder has not
-                // become anything, and one that was never a placeholder has nothing to turn over.
+                // Both halves have to have changed: a world still a placeholder has not become
+                // anything, and one that never was has nothing to turn over.
                 true if before.unvisited.contains(name) && !unknown[world] => turning.push(world),
                 true => {}
             }
@@ -1012,8 +885,8 @@ impl Arrivals {
         for &world in &turning {
             coming[world] = Coming::Known(0.0);
         }
-        // Behind the turning over where there is any, so a new world comes out from under a
-        // placeholder that has already gone rather than through one still standing.
+        // Behind the turning over, so a new world comes out from under a placeholder that has
+        // already gone rather than through one still standing.
         let after = if turning.is_empty() {
             0.0
         } else {
@@ -1025,9 +898,9 @@ impl Arrivals {
             coming[world] = Coming::New(after + nth as f32 * stagger);
         }
         Self {
-            // When the last of them begins its final [`ARRIVAL_SECONDS`]. A turning over is two of
-            // those, one each way, so it begins its second at `after` -- which is where the first
-            // new world starts too, and every one after that is later still.
+            // When the last arrival begins its final `ARRIVAL_SECONDS`. A turning over is two of
+            // those, one each way, so it begins its second at `after` -- where the first new world
+            // starts too, every one after that being later still.
             last: match arriving.is_empty() {
                 true => ARRIVAL_SECONDS,
                 false => after + (arriving.len() - 1) as f32 * stagger,
@@ -1037,9 +910,8 @@ impl Arrivals {
         }
     }
 
-    /// How much of its own size a world is drawn at: nothing at all before it is due, its whole
-    /// size once it has arrived, and nothing again at the moment a world that has become known
-    /// turns over.
+    /// How much of its own size a world is drawn at: nothing before it is due, all of it once it
+    /// has arrived, and nothing again at the moment a world that has become known turns over.
     fn grown(&self, world: usize) -> f32 {
         let Some(coming) = &self.coming else {
             return 1.0;
@@ -1058,13 +930,11 @@ impl Arrivals {
         }
     }
 
-    /// Whether a world is still wearing the placeholder it is about to stop being: true for one
-    /// that has become known and has not yet shrunk away.
+    /// The worlds that have become known and not yet shrunk away.
     ///
     /// The placeholder is drawn over a world's own quad rather than instead of it, so this is all
-    /// the swap takes -- underneath, the picture has been the world's own all along, and it comes
-    /// out from under the placeholder at the size where neither can be seen. See
-    /// [`AppEntities::place_unvisited`].
+    /// the swap takes: underneath, the picture has been the world's own all along, and it comes
+    /// out from under the placeholder at the size where neither can be seen.
     fn veiled(&self) -> impl Iterator<Item = usize> + '_ {
         self.coming
             .iter()
@@ -1076,8 +946,8 @@ impl Arrivals {
             })
     }
 
-    /// Whether any world is under a placeholder it is about to leave, which is what says the
-    /// graph needs the placeholder picture at all even where nothing in it is unvisited.
+    /// What says the graph needs the placeholder picture at all even where nothing in it is
+    /// unvisited.
     fn turning(&self) -> bool {
         self.coming
             .iter()
@@ -1113,8 +983,8 @@ impl Arrivals {
         self.clock += dt;
         let grown = self.last + ARRIVAL_SECONDS;
         if self.clock > grown + ARRIVAL_TRACKED_SECONDS {
-            // Done with, and dropped rather than left at rest: from here on this graph is a graph
-            // like any other, and asking it about arrivals costs nothing again.
+            // Dropped rather than left at rest: from here on this graph is one like any other,
+            // and asking it about arrivals costs nothing again.
             *self = Self::default();
             return false;
         }
@@ -1122,9 +992,8 @@ impl Arrivals {
     }
 }
 
-/// One step of a movement, eased at both ends so a world neither snaps into existence nor
-/// overshoots the size it is going to keep. Clamped, so a world is nothing before it is due and
-/// itself ever after.
+/// Eased at both ends so a world neither snaps into existence nor overshoots the size it will
+/// keep. Clamped, so a world is nothing before it is due and itself ever after.
 fn eased(through: f32) -> f32 {
     let through = through.clamp(0.0, 1.0);
     through * through * (3.0 - 2.0 * through)
@@ -1132,26 +1001,24 @@ fn eased(through: f32) -> f32 {
 
 struct AppEntities {
     graph: Graph,
-    /// Held here rather than beside the camera, so that rebuilding the graph drops the gesture
-    /// along with the node index it names.
+    /// Held here rather than beside the camera, so rebuilding the graph drops the gesture along
+    /// with the node index it names.
     gesture: Option<Gesture>,
     /// Kept so a restart can carry on drawing from the same sequence.
     rng: Rng,
-    /// The canonical route back to the origin world, per world. See [`world::canonical_routes`].
     routes: world::Routes,
-    /// World names, indexed like the nodes, each in every language the dump gives one. Only the
-    /// overlay reads them. See [`world::Title`], which is what settles which name is shown.
+    /// Indexed like the nodes. Only the overlay reads them. See [`world::Title`].
     titles: Vec<world::Title>,
-    /// Per world, the maps the wiki draws of it, in the order it lists them and empty for the
-    /// worlds it draws none of. Only the overlay reads them. See [`map::Maps`].
+    /// Per world, in the order the wiki lists them and empty for the worlds it draws none of. Only
+    /// the overlay reads them.
     maps: Vec<Vec<world::Map>>,
-    /// Everyone credited, and everything each of them made. Busiest first: see
-    /// [`world::Dump::authors`], which also settles what [`Highlight::Author`] indexes.
+    /// Busiest first, which is also what [`Highlight::Author`] indexes. See
+    /// [`world::Dump::authors`].
     authors: Vec<world::Author>,
     /// Per world, which of those authors made it.
     author_of: Vec<usize>,
-    /// Every release that added a world, newest first, each carrying what it added. What
-    /// [`Highlight::Version`] indexes, and what the catalog lists. See [`world::Dump::versions`].
+    /// Newest first, each carrying what it added. What [`Highlight::Version`] indexes, and what
+    /// the catalog lists.
     versions: Vec<world::Version>,
     /// What is lit. Everything off the highlight is dimmed.
     selected: Option<Highlight>,
@@ -1161,70 +1028,64 @@ struct AppEntities {
     /// Where the right button went down, while it is still down. The button both pans and opens
     /// the menu, and only the travel between press and release tells those apart.
     right_press: Option<PhysicalPoint>,
-    /// The open context menu, if a right-click landed on a world. Drawn by the overlay, which
-    /// also closes it once one of its entries is taken.
+    /// Drawn by the overlay, which also closes it once one of its entries is taken.
     menu: Option<ContextMenu>,
     /// Where the pointer last was with nothing pressed, in physical pixels, and what the hover
     /// test found there. `None` for a pointer that has left the window or moved onto the panel,
     /// and on a touch screen throughout: a finger never moves without pressing, so it never
-    /// hovers. See [`AppEntities::track_gesture`].
+    /// hovers.
     cursor: Option<PhysicalPoint>,
     hover: Option<usize>,
     /// The world a sidebar list row is pointing at, brightened where it sits in the graph and
     /// cleared as soon as the pointer leaves the row. Only ever one: see [`Panel::pointed`].
     pointed: Option<usize>,
     /// Per world, every connection it has and which ways round it can be walked. The lines are
-    /// built from it, and the panel reads a world's ways on out of it. See [`world::connections`].
+    /// built from it, and the panel reads a world's ways on out of it.
     connections: Vec<Vec<world::Step>>,
-    /// Per world, how many other worlds it connects to: the degree of the graph as drawn, which
-    /// is what tells a junction from a dead end. Only the overlay reads it.
+    /// Per world, how many other worlds it connects to: the degree of the graph as drawn, which is
+    /// what tells a junction from a dead end. Only the overlay reads it.
     degrees: Vec<usize>,
-    /// The worlds still worth walking out of, the ones with the most ways out nobody has taken
-    /// first: [`UNTAKEN_WORLDS`] of them at most. Empty in a run drawing the whole game, which is
-    /// what settles whether the panel offers the list at all. See [`Highlight::Untaken`].
+    /// At most [`UNTAKEN_WORLDS`] worlds, the ones with the most ways out nobody has taken first.
+    /// Empty in a run drawing the whole game, which is what settles whether the panel offers the
+    /// list at all. See [`Highlight::Untaken`].
     untaken: Vec<usize>,
-    /// Whether the camera is still easing onto the selected route. Set by a selection and cleared
-    /// once the camera arrives, or as soon as the person takes the camera back.
+    /// Cleared once the camera arrives at the selected route, or as soon as the person takes the
+    /// camera back.
     framing: bool,
-    /// Whether a framed route is framed whole, rather than framed on the world at its end. Off by
-    /// default: the route is read out in the panel, where the whole of it fits however long it is,
-    /// and what the camera is wanted for is the world the reader picked. Held across selections,
-    /// since it is a way of looking rather than a fact about any one route. See
-    /// [`AppEntities::framed`].
+    /// Whether a framed route is framed whole rather than on the world at its end. Off by default,
+    /// the route being read out in the panel and the camera wanted for the world the reader
+    /// picked. Held across selections, being a way of looking rather than a fact about one route.
     frame_route: bool,
-    /// Connection colors before a selection dims them, so clearing one restores the distance
-    /// ramp. See [`edge_colors`].
+    /// Connection colors before a selection dims them, so clearing one restores the distance ramp.
     edge_colors: Vec<Srgba>,
     /// Per node, the half-height of its quad, from how much of the graph hangs off it.
     node_radii: Vec<f32>,
-    /// The worlds still coming into this graph, if it replaced one. See [`Arrivals`].
     arrivals: Arrivals,
     /// The panel's setting for how much of a world's size goes into how hard it pushes. See
     /// [`node_mass`].
     hub_repulsion: f32,
-    /// The panel's setting for how far a connection may stretch, in layers. Held here rather
-    /// than read back off the simulation, which knows it only as the distance the layer spacing
-    /// turns it into. See [`LINK_REACH_DEFAULT`].
+    /// The panel's setting for how far a connection may stretch, in layers. Held here rather than
+    /// read back off the simulation, which knows it only as the distance the layer spacing turns
+    /// it into. See [`LINK_REACH_DEFAULT`].
     link_reach: f32,
-    /// Per world, how many worlds hang off it. See [`world::Routes::descendant_counts`].
+    /// See [`world::Routes::descendant_counts`].
     descendants: Vec<u32>,
-    /// The backdrop, drawn as a screen-filling quad before the graph. Not a [Gm] like the rest:
-    /// it has no geometry of its own, only the material [`apply_screen_material`] stretches over
-    /// the window.
+    /// Drawn as a screen-filling quad before the graph. Not a [`Gm`] like the rest: it has no
+    /// geometry of its own, only the material [`apply_screen_material`] stretches over the window.
     backdrop: ColorMaterial,
     /// The worlds: a picture of each on a camera-facing quad. Drawn only once the atlas they
-    /// sample has arrived, because until then there is nothing to sample: see [`thumbnails`].
+    /// sample has arrived, there being nothing to sample until then.
     thumbnails: Gm<InstancedMesh, ColorMaterial>,
     /// One world's thumbnail again, blended over the node it is already drawn on to brighten it.
-    /// Drawn only while something is [`AppEntities::pointed`] at, and pointed at its cell of the
+    /// Drawn only while something is [`AppEntities::pointed`] at, and aimed at its cell of the
     /// atlas by [`AppEntities::aim_glow`].
     glow: Gm<Mesh, ColorMaterial>,
     edges: Gm<InstancedMesh, ColorMaterial>,
-    /// The dashes that stand in for a solid line on a one-way connection, [`EDGE_DASHES`] of them
-    /// per connection. See [`AppEntities::march_dashes`].
+    /// [`EDGE_DASHES`] per one-way connection, standing in for a solid line. See
+    /// [`AppEntities::march_dashes`].
     dashes: Gm<InstancedMesh, ColorMaterial>,
     /// Kept so each frame can rewrite the transformations while keeping the colors:
-    /// `set_instances` replaces the whole [Instances] struct.
+    /// `set_instances` replaces the whole [`Instances`] struct.
     thumbnail_instances: Instances,
     /// Only the two-way connections: the one-way ones are in `dash_instances` instead. Both are
     /// filled by walking the graph's edges in the one order it visits them in, so an edge always
@@ -1234,34 +1095,31 @@ struct AppEntities {
     /// The thumbnail atlas on its way in, until [`AppEntities::receive_atlas`] takes it.
     atlas: Option<fetch::Pending<Option<CpuTexture>>>,
     /// The same atlas as the sidebar's catalog draws out of. `None` until it arrives, and forever
-    /// if it cannot be had: see [`thumbnails::Sheet`].
+    /// if it cannot be had.
     sheet: Option<thumbnails::Sheet>,
-    /// Per world, which cell of the thumbnail atlas its picture is in. `None` for a world the
-    /// player has not been to, which wears the placeholder: see [`thumbnails::cells`].
+    /// `None` for a world the player has not been to, which wears the placeholder instead. See
+    /// [`thumbnails::cells`].
     cells: Vec<Option<usize>>,
-    /// The worlds the player has not been to, which are drawn from the whole placeholder picture
-    /// rather than from their cell of the atlas. Empty in a run drawing the whole game. See
-    /// [`AppEntities::place_unvisited`].
+    /// The worlds drawn from the whole placeholder picture rather than from their cell of the
+    /// atlas. Empty in a run drawing the whole game. See [`AppEntities::place_unvisited`].
     unvisited: Vec<usize>,
     /// The quads those are drawn on: the nodes' own, lifted toward the camera. Kept rather than
-    /// built each frame, since it is one allocation the size of the frontier.
+    /// built each frame, being one allocation the size of the frontier.
     unvisited_quads: Instances,
     /// How many worlds the atlas was packed for, which is the whole dump however few of them this
-    /// graph is drawing. See [`world::Dump::packed`].
+    /// graph draws. See [`world::Dump::packed`].
     packed: usize,
-    /// Full-size pictures for the worlds the view has come close enough to, over the atlas cells
-    /// they stand in for. See [`detail`].
     detail: detail::Detail,
     /// How far the dashes have marched along their slots, in `0.0..1.0`. Wrapped rather than
-    /// counted up, so it stays exact however long the app runs. See [`AppEntities::march_dashes`].
+    /// counted up, so it stays exact however long the app runs.
     dash_phase: f32,
-    /// The rotation that stood the quads square to the camera when their transformations were
-    /// last built. Turning the camera has to rebuild them even though nothing in the layout has
-    /// moved, and this is what says that it has been turned.
+    /// The rotation that stood the quads square to the camera when their transformations were last
+    /// built. Turning the camera has to rebuild them even though nothing in the layout has moved,
+    /// and this is what says it has been turned.
     billboard: Mat4,
 }
 
-/// Naive pseudo-RNG
+/// Naive pseudo-RNG.
 struct Rng(u32);
 
 impl Rng {
@@ -1284,8 +1142,7 @@ impl ApplicationHandler for App {
             .with_min_inner_size(winit::dpi::LogicalSize::new(1280, 720))
             .with_maximized(true);
 
-        // A phone gives an app the whole screen and nothing to say about it, so none of the hints
-        // above mean anything here.
+        // A phone gives an app the whole screen and nothing to say about it.
         #[cfg(target_os = "android")]
         let window_builder = Window::default_attributes();
 
@@ -1318,13 +1175,13 @@ impl ApplicationHandler for App {
         self.release();
     }
     /// The last call the loop makes, and the only chance to let go of anything while the loop is
-    /// still there to let go of it against.
+    /// still there to let go of it against: the app is a local of `super::run` and the loop is
+    /// not, so everything held here otherwise outlives `run_app`.
     ///
-    /// Everything held here outlives `run_app` otherwise -- the app is a local of [`super::run`]
-    /// and the loop is not -- and two of the things held here cannot be let go of after it. The
-    /// meshes and the overlay's painter free buffers of a graphics context that is gone by then,
-    /// and the clipboard is a second Wayland connection built on the display the loop owns, torn
-    /// down on a thread of its own that reaches a freed display and takes the process with it.
+    /// Two of those things cannot be let go of after it. The meshes and the overlay's painter free
+    /// buffers of a graphics context that is gone by then, and the clipboard is a second Wayland
+    /// connection on the display the loop owns, torn down on a thread of its own that reaches a
+    /// freed display and takes the process with it.
     fn exiting(&mut self, _: &winit::event_loop::ActiveEventLoop) {
         self.release();
     }
@@ -1341,7 +1198,7 @@ impl ApplicationHandler for App {
         };
         fig.handle_winit_window_event(&event);
         // Offered to the overlay as well, and to the scene either way: what the panel took is
-        // settled after it has been laid out, not here. See [`Overlay::run`].
+        // settled after it has been laid out, not here. See `Overlay::run`.
         if let Some(overlay) = self.overlay.as_mut() {
             overlay
                 .gui
@@ -1362,13 +1219,12 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
-            // A key held as the window is left never comes back up, and the view would go on
-            // walking for as long as the app ran. Nothing else three-d reports says the window
-            // has stopped hearing the keyboard.
+            // A key held as the window is left never comes back up, so the view would go on
+            // walking. Nothing else three-d reports says the window stopped hearing the keyboard.
             WindowEvent::Focused(false) => self.statics.walk = Walk::default(),
             WindowEvent::Touch(touch) => {
-                // A second finger settles what the first one was doing: it was not a tap, not a
-                // node drag and not an orbit, it was the start of a pinch.
+                // A second finger settles what the first was doing: not a tap, not a node drag and
+                // not an orbit, but the start of a pinch.
                 if self.statics.touches.track(&touch)
                     && let Some(data) = self.data.as_mut()
                 {
@@ -1381,20 +1237,20 @@ impl ApplicationHandler for App {
 }
 
 impl App {
-    /// Lets go of everything built on the window, in the order the pieces were built in.
+    /// Lets go of everything built on the window, in the order the pieces were built in: the
+    /// meshes and the overlay have to give their buffers back while the context that holds them is
+    /// still there, and the context has to let the surface go before the window it was made
+    /// against.
     ///
-    /// The meshes and the overlay have to give their buffers back while the context that holds
-    /// them is still there, and the context has to let the surface go before the window it was
-    /// made against. Called on the way out by [`App::exiting`], and on a phone by
-    /// [`App::suspended`] as well: Android takes the drawing surface back whenever the app leaves
-    /// the screen, and everything built on it dies with it, so it is all built again by
-    /// [`App::resumed`] -- the same path a first start takes, and therefore a fresh layout.
+    /// Called on the way out by [`App::exiting`], and on a phone by [`App::suspended`] too:
+    /// Android takes the drawing surface back whenever the app leaves the screen, so everything on
+    /// it is built again by [`App::resumed`] -- the same path a first start takes, and therefore a
+    /// fresh layout.
     fn release(&mut self) {
         // Read before the entities holding it go: see [`App::selected`].
         self.selected = self.data.as_ref().and_then(|data| data.selected);
         self.data = None;
-        // The painter holds buffers of the context's, and a dropped [`gui::Gui`] does not give
-        // them back on its own.
+        // A dropped `gui::Gui` does not give the context's buffers back on its own.
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.gui.destroy();
         }
@@ -1406,7 +1262,7 @@ impl App {
     pub fn new() -> Self {
         let camera = Camera::new_perspective(
             Viewport::new_at_origo(1, 1),
-            // preset position to see the settled 3D tree!
+            // Picked by hand off a settled three-dimensional layout.
             vec3(-263.8, 8.0, -238.9),
             vec3(4.4, -118.4, -27.3),
             vec3(0.0, 1.0, 0.0),
@@ -1415,8 +1271,7 @@ impl App {
             1000.0,
         );
         let control = OrbitControl::new(camera.target(), 1.0, 500.0);
-        // Alongside the dump, and nothing here waits on it or holds it: it publishes what it
-        // loads where the app reads it. See `world::load_pages`.
+        // Nothing waits on this or holds it: it publishes what it loads where the app reads it.
         drop(fetch::spawn(world::load_pages()));
 
         Self {
@@ -1424,8 +1279,8 @@ impl App {
             // Started here rather than at the first frame: the fetch is the longest thing a run
             // waits for, and nothing it needs is owned by the window.
             dump: Dump::Loading(fetch::spawn(world::load())),
-            // Started here for the same reason the dump is: a run that left a session behind has
-            // an account to read before it has a window to draw it in.
+            // For the same reason as the dump: a run that left a session behind has an account to
+            // read before it has a window to draw it in.
             yno: yno::Account::new(),
             before: None,
             statics: AppStatics {
@@ -1455,27 +1310,25 @@ impl App {
         self.build();
     }
 
-    /// Builds the graph, once there is a dump to build it out of.
+    /// Builds the graph, once there is a dump to build it out of, and does nothing until there
+    /// is: a run still fetching one draws [`App::draw_loading`] until [`App::draw`] finds the dump
+    /// has landed and calls this again.
     ///
-    /// Does nothing until there is: a run that is still fetching one, or that failed to, draws
-    /// [`App::draw_loading`] instead until [`App::draw`] finds the dump has landed and calls this
-    /// again. On a phone it is also called by every [`App::reset`], because the entities are all
-    /// built on a graphics context the framework takes back whenever the app leaves the screen.
+    /// On a phone it is also called by every [`App::reset`], the entities all being built on a
+    /// graphics context the framework takes back whenever the app leaves the screen.
     fn build(&mut self) {
         let Dump::Ready(dump) = &self.dump else {
             return;
         };
-        // A run that is drawing one player's game needs to know which worlds are theirs before it
-        // draws anything: building on the dump alone would put the whole game on screen and take
-        // it away again a moment later. So this waits, and [`App::draw_loading`] is what the wait
-        // looks like. See [`yno::Account::settled`].
+        // A run drawing one player's game has to know which worlds are theirs before it draws
+        // anything: building on the dump alone would put the whole game on screen and take it away
+        // a moment later. See `yno::Account::settled`.
         if !self.yno.settled() {
             return;
         }
         // The frontier is a different graph rather than a different drawing of one: it takes
-        // worlds out, and a connection names the world it leads to by index. So it is applied
-        // here, where the dump becomes something to build from, and nothing downstream has to
-        // know it happened. See [`world::Dump::showing`].
+        // worlds out, and a connection names the world it leads to by index. Applied here, where
+        // the dump becomes something to build from, so nothing downstream has to know.
         let frontier;
         let dump = match self.yno.frontier() {
             Some(visited) => {
@@ -1485,26 +1338,25 @@ impl App {
             None => dump,
         };
         let ctx = self.ctx.wctx.as_ref().unwrap();
-        // Whether this graph is starting rather than carrying one on, which is what settles
-        // whether the camera is the person's to keep. See below.
+        // Whether this graph is starting rather than carrying one on, which settles whether the
+        // camera is the person's to keep.
         let opening = self.before.is_none();
         // Taken rather than borrowed: it belongs to the graph being replaced, and the one built
-        // out of it here is the last thing that has any use for it.
+        // here is the last thing with any use for it.
         let mut data = entities(dump, self.before.take().as_ref(), ctx);
         // A graph solved on the plane has to be looked at square on, or the layout it was given
-        // depth to avoid is seen edge on anyway. The switch does this when it is thrown; a run
-        // that opens in two dimensions because that is where an earlier run left it never passes
-        // through the switch, and would otherwise open oblique. See [`AppStatics::face_plane`].
+        // depth to avoid is seen edge on anyway. The switch does this when thrown, but a run
+        // opening in two dimensions because that is where an earlier run left it never passes
+        // through the switch and would open oblique.
         //
         // Only on a graph that is opening: one carrying another on keeps whatever the person had
-        // turned the camera to, the same as its layout and its selection do.
+        // turned the camera to, as its layout and its selection do.
         if opening && data.graph.parameters().dimensions == Dimensions::Two {
             self.statics.face_plane();
         }
 
-        // Lit again where a resume dropped it, which also aims the camera at it: the layout this
-        // is a selection in is a new one, so where the camera was looking is nowhere in
-        // particular. See [`App::selected`].
+        // Lit again where a resume dropped it, which also aims the camera: this is a selection in
+        // a new layout, so where the camera was looking is nowhere in particular.
         if self.selected.is_some() {
             data.select(self.selected);
         }
@@ -1512,15 +1364,9 @@ impl App {
     }
 }
 
-/// Everything the graph is drawn out of, built from the dump and the context that will draw it.
-///
-/// A free function rather than a method because it reads the dump the app holds and hands back
-/// what the app is about to hold beside it, which is two borrows of one [`App`] that do not
-/// overlap in fact and cannot both be taken in one.
-/// The simulation parameters a [`Layout`] decides, and the only ones the app sets from it.
-///
-/// Named rather than a tuple because they are four numbers of three kinds, and a caller reading
-/// them out positionally has nothing to check itself against.
+/// The simulation parameters a [`Layout`] decides. Named rather than a tuple because they are four
+/// numbers of three kinds, and a caller reading them out positionally has nothing to check itself
+/// against.
 struct Solve {
     dag_level_distance: Option<f32>,
     dag_level_slack: f32,
@@ -1530,11 +1376,10 @@ struct Solve {
 
 /// How the person has asked for the graph to be laid out.
 ///
-/// The three of them together because they are one decision in three parts: they are set from one
-/// place, they are read from one place, and every graph built has to be given all three at once --
-/// a rebuild carrying two of them would put the person somewhere they never asked to be. See
-/// [`Before`], which is how a rebuild picks them up, and [`Layout::remembered`], which is how a
-/// run does.
+/// Together because they are one decision in several parts: set from one place, read from one
+/// place, and handed to every graph built at once -- a rebuild carrying only some of them would
+/// put the person somewhere they never asked to be. See [`Before`], which is how a rebuild picks
+/// them up, and [`Layout::remembered`], which is how a run does.
 #[derive(Clone, Copy, PartialEq)]
 struct Layout {
     /// Which of the two the layout is solved in.
@@ -1559,11 +1404,9 @@ impl Default for Layout {
 }
 
 impl Layout {
-    /// What an earlier run was left set to, or the default for whatever it did not write down.
-    ///
     /// Each part read on its own, so a store written by a version that knew fewer of them still
-    /// gives up the ones it has. A push outside the range this version offers is brought inside
-    /// it rather than thrown away, the same way the UI scale is: see [`remembered_scale`].
+    /// gives up the ones it has. A value outside the range this version offers is brought inside
+    /// it rather than thrown away, the same way the UI scale is.
     fn remembered() -> Self {
         let fallback = Self::default();
         Self {
@@ -1588,7 +1431,6 @@ impl Layout {
         }
     }
 
-    /// Writes it down for the next run.
     fn remember(&self) {
         store::write(
             DIMENSIONS,
@@ -1602,14 +1444,10 @@ impl Layout {
         store::write(LINK_REACH, Some(&self.link_reach.to_string()));
     }
 
-    /// How the simulation is set up to solve it: the distance between layers, how far a world may
-    /// drift off the layer it belongs to, how hard the worlds push each other apart, and how far
-    /// a connection between two of them may stretch.
-    ///
     /// Two dimensions is not the same layout flattened. With every world on one plane there is
     /// nowhere for a crowd to go but sideways, so the layers close up and the push is turned far
-    /// higher for a graph to read as anything at all. The reach of a connection follows the same
-    /// spacing, so it is turned up with everything else.
+    /// higher for the graph to read as anything at all. A connection's reach follows the same
+    /// spacing and is turned up with everything else.
     fn parameters(&self) -> Solve {
         let (spacing, slack, charge) = match self.dimensions {
             Dimensions::Two => (
@@ -1628,21 +1466,21 @@ impl Layout {
     }
 }
 
+/// A free function rather than a method because it reads the dump the app holds and hands back
+/// what the app is about to hold beside it: two borrows of one [`App`] that do not overlap in fact
+/// and cannot both be taken in a method.
 fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) -> AppEntities {
     let rng = Rng(0x5eed_1337);
 
     let worlds = &dump.worlds;
-    // How deep a player has to go to reach each world: see [`world::canonical_routes`]. It
-    // both colors the nodes and, in layered mode, picks the layer each one is pinned to, so
-    // the two always agree.
+    // One reading of depth for both the colors and, in layered mode, the layer each world is
+    // pinned to, so the two agree.
     let routes = world::canonical_routes(worlds);
     let deepest = routes.depth.iter().flatten().copied().max().unwrap_or(0);
     let furthest = deepest.max(1) as f32;
-    // Sized by how much of the graph hangs off each world, between the two anchors above: a
-    // leaf keeps [`NODE_LEAF_RADIUS`]. The logarithm is what carries the depth: a deep world
-    // with a handful of worlds behind it lands within reach of a shallow one with a hundred,
-    // because the size grows with the order of magnitude of what a world leads to rather than
-    // with the count. See [`world::Routes::descendant_counts`].
+    // Sized by how much of the graph hangs off each world. The logarithm grows the size with the
+    // order of magnitude of what a world leads to rather than with the count, so a deep world with
+    // a handful behind it lands within reach of a shallow one with a hundred.
     let descendants = routes.descendant_counts();
     let node_radii: Vec<_> = descendants
         .iter()
@@ -1652,10 +1490,8 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
         })
         .collect();
 
-    // How the graph before this one was being read, or -- for the first of a run -- how the last
-    // run was left. Either way the person is put back where they were: a rebuild answering a
-    // refresh with a different view, or an app opening in one nobody chose, is the same surprise.
-    // See [`Layout`].
+    // How the graph before this one was being read, or how the last run was left. Either way the
+    // person is put back where they were.
     let layout = before.map_or_else(Layout::remembered, |before| before.layout);
     let Layout {
         dimensions,
@@ -1685,35 +1521,31 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
         .enumerate()
         .map(|(world, depth)| {
             graph.add_node(NodeData {
-                // Worlds the origin cannot reach have no depth to share a layer with, so they
-                // get one of their own past the deepest that does.
+                // Worlds the origin cannot reach have no depth to share a layer with, so they get
+                // one of their own past the deepest that does.
                 level: depth.map_or(furthest + 1.0, |depth| depth as f32),
                 mass: node_mass(node_radii[world], hub_repulsion),
                 ..Default::default()
             })
         })
         .collect();
-    // Every connection as it is drawn and as the panel reads it out: which worlds are joined,
-    // and which ways round each joining can be walked. See [`world::connections`].
     let connections = world::connections(worlds);
     // Counted off the same connections the edges are built from, so the panel calls a world a
     // junction on exactly the lines it draws for it.
     let mut degrees = vec![0; worlds.len()];
-    // How many of those lines are drawn as dashes instead, which is what fixes how many dash
-    // instances there are. See [`EDGE_DASHES`].
+    // What fixes how many dash instances there are. See [`EDGE_DASHES`].
     let mut dashed = 0;
     for (from, steps) in connections.iter().enumerate() {
         for step in steps {
-            // Once per connection rather than once per world it joins: both of them carry it,
-            // and one line is drawn for it. Two springs on the same two nodes would pull them
-            // together twice as hard.
+            // Once per connection rather than per world it joins: two springs on the same two
+            // nodes would pull them together twice as hard.
             if step.world <= from {
                 continue;
             }
             let to = step.world;
-            // Stored from the end a player can leave, so the dashes march the way they can
-            // walk. A connection walkable both ways, or neither, keeps the dump's own order:
-            // nothing is drawn on it that a direction would mean anything to.
+            // Stored from the end a player can leave, so the dashes march the way they can walk.
+            // Walkable both ways or neither keeps the dump's own order: nothing drawn on such a
+            // connection means anything to a direction.
             let (from, to) = if step.out.is_none() && step.back.is_some() {
                 (to, from)
             } else {
@@ -1737,8 +1569,7 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
         }
     }
 
-    // How deep each world is, as a color. Not drawn on the worlds themselves, which carry
-    // pictures: the connections wear it instead. See [`edge_colors`].
+    // Not drawn on the worlds themselves, which carry pictures: the connections wear the depth.
     let depth_colors: Vec<_> = routes
         .depth
         .iter()
@@ -1748,9 +1579,8 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
         })
         .collect();
     let edge_colors = edge_colors(&graph, &routes, &descendants, &depth_colors);
-    // The worlds with no picture of their own, which the placeholder is drawn on instead. Read
-    // off the same thing the atlas cells are, so the two cannot disagree about which worlds those
-    // are. See [`world::World::cell`].
+    // The worlds the placeholder is drawn on. Read off the same thing the atlas cells are, so the
+    // two cannot disagree.
     let unvisited: Vec<usize> = worlds
         .iter()
         .enumerate()
@@ -1758,20 +1588,17 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
         .collect();
     let titles: Vec<world::Title> = worlds.iter().map(world::World::titles).collect();
     let maps: Vec<Vec<world::Map>> = worlds.iter().map(world::World::maps).collect();
-    // The catalog's own two readings of the dump, built once here: both group every world,
-    // which is not work a frame can afford, and both are ordered for the lists they fill.
+    // Built once here: both group every world, which is not work a frame can afford.
     let (authors, author_of) = dump.authors();
     let versions = dump.versions();
-    // White, so a picture reaches the screen as itself. Only a selection ever changes them,
-    // dimming everything it does not light along with the rest of the graph.
+    // White, so a picture reaches the screen as itself. Only a selection ever changes them.
     let thumbnail_instances = Instances {
         transformations: vec![Mat4::identity(); worlds.len()],
         colors: Some(vec![Srgba::WHITE; worlds.len()]),
         ..Default::default()
     };
-    // One instance per solid line, and [`EDGE_DASHES`] of them per one-way one. The colors
-    // are left to the first [`AppEntities::repaint`] below, which is where the same fan-out
-    // has to live anyway.
+    // One instance per solid line, and [`EDGE_DASHES`] per one-way one. The colors are left to
+    // the first `repaint` below, where the same fan-out has to live anyway.
     let solid = edge_colors.len() - dashed;
     let edge_instances = Instances {
         transformations: vec![Mat4::identity(); solid],
@@ -1786,8 +1613,8 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
     let backdrop = ColorMaterial {
         color: Srgba::WHITE,
         texture: Some(Texture2DRef::from_cpu_texture(ctx, &panorama_tile())),
-        // Colour only, and no depth test: the quad stands in for the cleared background, so
-        // it must neither occlude the graph nor be occluded by the cleared depth buffer.
+        // Colour only and no depth test: the quad stands in for the cleared background, so it
+        // must neither occlude the graph nor be occluded by the cleared depth buffer.
         render_states: RenderStates {
             write_mask: WriteMask::COLOR,
             depth_test: DepthTest::Always,
@@ -1795,19 +1622,15 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
         },
         is_transparent: false,
     };
-    // Quads rather than cubes, and turned to face the camera every frame: a picture has to be
-    // seen square on to be seen at all, and a cube's own uv coordinates unwrap its six faces
-    // across the image rather than giving each face the whole of it.
-    //
-    // No texture yet: it is the atlas, which is still on its way in. See
-    // [`AppEntities::receive_atlas`].
+    // Quads rather than cubes, turned to face the camera every frame: a picture has to be seen
+    // square on, and a cube's uv coordinates unwrap its six faces across the image rather than
+    // giving each face the whole of it. No texture yet -- the atlas is still on its way in.
     let thumbnails = Gm::new(
         InstancedMesh::new(ctx, &thumbnail_instances, &CpuMesh::square()),
         ColorMaterial::default(),
     );
-    // The same quad again, added to what is already on the screen rather than covering it: a lit
-    // node is drawn white, so there is no multiplier left that would make it brighter. No texture
-    // yet either, and the same one the thumbnails sample when it arrives.
+    // The same quad again, added to what is on the screen rather than covering it: a lit node is
+    // drawn white, so no multiplier is left that would brighten it. It samples the same atlas.
     let glow = Gm::new(
         Mesh::new(ctx, &CpuMesh::square()),
         ColorMaterial {
@@ -1817,14 +1640,10 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
                 // Depth read but not written: the quad stands in front of the node it brightens,
                 // and a node genuinely in front of that one still hides it.
                 write_mask: WriteMask::COLOR,
-                // Equal passes, because at the distances this graph is read from the lift toward
-                // the camera is smaller than one step of the depth buffer. The quad is never
-                // *behind* the node it copies -- it is lifted from it -- so the two depths
-                // quantise to either less or the same, and the strict test the default gives
-                // would drop the glow on exactly the frames the rounding went the other way.
-                // That is the flicker, and this is the whole of the fix: the lift keeps the two
-                // apart where there is precision to keep them apart, and this keeps them drawn
-                // where there is not.
+                // Equal passes because at these distances the lift toward the camera is smaller
+                // than one step of the depth buffer. The quad is never *behind* the node it
+                // copies, so the two depths quantise to either less or the same, and a strict
+                // test drops the glow on exactly the frames the rounding went the other way.
                 depth_test: DepthTest::LessOrEqual,
                 blend: Blend::ADD,
                 ..Default::default()
@@ -1836,16 +1655,13 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
         InstancedMesh::new(ctx, &edge_instances, &CpuMesh::cylinder(8)),
         ColorMaterial::default(),
     );
-    // The same shape as a solid line, placed the same way, only shorter: a dash says nothing
-    // by itself, and everything by where it is against the last frame. See
-    // [`AppEntities::march_dashes`].
+    // The same shape as a solid line, placed the same way, only shorter.
     let dashes = Gm::new(
         InstancedMesh::new(ctx, &dash_instances, &CpuMesh::cylinder(8)),
         ColorMaterial::default(),
     );
 
-    // Before the graph takes them over: what each world is doing is a reading of the names, which
-    // of them wear the placeholder, and the depths -- all of which the graph is about to take.
+    // Before the graph takes the names over.
     let mut unknown = vec![false; worlds.len()];
     for &world in &unvisited {
         unknown[world] = true;
@@ -1879,8 +1695,8 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
         cursor: None,
         hover: None,
         pointed: None,
-        // A graph with worlds coming into it moves the camera onto them: see
-        // [`AppEntities::arrival_bounds`]. A pan or an orbit takes it back at any point.
+        // A graph with worlds coming into it moves the camera onto them. A pan or an orbit takes
+        // it back at any point.
         framing: arriving,
         frame_route: false,
         edge_colors,
@@ -1904,8 +1720,7 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
         cells: worlds.iter().map(world::World::cell).collect(),
         packed: dump.packed,
         unvisited: unvisited.clone(),
-        // White until the first [`AppEntities::place_unvisited`], which is the same fan-out the
-        // thumbnails' own colors take.
+        // White until the first `place_unvisited`, the same fan-out the thumbnails' colors take.
         unvisited_quads: Instances {
             transformations: vec![Mat4::identity(); unvisited.len()],
             colors: Some(vec![Srgba::WHITE; unvisited.len()]),
@@ -1913,20 +1728,20 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
         },
         detail: detail::Detail::new(
             worlds.iter().map(|world| world.image.clone()).collect(),
-            // Or one on its way out from under one, which needs the same picture for as long as
-            // it takes to shrink away. See [`Arrivals::veiled`].
+            // Or one on its way out from under a placeholder, which needs the same picture for as
+            // long as it takes to shrink away.
             !unvisited.is_empty() || arrivals.turning(),
         ),
         dash_phase: 0.0,
-        // Rebuilt on the first frame either way, because a fresh layout has not settled.
+        // Rebuilt on the first frame either way, a fresh layout not having settled.
         billboard: Mat4::identity(),
         arrivals,
     };
-    // The instance colors have not been written yet, only sized. See above.
+    // The instance colors have been sized above but not written.
     data.repaint();
     scatter(&mut data);
-    // Over the top of the scatter, so a graph replacing another one carries on from where that
-    // one stood instead of restarting. See [`resume_from`].
+    // Over the top of the scatter, so a graph replacing another carries on from where that one
+    // stood instead of restarting.
     if let Some(before) = before {
         resume_from(&mut data, &before.standing);
     }
@@ -1937,22 +1752,20 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
 /// starts the new ones off among the neighbours they attach to.
 ///
 /// Without this a refresh would reshuffle the whole graph to say that a handful of worlds had been
-/// added to it, and the arrival would be lost in the churn: what a person is watching is the same
-/// map they were already looking at, so it has to still look like it. A returning world is stopped
-/// dead as well as replaced, because the velocity it carried belongs to a layout that no longer
-/// exists.
+/// added, and the arrival would be lost in the churn. A returning world is stopped dead as well as
+/// replaced, its velocity belonging to a layout that no longer exists.
 ///
-/// A world with nothing to stand near keeps the scatter, which is the only honest place for it:
-/// nothing in the graph says where it belongs until the layout has been stepped.
+/// A world with nothing to stand near keeps the scatter: nothing in the graph says where it
+/// belongs until the layout has been stepped.
 fn resume_from(data: &mut AppEntities, before: &Standing) {
     let standing: Vec<Option<[f32; 3]>> = data
         .titles
         .iter()
         .map(|title| before.get(&title.en).copied())
         .collect();
-    // New worlds are placed among the ones that were already there, so each comes in out of what
-    // it connects to rather than in from the far edge of the spawn volume. Off the old positions
-    // rather than off the placements being made, so no world is seeded from another seed.
+    // New worlds are placed among the ones already there, so each comes in out of what it connects
+    // to rather than from the far edge of the spawn volume. Read off the old positions rather than
+    // the placements being made, so no world is seeded from another seed.
     let seeded: Vec<Option<[f32; 3]>> = (0..standing.len())
         .map(|world| {
             if standing[world].is_some() {
@@ -1974,8 +1787,7 @@ fn resume_from(data: &mut AppEntities, before: &Standing) {
             Some(at)
         })
         .collect();
-    // In slot order, which is world order, for the reason [`AppEntities::apply_hub_push`]
-    // gives: one node was added per world and none is ever removed.
+    // In slot order, which is world order: one node was added per world and none is ever removed.
     let mut world = 0;
     data.graph.visit_nodes_mut(|mut node| {
         if let Some(at) = seeded[world] {
@@ -1987,34 +1799,30 @@ fn resume_from(data: &mut AppEntities, before: &Standing) {
 }
 
 impl App {
-    /// The frame drawn while there is no graph: the background, and a word about why.
+    /// The frame drawn while there is no graph: the background, and a word about why. The whole of
+    /// the app until the dump lands, however many asks that takes.
     ///
-    /// The whole of the app until the dump lands, however many asks that takes: see [`Dump`],
-    /// which has no state for having given up.
     /// Everything the overlay usually reads is built out of the dump, so none of the panel can be
     /// laid out here -- only the one message, over the same cleared background the graph is drawn
-    /// on, so that the window does not change colour when the graph arrives.
+    /// on, so the window does not change colour when the graph arrives.
     fn draw_loading(&mut self) {
-        // Whole, for as long as this is the frame: what fades is what is left of it once the
-        // graph is drawing. See [`App::veil`].
+        // Whole for as long as this is the frame: what fades is what is left once the graph draws.
         self.veil = 1.0;
         let ctx = self.ctx.wctx.as_ref().unwrap();
         let frame_input = self.ctx.fig.as_mut().unwrap().generate(ctx);
         let window = self.ctx.window.as_ref().unwrap();
-        // Only while there is still something coming: a run that has given up has nothing to ask
-        // about, and the line it says is its own.
         let seconds = (frame_input.elapsed_time as f32 * 1e-3).min(0.05);
-        // What the server says it is building, which is only worth asking of a server that is
-        // answering: a host that could not be reached has nothing to say about a dump it is not
-        // building, and one whose dump has arrived has nothing left to say at all.
+        // Only worth asking of a server that is answering: a host that could not be reached has
+        // nothing to say about a dump it is not building, and one whose dump arrived has nothing
+        // left to say at all.
         if matches!(
             self.dump,
             Dump::Loading(_) | Dump::Waiting { why: None, .. }
         ) {
             self.building.tick(seconds);
         }
-        // The other clock this frame runs, and the one every wait ends on: however the last ask
-        // turned out, the next one is what this run does about it.
+        // The clock every wait ends on: however the last ask turned out, the next one is what this
+        // run does about it.
         if let Dump::Waiting { until, .. } = &mut self.dump {
             *until -= seconds;
             if *until <= 0.0 {
@@ -2027,8 +1835,8 @@ impl App {
             Dump::Waiting { why: Some(_), .. } => t!("dump-failed"),
             _ => self.building.says(),
         };
-        // What went wrong, for the reader who goes looking. There either was a failure or there
-        // was not; the frame keeps spinning either way, because either way it will ask again.
+        // What went wrong, for the reader who goes looking. The frame keeps spinning either way,
+        // because either way it will ask again.
         let failed = match &self.dump {
             Dump::Waiting { why, .. } => why.as_deref(),
             _ => None,
@@ -2037,10 +1845,10 @@ impl App {
         self.said = says.clone();
         let overlay = self.overlay.as_mut().unwrap();
         // The same scale the panel is laid out at, so the message is the size the rest of the
-        // interface will be. See [`Overlay::panel`].
+        // interface will be.
         overlay.gui.context().set_zoom_factor(overlay.ui_scale);
-        // As in [`Overlay::run`]: the face Japanese needs is not compiled in, and this frame is
-        // the first that may want it.
+        // As in `Overlay::run`: the face Japanese needs is not compiled in, and this frame is the
+        // first that may want it.
         let context = overlay.gui.context().clone();
         overlay.japanese.serve(&context);
         overlay
@@ -2062,26 +1870,25 @@ impl App {
             .unwrap();
     }
 
-    /// The meat of this module.
+    /// One frame: takes in whatever arrived, moves the camera, steps the layout, and draws it.
     fn draw(&mut self) {
-        // Before the graph is looked at, and whether or not there is one yet: a run that resumed
-        // a session is reading an account while the dump is still on its way, and the answer has
-        // to be in hand before the graph is built out of it.
+        // Whether or not there is a graph yet: a run that resumed a session is reading an account
+        // while the dump is still on its way, and the answer has to be in hand before the graph is
+        // built out of it.
         self.yno.poll();
         if self.yno.restated() {
             // A frontier is a different numbering of the worlds, so what was lit means nothing in
-            // the graph about to be built. See [`App::selected`].
+            // the graph about to be built.
             self.selected = None;
-            // Where this graph had got to, for the next one to carry on from: the person is
-            // looking at a map, and a refresh should add to it rather than replace it. See
-            // [`resume_from`] and [`Arrivals`].
+            // Where this graph had got to, for the next to carry on from: the person is looking at
+            // a map, and a refresh should add to it rather than replace it.
             self.before = self.data.as_ref().map(AppEntities::before);
             self.data = None;
             self.build();
         }
         if self.data.is_none() {
-            // Looked in on once a frame, and only while there is nothing to draw: the frames
-            // after this one have a graph in them and nothing left to wait for.
+            // Only while there is nothing to draw: every frame after this one has a graph in it
+            // and nothing left to wait for.
             let arrived = match &self.dump {
                 Dump::Loading(pending) => pending.take(),
                 _ => None,
@@ -2089,15 +1896,13 @@ impl App {
             if let Some(loaded) = arrived {
                 self.dump = match loaded {
                     Ok(Some(dump)) => Dump::Ready(dump),
-                    // Not an error and not a dump: the server is building one, and asking again
-                    // in a moment is the whole of what this run has to do about it.
+                    // Not an error and not a dump: the server is building one.
                     Ok(None) => Dump::Waiting {
                         why: None,
                         until: DUMP_ASKED_EVERY_SECONDS,
                     },
-                    // Not the end of the run: the loading frame goes on saying so and asking
-                    // again, because everything that stops a dump arriving is something that
-                    // passes. See [`Dump`].
+                    // Not the end of the run: everything that stops a dump arriving is something
+                    // that passes, so the loading frame goes on saying so and asking again.
                     Err(error) => {
                         log::warn!("{error}");
                         Dump::Waiting {
@@ -2117,22 +1922,19 @@ impl App {
         let mut frame_input = self.ctx.fig.as_mut().unwrap().generate(ctx);
         let window = self.ctx.window.as_ref().unwrap();
 
-        // What is left of the loading frame, worn down by however long this frame took. Clamped
-        // as the layout's own step is: the frame the graph was built on is a long one, and the
-        // reveal should not be spent paying for it.
+        // Clamped as the layout's own step is: the frame the graph was built on is a long one, and
+        // the reveal should not be spent paying for it.
         if self.veil > 0.0 {
             let step = (frame_input.elapsed_time as f32 * 1e-3).min(0.05);
             self.veil = (self.veil - step / LOADING_FADE_SECONDS).max(0.0);
         }
-        // Whatever the frame was saying when it gave way to the graph, still saying it as it
-        // goes. See [`App::said`].
+        // Whatever the loading frame was saying when it gave way, still saying it as it goes.
         let fading = (self.veil > 0.0).then(|| (self.said.clone(), self.veil));
         let data = self.data.as_mut().unwrap();
         self.statics.camera.set_viewport(frame_input.viewport);
-        // egui marks what it uses as handled, so a click on the panel must not also reach the graph behind it.
         let account = &mut self.yno;
-        // The whole game, which is the yardstick the settings tab measures one person's share of
-        // it against: the graph beside it may be only the frontier. See [`Panel::yno`].
+        // The whole game, which is the yardstick the settings tab measures one person's share
+        // against: the graph beside it may be only the frontier.
         let dump = match &self.dump {
             Dump::Ready(dump) => Some(dump),
             _ => None,
@@ -2144,8 +1946,8 @@ impl App {
             .run(window, &mut frame_input, data, account, dump, fading)
         {
             // Repulsion acts along the offset between two nodes, so a layout flattened onto the
-            // plane has no depth for the forces to reinflate: leaving two dimensions has to
-            // reseed the axis. Cheaper to restart the whole layout than to special-case it.
+            // plane has no depth for the forces to reinflate. Leaving two dimensions has to reseed
+            // that axis, and restarting the whole layout is cheaper than special-casing it.
             scatter(data);
             if data.graph.parameters().dimensions == Dimensions::Two {
                 // Squared onto the plane before the turn is locked, or a camera left oblique by
@@ -2153,28 +1955,27 @@ impl App {
                 self.statics.face_plane();
             }
         }
-        // Ahead of the pan and the orbit control, which both take whatever left-button motion
-        // this leaves unhandled.
+        // Ahead of the pan and the orbit control, which both take whatever left-button motion this
+        // leaves unhandled.
         data.track_gesture(
             &self.statics.camera,
             &mut frame_input.events,
             self.statics.touches.pinching,
         );
         if data.graph.parameters().dimensions == Dimensions::Two {
-            // A flat layout has one face worth looking at, and seen from anywhere else it is a
-            // layout read edge-on. So the camera is not allowed to turn: swallow the drag the
-            // orbit control reads, which leaves it the zoom and leaves the pan alone.
+            // A flat layout has one face worth looking at. Swallowing the drag the orbit control
+            // reads leaves it the zoom and leaves the pan alone.
             lock_rotation(&mut frame_input.events);
         }
-        // Two fingers do both jobs at once, off the same pair of positions: three-d reads the gap
-        // between them as the wheel the orbit control zooms on, and their midpoint's travel is
-        // read here as the pan. They are independent, so a drag that also spreads does both.
+        // Two fingers do both jobs at once off the same pair of positions: three-d reads the gap
+        // between them as the wheel the orbit control zooms on, and their midpoint's travel is the
+        // pan. Independent, so a drag that also spreads does both.
         let dragged = self
             .statics
             .touches
             .take_travel(frame_input.device_pixel_ratio);
-        // Read after the overlay, which is what settles whether the keys are being typed into
-        // the search box rather than walked with.
+        // Read after the overlay, which settles whether the keys are being typed into the search
+        // box rather than walked with.
         self.statics
             .walk
             .track(&frame_input.events, self.overlay.as_ref().unwrap().keyboard);
@@ -2205,17 +2006,16 @@ impl App {
             .track_cursor(self.ctx.window.as_ref().unwrap(), orbiting);
         if data.framing {
             // Recomputed every frame rather than fixed when the selection was made: the layout is
-            // usually still moving, and a goal taken once would be stale before the camera
-            // reached it.
+            // usually still moving, and a goal taken once would be stale before the camera got
+            // there.
             let dt = (frame_input.elapsed_time as f32 * 1e-3).min(0.05);
-            // What is arriving comes first: while a refresh is coming in, the camera is moving
-            // onto it rather than onto whatever was lit before. Once the arrival is over the
-            // selection has the camera back, and a run with neither stops framing.
+            // What is arriving comes first: while a refresh is coming in, the camera moves onto it
+            // rather than onto whatever was lit before. Once it is over the selection has the
+            // camera back, and a run with neither stops framing.
             data.framing = match data.arrival_bounds() {
                 Some(bounds) => {
-                    // Kept on whether or not the camera has caught up, unlike a selection: what
-                    // it is following is still being pushed about by the worlds that landed in
-                    // it, so arriving once is not the end of the move.
+                    // Kept on whether or not the camera has caught up, unlike a selection: what it
+                    // follows is still being pushed about by the worlds that landed in it.
                     self.statics.ease_to_frame(&bounds, dt);
                     true
                 }
@@ -2228,16 +2028,15 @@ impl App {
 
         data.pull_grabbed_node(&self.statics.camera);
         data.receive_atlas(ctx, self.overlay.as_ref().unwrap().gui.context());
-        // Unclamped: the layout steps at a fixed rate and caps how much of a long frame it will
-        // catch up on itself, so a stalled tab is already its problem, not this one. It reports
-        // whether it moved anything, which is what says whether there is geometry to rebuild: a
-        // settled layout has none, and neither has a frame too short to be a whole step of one.
+        // Unclamped: the layout steps at a fixed rate and caps how much of a long frame it catches
+        // up on itself, so a stalled tab is already its problem. What it returns is whether there
+        // is geometry to rebuild.
         let stepped = data.graph.update(frame_input.elapsed_time as f32 * 1e-3);
         // The quads face the camera, so turning it dates their transformations even over a layout
         // that has not moved at all.
         let turned = data.billboard != billboard(&self.statics.camera);
-        // Clamped as the reveal is, and for the same reason: the frame a graph is built on is a
-        // long one, and an arrival should not be half over before it is first drawn.
+        // Clamped as the reveal is, and for the same reason: an arrival should not be half over
+        // before it is first drawn.
         let arriving = data
             .arrivals
             .tick((frame_input.elapsed_time as f32 * 1e-3).min(0.05));
@@ -2248,13 +2047,13 @@ impl App {
         data.march_dashes((frame_input.elapsed_time as f32 * 1e-3).min(0.05));
         // After the instances, whose colors the full pictures borrow, and every frame rather than
         // only the moved ones: coming in on a node changes nothing in the layout and everything
-        // about how much of the atlas the screen is asking for.
+        // about how much of the atlas the screen asks for.
         let magnified = data.magnified(&self.statics.camera, frame_input.viewport);
         data.detail.track(ctx, &magnified);
-        // Beside them, and on the same terms: what it copies is the node quads rebuilt just above,
-        // and the camera it is lifted against is the one that turned them.
+        // On the same terms: what it copies is the node quads rebuilt just above, and the camera
+        // it is lifted against is the one that turned them.
         data.place_unvisited(ctx, &self.statics.camera);
-        // Every frame likewise, and after the instances it stands on: a turn of the camera moves
+        // Every frame too, and after the instances it stands on: a turn of the camera moves
         // the quad it is copied from without moving the layout.
         data.aim_glow(&self.statics.camera);
 
@@ -2327,8 +2126,8 @@ impl Overlay {
     /// Builds this frame's panel and consumes the events that land on it.
     ///
     /// The closure can only borrow `data` immutably, so everything the panel reads is walked out
-    /// into [PanelData] first, and everything it decides is left on the [Panel] it is handed for
-    /// [Overlay::run] to apply.
+    /// into [`PanelData`] first, and everything it decides is left on the [`Panel`] it is handed
+    /// for [`Overlay::run`] to apply.
     fn panel(
         &mut self,
         window: &Window,
@@ -2338,9 +2137,9 @@ impl Overlay {
         dump: Option<&world::Dump>,
         fading: Option<(String, f32)>,
     ) -> Panel {
-        // egui's own way of being asked for a bigger interface: it multiplies whatever the window
-        // says a point is worth, which is exactly what this scale means. So the panel is laid out
-        // and read at the product, and the graph behind it at the window's ratio alone.
+        // egui's zoom factor multiplies whatever the window says a point is worth, which is
+        // exactly what this scale means. So the panel is laid out and read at the product, and the
+        // graph behind it at the window's ratio alone.
         self.gui.context().set_zoom_factor(self.ui_scale);
         let ratio = frame_input.device_pixel_ratio * self.ui_scale;
         let read = PanelData::new(data, self.fps, &self.sidebar, frame_input, ratio);
@@ -2364,7 +2163,7 @@ impl Overlay {
             revealed: None,
             language: None,
         };
-        // Bound out of `self` so the closure borrows this field alone, leaving `self.gui` free
+        // Bound out of `self` so the closure borrows these fields alone, leaving `self.gui` free
         // for the call it is passed to.
         let sidebar = &mut self.sidebar;
         let guide = &mut self.guide;
@@ -2373,9 +2172,9 @@ impl Overlay {
         let insets = safe_insets(frame_input.viewport, ratio);
         self.gui.run(window, |ui| {
             let style = ui.style();
-            // Full height, so the safe area is kept by standing the contents off the panel's
-            // own edges rather than by shrinking the panel: a sidebar that stopped short of
-            // the status bar would leave a stripe of its own colour above it.
+            // Full height, with the safe area kept by standing the contents off the panel's own
+            // edges: a sidebar stopping short of the status bar would leave a stripe of its own
+            // colour above it.
             let frame = egui::Frame::side_top_panel(style)
                 .inner_margin(egui::Margin {
                     left: insets.left + PANEL_MARGIN,
@@ -2383,9 +2182,7 @@ impl Overlay {
                     top: insets.top + PANEL_MARGIN,
                     bottom: insets.bottom + PANEL_MARGIN,
                 })
-                // The graph carries on behind the sidebar rather than stopping at it: see
-                // [`SIDEBAR_OPACITY`]. The style's own panel colour, only thinned, so the
-                // sidebar stays the same colour it would otherwise have been.
+                // The style's own panel colour, only thinned. See [`SIDEBAR_OPACITY`].
                 .fill(fade(style.visuals.panel_fill, SIDEBAR_OPACITY));
             match sidebar.closed {
                 false => {
@@ -2399,32 +2196,31 @@ impl Overlay {
             panel.rocker(ui, &read, insets);
             panel.menu(ui, &read);
             panel.tooltip(ui, &read);
-            // Read within the frame that asked, so the window is on screen the moment the
-            // button is let go of rather than the frame after it.
+            // Read within the frame that asked, so the window is on screen the moment the button
+            // is let go of rather than the frame after.
             if let Some(world) = panel.mapped {
                 maps.toggle(world, data.titles[world].show(), &data.maps[world]);
             }
             maps.show(ui.ctx(), insets);
             download.show(ui.ctx(), insets);
-            // Last, so it is drawn over everything it is explaining. Read a frame late when
-            // the settings tab has just asked for it, which is a frame nobody sees.
+            // Last, so it is drawn over everything it explains. A frame late when the settings tab
+            // has just asked for it, which is a frame nobody sees.
             if panel.guide {
                 guide.reopen();
             }
             guide.show(ui.ctx());
-            // Last of all, and over the panel as much as over the graph: what is fading is the
-            // frame that stood in for the whole interface, so the whole interface comes out from
-            // under it. See [`App::veil`].
+            // Last of all, and over the panel as much as the graph: what is fading stood in for
+            // the whole interface, so the whole interface comes out from under it.
             if let Some((says, opacity)) = &fading {
                 loading_frame(ui.ctx(), says, None, *opacity);
             }
         });
-        // What `three_d`'s `GUI` used to return from its own update. Asked of egui after the
-        // frame, which is the only point at which it knows what was laid out under the pointer.
+        // Asked of egui after the frame, the only point at which it knows what was laid out under
+        // the pointer.
         panel.wants_pointer = self.gui.context().egui_wants_pointer_input()
             || self.gui.context().egui_wants_keyboard_input();
-        // Asked after the frame, which is when egui knows whether anything it drew took the
-        // focus that typing would go to.
+        // Also after the frame: only now does egui know whether anything it drew took the focus
+        // typing would go to.
         track_keyboard(
             self.gui.context().egui_wants_keyboard_input(),
             &mut self.keyboard,
@@ -2432,11 +2228,8 @@ impl Overlay {
         panel
     }
 
-    /// Runs one frame of the panel and applies what it was left at.
-    ///
-    /// The panel owns the layout mode, so this both reads the parameters and writes back what the
-    /// controls were left at. Returns whether the dimension changed, which is the one switch the
-    /// caller has to follow up on.
+    /// Runs one frame of the panel and applies what it was left at. Returns whether the dimension
+    /// changed, which is the one switch the caller has to follow up on.
     fn run(
         &mut self,
         window: &Window,
@@ -2446,7 +2239,7 @@ impl Overlay {
         dump: Option<&world::Dump>,
         fading: Option<(String, f32)>,
     ) -> bool {
-        // Guard the very first frame, which reports no elapsed time at all.
+        // Guards the very first frame, which reports no elapsed time at all.
         let elapsed = (frame_input.elapsed_time as f32).max(1e-3);
         self.fps += (1000.0 / elapsed - self.fps) * (elapsed / FPS_WINDOW_MS).min(1.0);
 
@@ -2454,9 +2247,8 @@ impl Overlay {
         if let Some(language) = panel.language {
             i18n::speak(language);
         }
-        // Asked every frame, and answered on the first one that is in Japanese: the face it needs
-        // is neither compiled in nor here yet. Cloned because the face is installed on the
-        // context while the field that installs it is borrowed.
+        // Cloned because the face is installed on the context while the field installing it is
+        // borrowed.
         let context = self.gui.context().clone();
         self.japanese.serve(&context);
         // Set by the panel too, and by the selections applied out here.
@@ -2468,30 +2260,27 @@ impl Overlay {
         if menu_taken {
             data.menu = None;
         }
-        // Always the route: the list is there to be walked to, and a world named in it is picked
-        // to be gone to rather than to be opened out in turn.
+        // Always the route: a world named in a list is picked to be gone to rather than opened out.
         if let Some(world) = panel.chosen {
             data.select(Some(Highlight::Route(world)));
         }
-        // Every frame, cleared included: the row stops pointing by no longer being hovered, which
-        // is a frame that says nothing rather than a frame that says to stop.
+        // Every frame, cleared included: a row stops pointing by no longer being hovered, which is
+        // a frame that says nothing rather than one that says to stop.
         data.pointed = panel.pointed;
-        // Out here rather than in the panel, because the account is what a pretence is laid on and
-        // the panel is handed only what it draws. The English name: it is what the two sides of
-        // the join agree on, and the world is nameless on screen precisely because it is unvisited.
-        // See [`yno::Account::pretend`].
+        // Out here because the account is what a pretence is laid on and the panel is handed only
+        // what it draws. The English name, that being what the two sides of the join agree on.
         if let Some(world) = panel.revealed {
             account.pretend(data.titles[world].en.clone());
         }
         // Framing again rather than only from here on: the button is pressed to be taken there
-        // now, whether or not the camera had already arrived where it was.
+        // now, whether or not the camera had already arrived.
         if panel.refit {
             data.frame_route = !data.frame_route;
             data.framing = true;
         }
-        // [GUI::update] only surrenders the pointer while egui is actively working a widget, so
-        // a scroll over the panel reaches the camera as a zoom and a press on a bare label
-        // reaches the graph as a selection. Whatever egui wants the pointer for is the panel's.
+        // three-d's own `GUI` surrenders the pointer only while egui is actively working a widget,
+        // so a scroll over the panel would reach the camera as a zoom and a press on a bare label
+        // the graph as a selection. Whatever egui wants the pointer for is the panel's.
         if panel.wants_pointer {
             for event in frame_input.events.iter_mut() {
                 match event {
@@ -2506,7 +2295,7 @@ impl Overlay {
         }
 
         // Followed live, so the panel resizes under the hand, but written through only once the
-        // hand is off it: a store is not something to write to every frame of a drag.
+        // hand is off it: a store is not something to write every frame of a drag.
         self.ui_scale = panel.ui_scale;
         if self.ui_scale != self.ui_scale_stored && !self.gui.context().egui_is_using_pointer() {
             self.ui_scale_stored = self.ui_scale;
@@ -2515,17 +2304,15 @@ impl Overlay {
 
         // Ahead of the early return below, because two of the four do not change the simulation's
         // own parameters and would never be written down if this waited for one that did. Held off
-        // while a slider is under the hand for the reason the UI scale is: a store is not
-        // something to write to every frame of a drag.
+        // while a slider is under the hand, for the reason the UI scale is.
         let layout = Layout {
             dimensions: panel.dimensions,
             layered: panel.layered,
             hub_repulsion: panel.hub_repulsion,
             link_reach: panel.link_reach,
         };
-        // The two knobs reach the simulation on their own, ahead of that same return: neither
-        // rearranges the layout the way a mode switch does, and both are dragged, so each is
-        // followed live rather than waiting for the hand to come off it.
+        // The two knobs reach the simulation ahead of that same return: neither rearranges the
+        // layout the way a mode switch does, and both are dragged, so each is followed live.
         if panel.hub_repulsion != data.hub_repulsion {
             data.hub_repulsion = panel.hub_repulsion;
             data.apply_hub_push();
@@ -2551,16 +2338,16 @@ impl Overlay {
         parameters.dag_level_slack = solve.dag_level_slack;
         parameters.force_charge = solve.force_charge;
         parameters.link_distance_max = solve.link_distance_max;
-        // A switch rearranges the whole layout rather than nudging it, so it gets a full
-        // settling window instead of what a settled graph has left: see [ForceGraph::revive].
+        // A switch rearranges the whole layout rather than nudging it, so it gets a full settling
+        // window instead of what a settled graph has left.
         data.graph.revive();
         reseed
     }
 }
 
 impl<'a> PanelData<'a> {
-    /// Walks out of `data` everything the panel will read, since the closure that builds it can
-    /// only borrow `data` immutably and cannot call these methods itself.
+    /// Walks out of `data` everything the panel will read, the closure that builds it being able
+    /// to borrow `data` only immutably.
     fn new(
         data: &'a AppEntities,
         fps: f32,
@@ -2580,8 +2367,8 @@ impl<'a> PanelData<'a> {
                 _ => Vec::new(),
             },
             candidates: data.search(&sidebar.worlds),
-            // Only the open one: the other's list is not drawn, and matching a few hundred names
-            // for nobody is work every frame would pay for.
+            // Only the open tab: matching a few hundred names for a list nobody is looking at is
+            // work every frame would pay for.
             authors: match sidebar.tab {
                 Tab::Authors => matching(
                     data.authors.iter().map(|by| by.name.names()),
@@ -2603,9 +2390,9 @@ impl<'a> PanelData<'a> {
                 .menu
                 .as_ref()
                 .map(|menu| (menu.world, into_points(menu.at, frame_input, ratio))),
-            // Settled after the panel ran last frame, since the pointer is only resolved once the
-            // panel has taken its share of the events: a frame behind the cursor, which at this
-            // rate is not a frame anybody sees.
+            // Settled after the panel ran last frame, the pointer only being resolved once the
+            // panel has taken its share of the events. A frame behind the cursor, which nobody
+            // sees at this rate.
             hovered: data
                 .hover
                 .zip(data.cursor)
@@ -2614,8 +2401,8 @@ impl<'a> PanelData<'a> {
     }
 }
 
-/// The scale an earlier run was left at, or the default. A value written by a version that
-/// allowed a different range is brought back inside this one rather than thrown away.
+/// A value written by a version that allowed a different range is brought back inside this one
+/// rather than thrown away.
 fn remembered_scale() -> f32 {
     store::read(UI_SCALE)
         .and_then(|scale| scale.parse().ok())
@@ -2634,8 +2421,6 @@ fn into_points(at: PhysicalPoint, frame_input: &FrameInput, ratio: f32) -> egui:
 }
 
 impl Panel {
-    /// The panel proper: the tabs, and whichever of them is open.
-    ///
     /// The tab bar stands outside the scroll, so it stays reachable however far down a list the
     /// person has read.
     fn window(
@@ -2663,9 +2448,8 @@ impl Panel {
             });
         });
         ui.separator();
-        // One scroll for the whole tab, rather than one per list: the lists have the full height
-        // of the window to run down, and a list that scrolled inside a column that also scrolled
-        // would fight the drag that reached it.
+        // One scroll for the whole tab rather than one per list: a list scrolling inside a column
+        // that also scrolled would fight the drag that reached it.
         egui::ScrollArea::vertical().show(ui, |ui| match sidebar.tab {
             Tab::Worlds => self.graph(ui, read, &mut sidebar.worlds),
             Tab::Authors => self.authors(ui, read, &mut sidebar.authors),
@@ -2674,8 +2458,6 @@ impl Panel {
         });
     }
 
-    /// The graph in front of the person: how it is laid out, how to find a world in it, and what
-    /// the current selection has to say for itself.
     fn graph(&mut self, ui: &mut egui::Ui, read: &PanelData, search: &mut String) {
         let data = read.data;
         ui.label(t!("fps", fps = format!("{:.0}", read.fps)));
@@ -2701,12 +2483,8 @@ impl Panel {
         self.selection(ui, read);
     }
 
-    /// Every way on from a world: its connections, each with which ways round it can be walked
-    /// and what it asks, and each a click away from being lit on its own.
-    ///
-    /// All but one of them. The step back to the world the route came through is left out: the
-    /// route above already names it, and it is the one way on a reader following a route has
-    /// just come from.
+    /// The step back to the world the route came through is left out, the route above already
+    /// naming it.
     fn forward_connections(&mut self, ui: &mut egui::Ui, read: &PanelData, world: usize) {
         let data = read.data;
         let parent = data.routes.parents[world];
@@ -2721,8 +2499,8 @@ impl Panel {
         ui.label(t!("forward-connections", count = ways.len()));
         for step in ways {
             let lit = Highlight::Connection(world, step.world);
-            // What the way it can be walked asks, which for a two-way connection is the way out:
-            // a reader looking at the ways on from a world is looking at leaving it.
+            // For a two-way connection the way out: a reader looking at the ways on from a world
+            // is looking at leaving it.
             let asks = step
                 .out
                 .as_ref()
@@ -2750,8 +2528,6 @@ impl Panel {
         }
     }
 
-    /// Who made the worlds: everyone the wiki credits, busiest first, and how much each of them
-    /// is behind. Clicking a name lights their whole body of work.
     fn authors(&mut self, ui: &mut egui::Ui, read: &PanelData, search: &mut String) {
         let data = read.data;
         search_box(ui, search, "authors", t!("search-authors"));
@@ -2775,10 +2551,8 @@ impl Panel {
         }
     }
 
-    /// What each release added, newest first, each shown by a few of the worlds it brought.
-    ///
     /// Listed whole rather than cut to the best few: a release is looked up as often by reading
-    /// down the history as by name, and the pictures are what make it worth reading down.
+    /// down the history as by name.
     fn versions(&mut self, ui: &mut egui::Ui, read: &PanelData, search: &mut String) {
         let data = read.data;
         search_box(ui, search, "versions", t!("search-versions"));
@@ -2793,16 +2567,13 @@ impl Panel {
         }
     }
 
-    /// One release in the catalog: what it is called, when it landed, and a few of the worlds it
-    /// brought with it.
-    ///
-    /// The whole row lights the release; the pictures are hotter than that, and each one goes to
-    /// its own world, so the catalog is a way into the graph rather than only a way to read it.
+    /// The whole row lights the release, and each picture in it goes to its own world, so the
+    /// catalog is a way into the graph rather than only a way to read it.
     fn version(&mut self, ui: &mut egui::Ui, read: &PanelData, version: usize) {
         let data = read.data;
         let release = &data.versions[version];
-        // Every row of the list draws the same widgets, and egui names a widget by what is in it:
-        // the release's own place in the list is what keeps two rows apart.
+        // Every row draws the same widgets and egui names a widget by what is in it, so the
+        // release's own place in the list is what keeps two rows apart.
         ui.push_id(version, |ui| {
             let lit = read.selected == Some(Highlight::Version(version));
             if ui
@@ -2826,8 +2597,8 @@ impl Panel {
             {
                 self.lit = Some(Some(Highlight::Version(version)));
             }
-            // Nothing at all until the atlas has arrived, and nothing ever if it cannot be had:
-            // the rest of the row already says what the release is.
+            // Nothing until the atlas arrives, and nothing ever if it cannot be had: the rest of
+            // the row already says what the release is.
             let Some(sheet) = &data.sheet else { return };
             ui.horizontal(|ui| {
                 for &world in release.worlds.iter().take(CATALOG_THUMBNAILS) {
@@ -2847,14 +2618,12 @@ impl Panel {
         });
     }
 
-    /// Names the selected world and how it sits in the graph: who made it, what it touches and what
-    /// hangs off it.
     fn world_info(&mut self, ui: &mut egui::Ui, data: &AppEntities, world: usize) {
         let mut lit = None;
         ui.horizontal(|ui| {
             ui.strong(data.titles[world].show());
-            // Only where there is a name to look up. A world the player has not been to is not
-            // named here, and a page opened on it would say what this is holding back.
+            // A world the player has not been to is not named here, and a page opened on it would
+            // say what this is holding back.
             if data.titles[world].known()
                 && ui
                     .button(ICON_OPEN_IN_NEW)
@@ -2863,8 +2632,7 @@ impl Panel {
             {
                 open_in_browser(&data.titles[world].wiki_url());
             }
-            // Only where there is one to show: a few hundred worlds have never been drawn, and a
-            // button that opened an empty window on them would say nothing this does not.
+            // A few hundred worlds have never been drawn.
             if !data.maps[world].is_empty()
                 && ui
                     .button(ICON_MAP)
@@ -2920,8 +2688,7 @@ impl Panel {
         self.lit = self.lit.or(lit.map(Some));
     }
 
-    /// The knobs: set once and then left alone, which is why they are not in the way of the
-    /// reading tabs.
+    /// A tab of its own because the knobs are set once and then left alone.
     fn settings(
         &mut self,
         ui: &mut egui::Ui,
@@ -2938,8 +2705,8 @@ impl Panel {
             .on_hover_text(t!("link-reach-hint"));
         ui.add(egui::Slider::new(&mut self.ui_scale, UI_SCALE_RANGE).text(t!("ui-scale")))
             .on_hover_text(t!("ui-scale-hint"));
-        // The way back to a panel that was dismissed for good, so ticking that box is not a
-        // door that locks behind the person who ticked it.
+        // The way back to a panel that was dismissed for good, so ticking that box is not a door
+        // that locks behind the person who ticked it.
         self.guide |= ui.button(t!("show-controls")).clicked();
         Self::clear_cache(ui);
         Self::yno(ui, sidebar, account, dump);
@@ -2965,12 +2732,11 @@ impl Panel {
         }
     }
 
-    /// The player's own game: signing in to YNOproject, and drawing only as much of the graph as
-    /// that account has seen.
+    /// Signing in to YNOproject, and drawing only as much of the graph as that account has seen.
     ///
     /// Nothing of `self`, because none of it is a decision the frame takes and applies afterwards:
-    /// the account owns what it is doing and is told here directly, and what comes of it is a
-    /// graph built again rather than anything this panel draws. See [`App::draw`].
+    /// the account is told directly, and what comes of it is a graph built again rather than
+    /// anything this panel draws.
     fn yno(
         ui: &mut egui::Ui,
         sidebar: &mut Sidebar,
@@ -2987,16 +2753,14 @@ impl Panel {
             yno::State::SignedIn => {
                 ui.label(t!("yno-signed-in"));
             }
-            // The server's own words, which are what say whether it was the password or the
-            // network. Read before the label, since the color is borrowed out of the same `ui`.
+            // The server's own words, which say whether it was the password or the network. Read
+            // before the label, the color being borrowed out of the same `ui`.
             yno::State::Failed(why) => {
                 let color = ui.visuals().error_fg_color;
                 ui.colored_label(color, why);
             }
         }
-        // The refresh below is an answer to an ask that may already be out: a second one would be
-        // dropped on the floor, and a button that looks pressable but does nothing is worse than
-        // one that says it is busy. The same wait the label above is reporting.
+        // The refresh below would drop a second ask on the floor while one is already out.
         let working = matches!(account.state(), yno::State::Working);
         if account.signed_in() {
             Self::completion(ui, account, dump);
@@ -3009,8 +2773,8 @@ impl Panel {
                 account.set_frontier(frontier);
             }
             ui.horizontal(|ui| {
-                // The account is read once at startup and then not again, while the person is off
-                // playing the game and walking into places. See [`yno::Account::refresh`].
+                // The account is read once at startup and not again, while the person is off
+                // playing the game and walking into places.
                 if ui
                     .add_enabled(!working, egui::Button::new(t!("yno-refresh")))
                     .on_hover_text(t!("yno-refresh-hint"))
@@ -3018,8 +2782,8 @@ impl Panel {
                 {
                     account.refresh();
                 }
-                // The session is forgotten here and left standing on YNOproject: ending it there
-                // would also sign out whatever browser the person plays the game in.
+                // Forgotten here and left standing on YNOproject: ending it there would also sign
+                // out whatever browser the person plays the game in.
                 if ui.button(t!("yno-sign-out")).clicked() {
                     account.sign_out();
                 }
@@ -3039,8 +2803,8 @@ impl Panel {
             .add_enabled(ready, egui::Button::new(t!("yno-sign-in")))
             .clicked()
         {
-            // Taken rather than copied: the password has no second use, and the field it was
-            // typed into is the only place it was ever held.
+            // Taken rather than copied: the password has no second use, and the field it was typed
+            // into is the only place it was ever held.
             account.sign_in(
                 std::mem::take(&mut sidebar.yno_user),
                 std::mem::take(&mut sidebar.yno_password),
@@ -3048,16 +2812,12 @@ impl Panel {
         }
     }
 
-    /// How much of the game this account has seen, measured against the whole dump.
+    /// How much of the game this account has seen, measured against the whole dump rather than the
+    /// graph beside it: the graph may be the frontier, and a bar reading a hundred per cent the
+    /// moment the switch was thrown would measure the person against themselves.
     ///
-    /// Against the dump rather than the graph beside it, because the graph may be the frontier --
-    /// a bar reading a hundred per cent the moment the switch was thrown would be measuring the
-    /// person against themselves. Computed here each frame it is drawn rather than kept, since it
-    /// is one pass over the titles and only on the frames this tab is open, and anything kept
-    /// would have to be thrown away again every time either side of it changed.
-    ///
-    /// Nothing at all where there is no dump to measure against, which is a frame that has no
-    /// graph in it either.
+    /// Recomputed each frame it is drawn -- one pass over the titles, only while this tab is open
+    /// -- because anything kept would go stale on either side.
     fn completion(ui: &mut egui::Ui, account: &yno::Account, dump: Option<&world::Dump>) {
         let (Some(visited), Some(dump)) = (account.visited(), dump) else {
             return;
@@ -3074,12 +2834,9 @@ impl Panel {
         .on_hover_text(t!("yno-completion-hint"));
     }
 
-    /// What signing in here does with the account, said before anyone types a password into it.
-    ///
-    /// Beside the fields rather than behind a link, because it is the one thing a person has to
-    /// know at the moment they are deciding: this app reads where they have been and writes
-    /// nothing. The link is for whoever would rather read the code than the promise, and points at
-    /// the file that makes it rather than at the project.
+    /// What signing in does with the account, beside the fields rather than behind a link: it is
+    /// the one thing a person has to know at the moment they are deciding. The link points at the
+    /// file that makes the promise rather than at the project.
     fn promise(ui: &mut egui::Ui) {
         ui.label(t!("yno-promise"));
         if ui
@@ -3090,15 +2847,10 @@ impl Panel {
         }
     }
 
-    /// Emptying the pictures kept between runs.
+    /// Nothing of `self`, the cache's own state being the only state there is: one store behind
+    /// one client, and [`fetch::cleared`] is its answer to everyone.
     ///
-    /// Reads the cache's own state rather than keeping any of its own, which is why this needs
-    /// nothing of `self`: there is one store behind one client, and [`fetch::cleared`] is its
-    /// answer to everyone. So the button is honest across a frame that redraws for some other
-    /// reason, and would be honest twice over if the settings tab were ever open in two places.
-    ///
-    /// Native only. The page's cache is the browser's, which this app neither built nor may
-    /// empty -- see [`fetch::Cleared`].
+    /// Native only. The page's cache is the browser's, which this app neither built nor may empty.
     #[cfg(not(target_family = "wasm"))]
     fn clear_cache(ui: &mut egui::Ui) {
         let cleared = fetch::cleared();
@@ -3111,7 +2863,7 @@ impl Panel {
             fetch::clear();
         }
         // Under the button rather than in it: the button says what it does, and this says what
-        // came of the last press. A run nobody has pressed it in says nothing at all.
+        // came of the last press.
         match cleared {
             fetch::Cleared::Never => {}
             fetch::Cleared::Clearing => {
@@ -3130,12 +2882,9 @@ impl Panel {
     #[cfg(target_family = "wasm")]
     fn clear_cache(_: &mut egui::Ui) {}
 
-    /// Which language the app is read in.
-    ///
-    /// Every language names itself, so the list reads the same whichever one is open: someone who
-    /// cannot read the language the app opened in can still find their own in it. The choice is
-    /// left on the panel rather than taken here, so the frame that is already half drawn in one
-    /// language is not finished in another. See [`Overlay::run`].
+    /// Every language names itself, so someone who cannot read the one the app opened in can still
+    /// find theirs in the list. The choice is left on the panel rather than taken here, so a frame
+    /// half drawn in one language is not finished in another.
     fn language(&mut self, ui: &mut egui::Ui) {
         let speaking = i18n::speaking();
         let mut chosen = speaking;
@@ -3151,16 +2900,11 @@ impl Panel {
         }
     }
 
-    /// One world in a list: pointed at where it stands in the graph while the pointer is over the
-    /// row, and gone to when the row is clicked.
-    ///
     /// Every list of worlds in the panel is drawn through here, so all of them point alike. The
-    /// one list that is not is the ways on from a world -- see [`Self::forward_connections`],
-    /// whose rows are connections rather than worlds, and which lights the passage rather than
-    /// either end of it.
+    /// exception is the ways on from a world -- see [`Self::forward_connections`], whose rows are
+    /// connections and which lights the passage rather than either end of it.
     ///
-    /// [`Self::pointed`] is written rather than merged: the loop leaves the last hovered row
-    /// standing, and egui hovers at most one row at a time anyway.
+    /// [`Self::pointed`] is written rather than merged: egui hovers at most one row at a time.
     fn world_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -3177,14 +2921,12 @@ impl Panel {
         }
     }
 
-    /// What is lit, read out: the route to it, what hangs off it, or the author it is credited to.
     fn selection(&mut self, ui: &mut egui::Ui, read: &PanelData) {
         let data = read.data;
         match read.selected {
             None => {
                 ui.label(t!("nothing-selected"));
-                // Only where there is something to offer, which is a run drawing a frontier that
-                // still has an unwalked way in it. See [`untaken`].
+                // Only a run drawing a frontier with an unwalked way left in it has any to offer.
                 if !data.untaken.is_empty()
                     && ui
                         .link(t!("untaken-worlds"))
@@ -3211,9 +2953,9 @@ impl Panel {
                     self.world_row(ui, world, false, data.titles[world].show());
                 }
             }
-            // The connection is the subject, but the world it is walked from is still what the
-            // ways on are listed for: picking another of them from here is picking a second way
-            // out of the same world, not a step onward from the first.
+            // The connection is the subject, but the ways on are still listed for the world it is
+            // walked from: picking another from here is a second way out of the same world, not a
+            // step onward from the first.
             Some(Highlight::Connection(at, far)) => {
                 self.world_info(ui, data, at);
                 let step = data.connections[at]
@@ -3277,8 +3019,7 @@ impl Panel {
                     self.world_row(ui, world, false, data.titles[world].show());
                 }
             }
-            // A release is a list like an author's work is, and read the same way: what it
-            // added, in world order.
+            // A release is a list like an author's work, and read the same way.
             Some(Highlight::Version(version)) => {
                 let release = &data.versions[version];
                 ui.strong(&release.name);
@@ -3300,8 +3041,8 @@ impl Panel {
                     self.world_row(ui, world, false, data.titles[world].show());
                 }
             }
-            // A layer is a shell rather than a list: it is read off the graph, so the panel only
-            // says which shell is lit and how much of the game sits on it.
+            // A layer is a shell rather than a list, so the panel only says which is lit and how
+            // much of the game sits on it.
             Some(Highlight::Layer(depth)) => {
                 ui.strong(t!("layer-depth", depth = depth));
                 ui.label(worlds(read.listed.len()));
@@ -3312,9 +3053,9 @@ impl Panel {
         }
     }
 
-    /// The rocker in the bottom corner, which steps the lit layer in and out from the origin.
+    /// Steps the lit layer in and out from the origin.
     ///
-    /// An [egui::Area] rather than part of the sidebar: it is a control over the graph, and it
+    /// An [`egui::Area`] rather than part of the sidebar: it is a control over the graph, and it
     /// belongs in the corner the graph is still visible in whatever the sidebar is showing. Its
     /// middle is the off position, so a layer can be dropped without having to click a world.
     fn rocker(&mut self, ui: &mut egui::Ui, read: &PanelData, insets: egui::Margin) {
@@ -3333,7 +3074,7 @@ impl Panel {
             )
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    // Scaled rather than sized: the arrows and the padding around them are grown
+                    // Scaled rather than sized: the arrows and the padding around them grow
                     // together, so the buttons keep their shape and still follow the UI scale.
                     let style = ui.style_mut();
                     for font in style.text_styles.values_mut() {
@@ -3368,7 +3109,6 @@ impl Panel {
             });
     }
 
-    /// The menu a right-click opened, drawn over everything else where the click landed.
     fn menu(&mut self, ui: &mut egui::Ui, read: &PanelData) {
         let Some((world, at)) = read.menu else {
             return;
@@ -3398,10 +3138,8 @@ impl Panel {
                         self.mapped = Some(world);
                         self.menu_taken = true;
                     }
-                    // Only for a world the player has not been to, which is the only kind there is
-                    // anything to reveal about -- and a kind that exists at all only while the
-                    // graph is a frontier, so the entry is not there to be wondered at in an
-                    // ordinary run. See [`yno::Account::pretend`].
+                    // Such a world only exists while the graph is a frontier, so the entry is not
+                    // there to be wondered at in an ordinary run.
                     if !named
                         && ui
                             .button(t!("menu-reveal"))
@@ -3415,10 +3153,7 @@ impl Panel {
             });
     }
 
-    /// Names the world under the pointer, beside the pointer.
-    ///
-    /// Not while a menu is open: the menu is over the same world and already names it, and the
-    /// tooltip would only land on top of it.
+    /// Not while a menu is open: the menu is over the same world and already names it.
     fn tooltip(&self, ui: &mut egui::Ui, read: &PanelData) {
         let Some((world, at)) = read.hovered.filter(|_| read.menu.is_none()) else {
             return;
@@ -3439,9 +3174,7 @@ impl Panel {
 }
 
 impl AppStatics {
-    /// Slides the camera and its orbit center across the view plane.
-    ///
-    /// [OrbitControl] only orbits and zooms, so panning lives here, on the buttons it leaves
+    /// [`OrbitControl`] only orbits and zooms, so panning lives here, on the buttons it leaves
     /// alone. Called before it, so a pan drag is not also read as an orbit.
     fn pan(&mut self, events: &mut [Event], device_pixel_ratio: f32) -> bool {
         let mut panned = false;
@@ -3473,9 +3206,7 @@ impl AppStatics {
         panned
     }
 
-    /// Slides the camera and its orbit center by a drag, in logical pixels.
-    ///
-    /// Shared by the two ways of asking for one: a button the mouse has spare, and the two
+    /// Shared by the two ways of asking for a pan: a button the mouse has spare, and the two
     /// fingers a screen has instead.
     fn pan_by(&mut self, delta: (f32, f32), device_pixel_ratio: f32) -> bool {
         if delta == (0.0, 0.0) {
@@ -3490,10 +3221,9 @@ impl AppStatics {
         true
     }
 
-    /// Flies the camera and its orbit center along the direction it is looking, by a distance
-    /// given in logical pixels the way a pan's is.
+    /// `travel` is in logical pixels, as a pan's is.
     ///
-    /// The center travels with the camera, which is what makes this a move through the graph
+    /// The orbit centre travels with the camera, which is what makes this a move through the graph
     /// rather than the wheel's zoom: the two never close on each other, so the view keeps its
     /// speed instead of creeping to a halt against a point it can never reach.
     fn dolly_by(&mut self, travel: f32, device_pixel_ratio: f32) -> bool {
@@ -3507,7 +3237,7 @@ impl AppStatics {
         true
     }
 
-    /// World units per logical pixel on the plane through the orbit center. What keeps a drag
+    /// World units per logical pixel on the plane through the orbit centre. What keeps a drag
     /// holding whatever it started on, and a walk covering the same apparent ground however far
     /// out the camera is standing.
     fn world_per_pixel(&self, device_pixel_ratio: f32) -> f32 {
@@ -3516,8 +3246,6 @@ impl AppStatics {
         2.0 * distance * (FOV_Y_DEGREES.to_radians() * 0.5).tan() / logical_height
     }
 
-    /// Puts the pointer for the camera move in progress on the window.
-    ///
     /// Only the two moves that take a drag are named: a pan holds the graph, an orbit turns it.
     /// The orbit is left unnamed in two dimensions, where the turn it would promise is locked.
     fn track_cursor(&mut self, window: &Window, orbiting: bool) {
@@ -3533,9 +3261,7 @@ impl AppStatics {
     }
 
     /// Turns the camera square to the `z = 0` plane, keeping where it looks and how far off it
-    /// stands.
-    ///
-    /// The one turn two-dimensional mode makes on its own, because it is also the one turn the
+    /// stands. The one turn two-dimensional mode makes on its own, because it is also the one the
     /// person can no longer make: see [`lock_rotation`].
     fn face_plane(&mut self) {
         let target = self.control.target;
@@ -3547,13 +3273,12 @@ impl AppStatics {
         );
     }
 
-    /// Eases the camera one frame's worth toward the view that holds `bounds` in frame, and
-    /// reports whether it still has ground to cover.
+    /// Returns whether the camera still has ground to cover.
     ///
     /// Only the orbit centre and the distance move: the direction the camera looks from is left
     /// exactly as the person left it, so the graph does not spin under them while it closes in.
-    /// Framed against whichever of the two field of view angles is narrower, so a route that fits
-    /// vertically cannot still hang off the sides of a tall window.
+    /// Framed against whichever field of view angle is narrower, so a route that fits vertically
+    /// cannot still hang off the sides of a tall window.
     fn ease_to_frame(&mut self, bounds: &Bounds, dt: f32) -> bool {
         let viewport = self.camera.viewport();
         let half_y = FOV_Y_DEGREES.to_radians() * 0.5;
@@ -3573,8 +3298,8 @@ impl AppStatics {
             return false;
         }
 
-        // Exponential ease: the step is a fixed fraction of what is left, taken per unit of time
-        // rather than per frame, so the move takes as long on a slow frame rate as on a fast one.
+        // A fixed fraction of what is left, per unit of time rather than per frame, so the move
+        // takes as long on a slow frame rate as on a fast one.
         let step = 1.0 - (-dt / (FRAMING_WINDOW_MS * 1e-3)).exp();
         let target = self.control.target + (bounds.center - self.control.target) * step;
         let distance = distance + (goal_distance - distance) * step;
@@ -3586,15 +3311,11 @@ impl AppStatics {
 }
 
 impl AppEntities {
-    /// Rewrites every mass and every connection's reach from the current
-    /// [`AppEntities::hub_repulsion`].
-    ///
-    /// Both together because the knob means one thing: how much of a world's size is worth paying
-    /// attention to. A hub that pushes its neighbours harder needs the room to push them into.
-    /// See [`node_mass`] and [`edge_reach`].
+    /// Masses and reaches together because the knob means one thing: a hub that pushes its
+    /// neighbours harder needs the room to push them into. See [`node_mass`] and [`edge_reach`].
     ///
     /// The visit runs in slot order, which is world order: the nodes were added one per world and
-    /// none is ever removed, which is the same reading of an index the rest of the module makes.
+    /// none is ever removed.
     fn apply_hub_push(&mut self) {
         let (radii, hub_repulsion) = (&self.node_radii, self.hub_repulsion);
         let mut world = 0;
@@ -3603,8 +3324,8 @@ impl AppEntities {
             world += 1;
         });
         self.graph.visit_edges_mut(|from, to, edge| {
-            // Whether the connection is walkable one way only is what the edge was given to
-            // carry, so the reach is rewritten from the same answer it was first built from.
+            // The edge was given the one-way flag to carry, so the reach is rewritten from the
+            // same answer it was first built from.
             edge.reach = edge_reach(
                 edge.user_data,
                 radii[from.index()].max(radii[to.index()]),
@@ -3613,22 +3334,20 @@ impl AppEntities {
         });
     }
 
-    /// Resolves the left button between clicking a node, dragging a node and orbiting, marking
-    /// only the events the winner actually uses as handled.
+    /// Resolves the left button between clicking a node, dragging a node and orbiting, marking as
+    /// handled only the events the winner actually uses.
     ///
-    /// Runs before [OrbitControl], which is the loser of this contest: it reads any unhandled
-    /// left-drag motion, so the decision has to be made, and the undecided motion swallowed,
-    /// upstream of it.
+    /// Runs before [`OrbitControl`], which loses this contest: it reads any unhandled left-drag
+    /// motion, so the decision has to be made, and the undecided motion swallowed, upstream of it.
     ///
-    /// Also where the hover is settled, off the same events: it is the reading of the pointer
-    /// that no button is contesting.
+    /// Also where the hover is settled, off the same events: it is the reading of the pointer no
+    /// button is contesting.
     fn track_gesture(&mut self, camera: &Camera, events: &mut [Event], pinching: bool) {
         for event in events.iter_mut() {
             match event {
-                // While more than one finger is down the left button belongs to the pinch:
-                // three-d works it with the first of them, and neither its travel nor its release
-                // is a gesture of its own. Swallowed rather than skipped, so that the orbit
-                // control downstream does not read them either.
+                // While more than one finger is down the left button belongs to the pinch, so
+                // neither its travel nor its release is a gesture of its own. Swallowed rather
+                // than skipped, so the orbit control downstream does not read them either.
                 Event::MousePress {
                     button: MouseButton::Left,
                     handled,
@@ -3650,7 +3369,7 @@ impl AppEntities {
                     handled,
                     ..
                 } if !*handled => {
-                    // A press anywhere the menu did not take is a press past it, which closes it.
+                    // A press anywhere the menu did not take is a press past it.
                     self.menu = None;
                     // Nominate, do not award: the press is ambiguous even over empty space, where
                     // it may still turn out to be the click that clears the selection.
@@ -3660,8 +3379,8 @@ impl AppEntities {
                     });
                     *handled = true;
                 }
-                // Only while the button is actually down: a release lost to a focus change
-                // would otherwise leave a nomination standing for the next hover to award.
+                // Only while the button is actually down: a release lost to a focus change would
+                // otherwise leave a nomination standing for the next hover to award.
                 Event::MouseMotion {
                     button: Some(MouseButton::Left),
                     position,
@@ -3673,7 +3392,7 @@ impl AppEntities {
                             if (position.x - origin.x).hypot(position.y - origin.y)
                                 <= GESTURE_SLOP_PIXELS
                             {
-                                // Still within the slop, so this may yet be a click. Swallow it,
+                                // Still within the slop, so this may yet be a click. Swallowed,
                                 // or the camera would orbit under every click on a node.
                                 *handled = true;
                                 None
@@ -3700,10 +3419,10 @@ impl AppEntities {
                         self.gesture = Some(awarded);
                     }
                 }
-                // The right button is contested too — it pans the camera — so it is nominated the
-                // same way the left one is, and left unhandled for the pan to claim its motion.
-                // Any press closes the open menu: whatever this turns out to be, it is not the
-                // menu, and a pan would carry the graph out from under it.
+                // The right button is contested too -- it pans the camera -- so it is nominated
+                // the same way the left one is, and left unhandled for the pan to claim its
+                // motion. Any press closes the open menu, a pan carrying the graph out from
+                // under it.
                 Event::MousePress {
                     button: MouseButton::Right,
                     position,
@@ -3718,8 +3437,7 @@ impl AppEntities {
                     position,
                     ..
                 } => {
-                    // A press that never travelled is a click, and a click on a world opens its
-                    // menu where it landed.
+                    // A press that never travelled is a click, which on a world opens its menu.
                     if let Some(origin) = self.right_press.take()
                         && (position.x - origin.x).hypot(position.y - origin.y)
                             <= GESTURE_SLOP_PIXELS
@@ -3731,8 +3449,7 @@ impl AppEntities {
                     }
                 }
                 // Motion with nothing pressed is nobody's gesture, so it is read rather than
-                // taken. A position the panel already claimed is not on the graph at all, which
-                // is the same as having no pointer over it.
+                // taken. A position the panel already claimed counts as no pointer at all.
                 Event::MouseMotion {
                     button: None,
                     position,
@@ -3759,10 +3476,10 @@ impl AppEntities {
             }
         }
         // Retested every frame rather than only on motion: the layout is usually still moving and
-        // the camera can be flown with the keys, so what is under a cursor that has not moved at
-        // all changes anyway. One walk of the nodes, which is a fraction of the walk
-        // [`AppEntities::magnified`] already makes per frame. Nothing hovers while a gesture is
-        // in progress: the pointer is busy dragging a node or turning the camera.
+        // the camera can be flown with the keys, so what is under a still cursor changes anyway.
+        // One walk of the nodes, a fraction of the walk [`AppEntities::magnified`] already makes
+        // per frame. Nothing hovers mid-gesture: the pointer is dragging a node or turning the
+        // camera.
         self.hover = match self.gesture {
             None => self
                 .cursor
@@ -3772,11 +3489,9 @@ impl AppEntities {
         };
     }
 
-    /// Finds the node nearest the camera drawn under `cursor`.
-    ///
-    /// Against the node positions rather than against the drawn geometry: the plates are one
-    /// instanced mesh, so there is nothing per node to intersect. The test is how far the node
-    /// lands from the cursor on screen, which is the only distance the person clicking can see.
+    /// Against the node positions rather than the drawn geometry: the plates are one instanced
+    /// mesh, so there is nothing per node to intersect. The test is how far the node lands from
+    /// the cursor on screen, which is the only distance the person clicking can see.
     fn pick(&self, camera: &Camera, cursor: PhysicalPoint) -> Option<Grab> {
         let origin = camera.position_at_pixel(cursor);
         let direction = camera.view_direction_at_pixel(cursor);
@@ -3802,7 +3517,7 @@ impl AppEntities {
         nearest
     }
 
-    /// Pulls a node being dragged toward the cursor, which also keeps the simulation awake.
+    /// Pulling a node also keeps the simulation awake.
     fn pull_grabbed_node(&mut self, camera: &Camera) {
         let Some(Gesture::Moving(grab)) = &self.gesture else {
             return;
@@ -3830,8 +3545,7 @@ impl AppEntities {
         route
     }
 
-    /// Every world the selection lights: its route home, or everything behind it. Empty with
-    /// nothing selected.
+    /// Empty with nothing selected.
     fn highlighted(&self) -> Vec<usize> {
         match self.selected {
             None => Vec::new(),
@@ -3845,8 +3559,7 @@ impl AppEntities {
         }
     }
 
-    /// Every world exactly `depth` connections from the origin, in world order. The worlds the
-    /// origin cannot reach have no depth and so sit on no layer.
+    /// In world order. The worlds the origin cannot reach have no depth, and so sit on no layer.
     fn layer(&self, depth: u32) -> Vec<usize> {
         self.routes
             .depth
@@ -3857,14 +3570,13 @@ impl AppEntities {
             .collect()
     }
 
-    /// The worlds worth naming out of a lit subtree, at most [`NOTABLE_WORLDS`] of them. Empty
-    /// unless a subtree is what is lit.
+    /// At most [`NOTABLE_WORLDS`], and empty unless a subtree is what is lit.
     ///
-    /// Two kinds are worth a name, and they are worth it for opposite reasons: a junction, which
-    /// is where the subtree opens out, and a dead end, which is where it stops. Neither measure
-    /// ranks the other, so the two are ranked apart — junctions by how many ways they offer, dead
-    /// ends by how far out they are — and then taken in turns, which is what keeps the list from
-    /// filling with junctions before it names a single place the subtree ends.
+    /// Two kinds are worth a name, for opposite reasons: a junction, where the subtree opens out,
+    /// and a dead end, where it stops. Neither measure ranks the other, so the two are ranked
+    /// apart -- junctions by how many ways they offer, dead ends by how far out they are -- and
+    /// then taken in turns, which keeps the list from filling with junctions before it names a
+    /// single place the subtree ends.
     fn notable(&self) -> Vec<usize> {
         let Some(Highlight::Descendants(root)) = self.selected else {
             return Vec::new();
@@ -3900,9 +3612,9 @@ impl AppEntities {
         notable
     }
 
-    /// The worlds a framing move has to bring into view. Everything the selection lights, except
-    /// a route the reader has not asked to see whole: that is framed on the world at its end,
-    /// which is what was picked and what the panel is reading. See [`Self::frame_route`].
+    /// Everything the selection lights, except a route the reader has not asked to see whole:
+    /// that is framed on the world at its end, which is what was picked and what the panel is
+    /// reading. See [`Self::frame_route`].
     fn framed(&self) -> Vec<usize> {
         match self.selected {
             Some(Highlight::Route(world)) if !self.frame_route => vec![world],
@@ -3910,17 +3622,15 @@ impl AppEntities {
         }
     }
 
-    /// The sphere that holds every world a framing move has to bring into view, pictures and all.
     /// `None` with nothing selected.
     ///
-    /// Centred on the middle of their bounding box rather than on their average, so a route that
-    /// piles up near the origin and reaches out with a few steps is still framed around what it
-    /// spans instead of around where most of it sits.
+    /// Centred on the middle of the bounding box rather than on the average, so a route that piles
+    /// up near the origin and reaches out with a few steps is still framed around what it spans
+    /// instead of around where most of it sits.
     ///
-    /// The reach counts each world's own radius, not just where it sits, so the sphere holds the
-    /// thumbnails rather than the points they hang on. That is what a lone world is framed by -
-    /// its picture, at the size the graph draws it - and what keeps a hub on the rim of a group
-    /// whole instead of clipped by the window edge.
+    /// The reach counts each world's own radius, so the sphere holds the thumbnails rather than
+    /// the points they hang on: that is what a lone world is framed by, and what keeps a hub on
+    /// the rim of a group whole instead of clipped by the window edge.
     fn highlight_bounds(&self) -> Option<Bounds> {
         let highlighted = self.framed();
         if highlighted.is_empty() {
@@ -3933,17 +3643,12 @@ impl AppEntities {
         self.bounds_of(&on_route)
     }
 
-    /// The sphere holding the worlds still coming into the graph, for the camera to move onto as
-    /// they arrive: what a refresh turned up is what a person pressed refresh to see, and it may
-    /// be nowhere near the part of the map they were looking at. `None` once the arrival is over,
-    /// which is what hands the camera back. See [`Arrivals`].
+    /// What a refresh turned up is what a person pressed refresh to see, and it may be nowhere
+    /// near the part of the map they were looking at. `None` once the arrival is over, which is
+    /// what hands the camera back.
     ///
-    /// Framed the way [`Highlight::Connection`] is framed, and for the same reason: it holds both
-    /// ends of what it is about rather than only the far one. Both ends are in the arrival itself
-    /// -- the world the person revealed is turning over and so is one of them, and so is every
-    /// world they have walked into since the last refresh. Not the arrivals' neighbours: a new
-    /// world may join back to somewhere the player has been that is nowhere near the rest of it,
-    /// and one edge like that drags the sphere across the whole graph.
+    /// The arriving worlds only, not their neighbours: a new world may join back to somewhere
+    /// nowhere near the rest of it, and one edge like that drags the sphere across the whole graph.
     fn arrival_bounds(&self) -> Option<Bounds> {
         let arriving = self.arrivals.arriving()?;
         let mut wanted = vec![false; self.titles.len()];
@@ -3953,9 +3658,9 @@ impl AppEntities {
         self.bounds_of(&wanted)
     }
 
-    /// The sphere that holds a given set of worlds, pictures and all. See [`Self::highlight_bounds`].
+    /// The sphere holding a set of worlds, pictures and all. See [`Self::highlight_bounds`].
     fn bounds_of(&self, wanted: &[bool]) -> Option<Bounds> {
-        // Paired with the radius, since both ends of the reach below need the two together.
+        // Paired with the radius, both ends of the reach below needing the two together.
         let mut positions = Vec::new();
         self.graph.visit_nodes(|node| {
             let world = node.index().index();
@@ -3985,12 +3690,11 @@ impl AppEntities {
         Some(Bounds { center, radius })
     }
 
-    /// The worlds whose titles match `needle`, best first, at most [`SEARCH_CANDIDATES`] of them.
+    /// At most [`SEARCH_CANDIDATES`], ranked by where the match falls and then by how much title
+    /// is left over: a world whose name starts with what was typed comes before one that merely
+    /// contains it, and an exact name before the longer names that extend it.
     ///
-    /// Ranked by where the match falls and then by how much title is left over, so a world whose
-    /// name starts with what was typed comes before one that merely contains it, and an exact
-    /// name comes before the longer names that extend it. Empty for an empty needle: every world
-    /// matches it, and ten arbitrary ones are noise rather than suggestions.
+    /// Empty for an empty needle -- ten arbitrary worlds are noise rather than suggestions.
     fn search(&self, needle: &str) -> Vec<usize> {
         let needle = needle.trim().to_lowercase();
         if needle.is_empty() {
@@ -4010,21 +3714,15 @@ impl AppEntities {
         hits.into_iter().map(|(_, _, world)| world).collect()
     }
 
-    /// Points the highlight at a world, or clears it.
     fn select(&mut self, selected: Option<Highlight>) {
         if selected != self.selected {
             self.selected = selected;
-            // Only a selection is worth moving the camera for: clearing one leaves the person
-            // looking at whatever they were looking at.
+            // Clearing a selection leaves the person looking at whatever they were looking at.
             self.framing = selected.is_some();
             self.repaint();
         }
     }
 
-    /// Rewrites the instance colors for the current selection: the connections it lights keep
-    /// their depth colors, the steps between the lit worlds are lit brighter still, and everything
-    /// else is dimmed. With nothing selected the graph goes back to its plain colors.
-    ///
     /// What the graph that replaces this one should carry on from. See [`Before`].
     fn before(&self) -> Before {
         let mut standing = Standing::with_capacity(self.titles.len());
@@ -4051,6 +3749,9 @@ impl AppEntities {
         }
     }
 
+    /// Rewrites the instance colors for the current selection: the steps between the lit worlds
+    /// are lit brighter still, and everything else is dimmed.
+    ///
     /// Uploads on its own rather than waiting for [`Self::rebuild_instances`], which a settled
     /// graph never reaches.
     fn repaint(&mut self) {
@@ -4082,14 +3783,12 @@ impl AppEntities {
         let (mut edge, mut line, mut dash) = (0, 0, 0);
         self.graph.visit_edges(|a, b, data| {
             let (a, b) = (a.index().index(), b.index().index());
-            // Whether this edge is a canonical step: the move from one of its ends to that
-            // end's own parent.
+            // Whether this edge is a canonical step: from one of its ends to that end's parent.
             let step = routes[a] == Some(b) || routes[b] == Some(a);
             let color = match self.selected {
                 None => base[edge],
-                // The one line it is about, and nothing else: not even the step home from either
-                // of its ends, which is a different way through the graph than the one the reader
-                // asked to see.
+                // The one line it is about, and not even the step home from either of its ends,
+                // which is a different way through the graph than the one the reader asked for.
                 Some(Highlight::Connection(at, far)) => {
                     if (a, b) == (at, far) || (a, b) == (far, at) {
                         ROUTE_COLOR
@@ -4098,21 +3797,19 @@ impl AppEntities {
                     }
                 }
                 // A layer is a shell rather than a walk, so what is worth seeing across it is
-                // where it is stitched to itself, not the step each of its worlds takes home.
-                // Both ends being lit is the whole test, which for a layer already means both
-                // ends are on it, and such an edge is never a canonical step: a parent is always
-                // exactly one depth in. So it carries no route, keeps its own distance color
-                // rather than being lit as if it did, and only escapes the dimming.
+                // where it is stitched to itself, not the step each world takes home. Both ends
+                // being lit is the whole test, and such an edge is never a canonical step -- a
+                // parent is always exactly one depth in -- so it keeps its own distance color and
+                // only escapes the dimming.
                 Some(Highlight::Layer(_)) if on_route[a] && on_route[b] => base[edge],
                 // Both ends being lit is not enough: it also has to be the step from one of them
-                // to that end's own parent, or a shortcut between two distant points of a route
-                // would light up as if the walk went through it, and a subtree would be webbed
-                // with lines that carry no route at all.
+                // to that end's parent, or a shortcut between two distant points of a route would
+                // light up as if the walk went through it.
                 Some(_) if step && on_route[a] && on_route[b] => ROUTE_COLOR,
                 Some(_) => dim(base[edge]),
             };
-            // A one-way connection wears its color across every one of its arrowheads, so it reads
-            // as the one line it stands for.
+            // Every dash of a one-way connection takes the same color, so it reads as the one
+            // line it stands for.
             if data.user_data {
                 dashed[dash..dash + EDGE_DASHES].fill(color);
                 dash += EDGE_DASHES;
@@ -4132,8 +3829,6 @@ impl AppEntities {
         EDGE_RADIUS
     }
 
-    /// Rewrites the instance transformations from the current node positions and the direction
-    /// the camera is looking from.
     fn rebuild_instances(&mut self, camera: &Camera) {
         let billboard = billboard(camera);
         let radius = self.edge_radius();
@@ -4142,13 +3837,11 @@ impl AppEntities {
         let arrivals = &self.arrivals;
         self.graph.visit_nodes(|node| {
             let world = node.index().index();
-            // A world that has not arrived yet is drawn at none of its size, which is the whole of
-            // how an arrival looks: everything hung off the node quads -- the placeholder, the
-            // magnified picture, the glow -- is copied from these and comes in with them.
+            // A world that has not arrived is drawn at none of its size, which is the whole of how
+            // an arrival looks: everything hung off the node quads is copied from these.
             let radius = self.node_radii[world] * arrivals.grown(world);
-            // Wider than tall, in the shape of the pictures: a world image is a screenshot of the
-            // game, so a square node would either crop a third off every one of them or stretch
-            // them all.
+            // Wider than tall, in the shape of the pictures: a square node would either crop a
+            // third off every screenshot or stretch them all.
             thumbnails.push(
                 Mat4::from_translation(world_pos(node.position()))
                     * billboard
@@ -4158,8 +3851,8 @@ impl AppEntities {
         let edges = &mut self.edge_instances.transformations;
         edges.clear();
         self.graph.visit_edges(|a, b, data| {
-            // The one-way connections are not lines at all: [`Self::march_dashes`] has them, and
-            // rebuilds them every frame rather than only the frames the layout moves in.
+            // The one-way connections belong to [`Self::march_dashes`], which rebuilds them every
+            // frame rather than only the frames the layout moves in.
             if data.user_data {
                 return;
             }
@@ -4185,11 +3878,9 @@ impl AppEntities {
     /// Stands the placeholder over every world the player has not been to.
     ///
     /// Taken from the nodes' own quads rather than worked out again, so a placeholder is exactly
-    /// where and how big the world it stands for is, and dims with it. Lifted toward the camera
-    /// the way a magnified picture is, and for the same reason -- two coplanar quads leave the
-    /// depth test to pick between them per pixel. A translation composed onto the node's own
-    /// transformation, since translations commute: see [`AppEntities::magnified`], which builds
-    /// the same thing the long way round from a position it already has.
+    /// where and how big the world it stands for is, and dims with it. Lifted toward the camera as
+    /// a magnified picture is, two coplanar quads otherwise leaving the depth test to pick between
+    /// them per pixel; composed onto the node's own transformation, translations commuting.
     ///
     /// Every frame, like the magnified pictures: what it copies is rebuilt whenever the layout
     /// moves, the camera turns, or a selection repaints.
@@ -4200,8 +3891,8 @@ impl AppEntities {
         let forward = camera.view_direction();
         let nodes = &self.thumbnail_instances;
         let painted = nodes.colors.as_ref();
-        // The worlds that wear the placeholder this frame: the ones that have no picture of their
-        // own, and the ones still shrinking out from under it. See [`Arrivals::veiled`].
+        // The worlds with no picture of their own, and the ones still shrinking out from under
+        // the placeholder.
         let wearing = self.unvisited.iter().copied().chain(self.arrivals.veiled());
         let (transformations, colors) = (
             &mut self.unvisited_quads.transformations,
@@ -4221,14 +3912,11 @@ impl AppEntities {
         self.detail.place_unvisited(context, &self.unvisited_quads);
     }
 
-    /// Walks the dashes of every one-way connection one step further along it and rebuilds them
-    /// where they now stand.
-    ///
-    /// Every frame, unlike the rest of the geometry: the marching is the whole point of them, and
-    /// a settled layout is exactly when it has to carry on regardless.
+    /// Every frame, unlike the rest of the geometry: the marching is the whole point of the
+    /// dashes, and a settled layout is exactly when it has to carry on regardless.
     fn march_dashes(&mut self, dt: f32) {
         // Kept inside a single slot: past the end of one, every dash stands where the dash ahead
-        // of it stood, so the run is unchanged and the phase can simply start over.
+        // of it stood, so the phase can simply start over.
         self.dash_phase = (self.dash_phase + dt * EDGE_DASH_SPEED).fract();
         let phase = self.dash_phase;
         let radius = self.edge_radius() * EDGE_DASH_WIDTH;
@@ -4240,8 +3928,7 @@ impl AppEntities {
             if !data.user_data {
                 return;
             }
-            // Thin with whichever end is later, as the plain lines are: a one-way passage into a
-            // world that has not arrived is no more drawn than a line to one would be.
+            // Thin with whichever end is later, as the plain lines are.
             let radius = radius
                 * arrivals
                     .grown(a.index().index())
@@ -4249,26 +3936,25 @@ impl AppEntities {
             let (from, to) = (world_pos(a.position()), world_pos(b.position()));
             let dir = to - from;
             let along = rotation_matrix_from_dir_to_dir(vec3(1.0, 0.0, 0.0), dir.normalize());
-            // The run stops at the pictures rather than running under them: a dash that reached a
+            // The run stops at the pictures rather than running under them: a dash reaching a
             // world's own place would stand inside its quad and show through it. Held off by the
-            // half-width, which is the furthest a quad ever reaches from the world it draws, so a
-            // dash clears it whichever way the billboard has been turned. See
+            // half-width, the furthest a quad ever reaches from the world it draws, so a dash
+            // clears it whichever way the billboard has been turned. See
             // [`Self::rebuild_instances`], which draws the quads that wide.
             let clear = |node: usize| radii[node] * arrivals.grown(node) * thumbnails::ASPECT;
             let start = clear(a.index().index());
             let span = dir.magnitude() - start - clear(b.index().index());
             // Two worlds closer together than their own pictures leave nothing to draw a run in.
-            // Collapsed rather than skipped: the count of dashes is fixed when the graph is built,
-            // and the colors are written against it. See [`EDGE_DASHES`].
+            // Collapsed rather than skipped: the count of dashes is fixed when the graph is built
+            // and the colors are written against it.
             if span <= 0.0 {
                 dashes.extend(std::iter::repeat_n(Mat4::from_scale(0.0), EDGE_DASHES));
                 return;
             }
-            // Evenly spaced dashes, each filling the front of its own slot: the gap behind it is
-            // both what makes the run read as dashed and what a dash marching off the far end
-            // comes back on into at the near one. The dashes are placed along a run one dash
-            // shorter than the span, so the leading one ends where the span does rather than
-            // reaching past it into the picture the whole point was to keep clear of.
+            // Each dash fills the front of its own slot, the gap behind it being what makes the
+            // run read as dashed and what a dash marching off the far end comes back into at the
+            // near one. The run is one dash shorter than the span, so the leading dash ends where
+            // the span does rather than reaching into the picture.
             let run = span / (1.0 + EDGE_DASH_FILL / EDGE_DASHES as f32);
             let length = run * EDGE_DASH_FILL / EDGE_DASHES as f32;
             let unit = dir / dir.magnitude();
@@ -4284,17 +3970,15 @@ impl AppEntities {
         self.dashes.set_instances(&self.dash_instances);
     }
 
-    /// Takes the thumbnail atlas once it has arrived, points the thumbnail quads at their own
-    /// cells of it, and hands egui a copy for the catalog. Draws nothing until then, and nothing
-    /// ever if the atlas cannot be had: see [`thumbnails::load`].
+    /// Points the thumbnail quads at their own cells of the atlas once it has arrived, and hands
+    /// egui a copy for the catalog. Nothing is drawn until then, or ever if it cannot be had.
     fn receive_atlas(&mut self, context: &Context, egui: &egui::Context) {
         let Some(loaded) = self.atlas.as_ref().and_then(fetch::Pending::take) else {
             return;
         };
-        // Whatever came of it, there is nothing left to poll for.
         self.atlas = None;
-        // Both failures are already logged where they are found, and both leave the graph drawn
-        // exactly as it was before thumbnails existed.
+        // Both failures are logged where they are found, and both leave the graph drawn as it was
+        // before thumbnails existed.
         let Some(atlas) = loaded else { return };
         self.sheet = thumbnails::Sheet::new(egui, self.packed, &atlas);
         let Some(cells) = thumbnails::cells(self.packed, &self.cells, &atlas) else {
@@ -4302,17 +3986,16 @@ impl AppEntities {
         };
         self.thumbnail_instances.texture_transformations = Some(cells);
         self.thumbnails.set_instances(&self.thumbnail_instances);
-        // One upload, sampled by both: a [Texture2DRef] is a handle over a shared texture, so the
-        // clone costs a Mat3 and an atomic rather than a second copy of the atlas.
+        // One upload, sampled by both: a [`Texture2DRef`] is a handle over a shared texture, so
+        // the clone costs a Mat3 and an atomic rather than a second copy of the atlas.
         let atlas = Texture2DRef::from_cpu_texture(context, &atlas);
         self.glow.material.texture = Some(atlas.clone());
-        // Last, because it is what [`Self::drawn_thumbnails`] reads to decide the quads are ready
-        // to be drawn at all.
+        // Last, being what [`Self::drawn_thumbnails`] reads to decide the quads are drawable.
         self.thumbnails.material.texture = Some(atlas);
     }
 
-    /// The thumbnail quads, once they have an atlas to sample. Nothing before that: an untextured
-    /// [ColorMaterial] would paint its base color flat over every world.
+    /// `None` before there is an atlas to sample: an untextured [`ColorMaterial`] would paint its
+    /// base color flat over every world.
     fn drawn_thumbnails(&self) -> Option<&dyn Object> {
         self.thumbnails
             .material
@@ -4321,19 +4004,17 @@ impl AppEntities {
             .then_some(&self.thumbnails as &dyn Object)
     }
 
-    /// Stands the glow quad over the node a list row is pointing at, on that world's cell of the
-    /// atlas.
+    /// Stands the glow quad over the node a list row is pointing at, on that world's cell.
     ///
     /// The node's own quad is taken rather than worked out again: it is already turned to face the
     /// camera and already the right size, and standing the glow anywhere else would brighten a
-    /// different shape than the one on the screen. Only the lift toward the camera is added, so
-    /// the two are not coplanar and the depth test does not pick between them per pixel -- the
-    /// same trick, and the same reason, as [`detail::LIFT`]. Twice as far, because a magnified
-    /// world already sits one lift in front and the glow is over that too.
+    /// different shape than the one on screen. Only the lift toward the camera is added, so the
+    /// two are not coplanar -- twice [`detail::LIFT`], because a magnified world already sits one
+    /// lift in front and the glow is over that too.
     ///
     /// A lift proportional to a node is small next to how far away the graph is read from, so it
-    /// is not on its own enough to clear the depth buffer's own rounding; the test the quad is
-    /// drawn under is what makes that harmless. See its `depth_test`.
+    /// is not on its own enough to clear the depth buffer's rounding. What makes that harmless is
+    /// the `depth_test` the quad is drawn under.
     fn aim_glow(&mut self, camera: &Camera) {
         let Some(world) = self.pointed else { return };
         let Some(cells) = self.thumbnail_instances.texture_transformations.as_ref() else {
@@ -4350,7 +4031,7 @@ impl AppEntities {
         }
     }
 
-    /// The glow quad, while there is a world to brighten and an atlas to brighten it out of.
+    /// `None` without a world to brighten or an atlas to brighten it out of.
     fn drawn_glow(&self) -> Option<&dyn Object> {
         let ready = self.pointed.is_some() && self.glow.material.texture.is_some();
         ready.then_some(&self.glow as &dyn Object)
@@ -4359,17 +4040,13 @@ impl AppEntities {
     /// Every world the view is asking more of than the atlas holds, widest on screen first.
     ///
     /// What [`detail`] is driven from, and the reason it needs no view of its own: a world is here
-    /// because its node is drawn wider than [`detail::SWITCH_PIXELS`] and is on screen at all, and
-    /// it carries the quad it would have been drawn on so that the full picture lands exactly over
-    /// its own thumbnail.
+    /// because its node is on screen and drawn wider than [`detail::SWITCH_PIXELS`], and it
+    /// carries the quad it would have been drawn on so the full picture lands over its thumbnail.
     ///
     /// A world in the middle of becoming itself is asked for at the size it is about to be rather
-    /// than the size it is at this instant. Two things follow, and both are wanted. It is drawn on
-    /// a quad that shrinks and grows with its node, so the full picture turns over along with the
-    /// atlas one beneath it instead of standing over the whole thing unmoved. And it is asked for
-    /// throughout, including at the moment it is too small to see: the picture is fetched while the
-    /// placeholder is still shrinking away, so what grows back is the world's own picture from the
-    /// first frame of it rather than a thumbnail that pops sharp part way up. See [`Arrivals`].
+    /// than the size it is now, so the picture is fetched while the placeholder is still shrinking
+    /// away and what grows back is the world's own from the first frame, rather than a thumbnail
+    /// that pops sharp part way up.
     fn magnified(&self, camera: &Camera, viewport: Viewport) -> Vec<detail::Magnified> {
         let billboard = billboard(camera);
         let forward = camera.view_direction();
@@ -4379,8 +4056,7 @@ impl AppEntities {
             let world = node.index().index();
             let position = world_pos(node.position());
             // Behind the camera a projection says nothing useful, and off the edge of the window
-            // there is nothing to sharpen: either way the budget is better spent on a node that
-            // is actually being looked at.
+            // there is nothing to sharpen.
             if (position - camera.position()).dot(forward) <= 0.0 {
                 return;
             }
@@ -4417,11 +4093,9 @@ impl AppEntities {
     }
 }
 
-/// How wide a node comes out on screen, in physical pixels.
-///
-/// Measured across the quad through its own centre, so it is the node as drawn rather than a
-/// sphere around it — which is what says whether the atlas still holds as much detail as the
-/// screen is asking of it. A cell of the atlas is [`thumbnails::CELL`] wide.
+/// How wide a node comes out on screen, in physical pixels: across the quad through its own
+/// centre, so it is the node as drawn rather than a sphere around it, which is what says whether
+/// the atlas still holds as much detail as the screen is asking of it.
 fn drawn_width(camera: &Camera, radius: f32, position: Vec3) -> f32 {
     let across = camera.right_direction().normalize() * radius * thumbnails::ASPECT;
     let (left, right) = (
@@ -4433,10 +4107,8 @@ fn drawn_width(camera: &Camera, radius: f32, position: Vec3) -> f32 {
 
 /// The names `needle` matches, best first, or the whole list where nothing is asked for.
 ///
-/// Ranked the way [`AppEntities::search`] ranks titles: by where the match falls and then by how
-/// much name is left over. Uncut, unlike that one: these lists are short enough to read down, and
-/// they are already kept in the order they are worth being read down in. See
-/// [`world::Dump::authors`] and [`world::Dump::versions`].
+/// Ranked the way [`AppEntities::search`] ranks titles, but uncut, unlike that one: these lists
+/// are already kept in the order they are worth reading down in.
 fn matching<'a>(
     names: impl Iterator<Item = impl Iterator<Item = &'a str>>,
     needle: &str,
@@ -4460,12 +4132,8 @@ fn matching<'a>(
     hits.into_iter().map(|(_, _, at)| at).collect()
 }
 
-/// The box each list is searched with.
-/// The one control left where the sidebar was, which brings it back.
-///
-/// In the corner the sidebar's own button was in, so the button reads as the same button facing
-/// the other way. An [egui::Area] like the rocker, because with the sidebar gone there is no
-/// panel left to hang it inside.
+/// In the corner the sidebar's own button was in, so it reads as the same button facing the other
+/// way. An [`egui::Area`] like the rocker, there being no panel left to hang it inside.
 fn sidebar_opener(ui: &mut egui::Ui, sidebar: &mut Sidebar, insets: egui::Margin) {
     egui::Area::new(egui::Id::new("sidebar opener"))
         .anchor(
@@ -4488,8 +4156,8 @@ fn sidebar_opener(ui: &mut egui::Ui, sidebar: &mut Sidebar, insets: egui::Margin
         });
 }
 
-/// The box each list is searched with. `of` names the box to egui and never reaches the screen;
-/// `hint` is what is read in it while it is empty, and so is one of the messages.
+/// `of` names the box to egui and never reaches the screen. `hint` is read in it while it is
+/// empty, and so is one of the messages.
 fn search_box(ui: &mut egui::Ui, search: &mut String, of: &str, hint: String) {
     let clear_id = egui::Id::new(of);
     let clear_size = egui::Vec2::splat(ui.spacing().interact_size.y);
@@ -4505,11 +4173,9 @@ fn search_box(ui: &mut egui::Ui, search: &mut String, of: &str, hint: String) {
     }
 }
 
-/// How much of a list is being shown, which is said differently while it is being cut down.
-///
 /// `kind` names the list rather than the noun: a language does not necessarily say "3 authors"
-/// with the same word it says "3 of 9 authors" with, so each list has a message for each of the
-/// two and this only picks between them.
+/// with the same word it says "3 of 9 authors" with, so each list has a message for each and this
+/// only picks between them.
 fn showing(shown: usize, of: usize, kind: &str) -> String {
     match shown == of {
         true => i18n::format(&format!("showing-{kind}"), Some(&count_args(shown, of))),
@@ -4525,18 +4191,17 @@ fn count_args(shown: usize, of: usize) -> fluent_bundle::FluentArgs<'static> {
     args
 }
 
-/// How many worlds, said the way the language being read says a count of them.
+/// Said the way the language being read says a count.
 fn worlds(count: usize) -> String {
     t!("worlds", count = count)
 }
 
-/// A colour at a fraction of its own opacity, whatever it was drawn at before.
 /// Takes the page's own loading line off the document, the once.
 ///
-/// The wasm is a few megabytes, and the canvas is black until it has come down and drawn -- so
-/// `index.html` carries the same line the loading frame does, to stand in until this frame. Called
-/// after every frame and does nothing after the first: the element is gone, and a lookup that
-/// finds nothing is not worth doing sixty times a second.
+/// The wasm is a few megabytes and the canvas is black until it has come down and drawn, so
+/// `index.html` carries the same line the loading frame does to stand in until then. Called after
+/// every frame and does nothing after the first, a lookup that finds nothing not being worth doing
+/// sixty times a second.
 #[cfg(target_family = "wasm")]
 fn take_placeholder() {
     static TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -4551,18 +4216,14 @@ fn take_placeholder() {
     }
 }
 
-/// The loading frame's own drawing: the background it stands on, and the one line it says.
-///
 /// Drawn at `opacity` rather than always whole, because the frame is not switched off when the
-/// dump lands. [`App::draw_loading`] draws it whole over a cleared screen, and [`Overlay::panel`]
-/// draws what is left of it over the graph and the panel that replaced it, so those are uncovered
-/// rather than dropped on screen. See [`App::veil`].
+/// dump lands: [`App::draw_loading`] draws it whole over a cleared screen, and [`Overlay::panel`]
+/// draws what is left of it over the graph and the panel that replaced it. See [`App::veil`].
 ///
-/// The veil goes on the foreground layer, which is over the panel and over every window on it,
-/// and the words go a layer above that. Two orders rather than two layers of the same one: a
-/// layer painted straight through [`egui::Context::layer_painter`] is not one of the areas egui
-/// sorts among itself, so within an order it is drawn last -- which put the veil over the words
-/// it was supposed to be behind, and made the loading frame a black screen.
+/// The veil goes on the foreground layer, over the panel and every window on it, and the words a
+/// layer above. Two orders rather than two layers of one: a layer painted straight through
+/// [`egui::Context::layer_painter`] is not one of the areas egui sorts among itself, so within an
+/// order it is drawn last -- which put the veil over the words and made the frame a black screen.
 fn loading_frame(ctx: &egui::Context, says: &str, failed: Option<&str>, opacity: f32) {
     let opacity = opacity.clamp(0.0, 1.0);
     let channel = |channel: usize| (BACKGROUND_COLOR[channel] * 255.0) as u8;
@@ -4572,7 +4233,7 @@ fn loading_frame(ctx: &egui::Context, says: &str, failed: Option<&str>, opacity:
     ))
     .rect_filled(
         // The whole window, notches and status bar included: the graph is drawn under those too,
-        // and a veil that stopped at the safe area would uncover a stripe of it early.
+        // and a veil stopping at the safe area would uncover a stripe of it early.
         ctx.viewport_rect(),
         egui::CornerRadius::ZERO,
         egui::Color32::from_rgba_unmultiplied(
@@ -4588,14 +4249,12 @@ fn loading_frame(ctx: &egui::Context, says: &str, failed: Option<&str>, opacity:
         .show(ctx, |ui| {
             ui.set_opacity(opacity);
             ui.horizontal(|ui| {
-                // Whatever the frame is saying, it is saying it about something still going on:
-                // a run that could not reach the server is a run that is about to ask it again.
-                // See [`Dump::Waiting`].
+                // Whatever the frame says, it says it about something still going on: a run that
+                // could not reach the server is about to ask again.
                 ui.add(egui::Spinner::new());
                 let line = ui.label(says);
-                // What went wrong is logged in full; on screen it is offered to whoever goes
-                // looking for it, since there is nothing a reader can do with a URL and a status
-                // code beyond knowing the server is not answering.
+                // Logged in full; on screen it is offered only to whoever goes looking, there
+                // being nothing a reader can do with a URL and a status code.
                 if let Some(error) = failed {
                     line.on_hover_text(error);
                 }
@@ -4603,15 +4262,15 @@ fn loading_frame(ctx: &egui::Context, says: &str, failed: Option<&str>, opacity:
         });
 }
 
+/// A colour at a fraction of its own opacity.
 fn fade(color: egui::Color32, opacity: u8) -> egui::Color32 {
     let [r, g, b, a] = color.to_srgba_unmultiplied();
     egui::Color32::from_rgba_unmultiplied(r, g, b, (a as u16 * opacity as u16 / 255) as u8)
 }
 
-/// What a connection can be walked, in a sentence: which ways round, and what each way asks.
-///
-/// The two directions are named apart, because a connection can be free one way and locked the
-/// other, and a reader deciding whether to walk it needs the way they are about to walk.
+/// What a connection can be walked, in a sentence. The two directions are named apart, because a
+/// connection can be free one way and locked the other, and a reader deciding whether to walk it
+/// needs the way they are about to walk.
 fn walk_of(step: &world::Step) -> String {
     let asks = |ask: &world::Ask| match ask.asks() {
         asks if asks.is_empty() => t!("walk-freely"),
@@ -4671,11 +4330,11 @@ fn walk_of(step: &world::Step) -> String {
     }
 }
 
-/// Swallows the left-button motion [OrbitControl] would turn the camera with.
+/// Swallows the left-button motion [`OrbitControl`] would turn the camera with.
 ///
-/// Called after the gesture is resolved, so a drag that belongs to a node has already been taken
-/// and only the camera's share is left. Presses and releases are left alone: they still resolve
-/// clicks, and neither of them turns anything.
+/// Called after the gesture is resolved, so a drag belonging to a node has already been taken and
+/// only the camera's share is left. Presses and releases are left alone: they still resolve
+/// clicks, and neither turns anything.
 fn lock_rotation(events: &mut [Event]) {
     for event in events {
         if let Event::MouseMotion {
@@ -4689,33 +4348,15 @@ fn lock_rotation(events: &mut [Event]) {
     }
 }
 
-/// How hard a world of a given radius pushes its neighbours away, with `hub_repulsion` mixing
-/// between one mass for everything and the mass a solid ball of that radius would have.
+/// How far one connection may stretch, as a multiple of what every connection is allowed.
 ///
-/// At zero every world repels alike, and the sizes are drawn on top of a layout that was spaced
-/// for the smallest of them, so the hubs sit over their neighbours. At one the mass goes with the
-/// cube of the radius, as a ball's does.
+/// A one-way connection is the long way round -- a chute, a warp, a door that does not open back
+/// -- so the two worlds it joins are a step apart to walk and nowhere near each other on the map,
+/// and it is left to stretch as far as the rest of the layout wants. Every other connection is
+/// held: a leaf's to the reach itself, a hub's to more of it. See [`HUB_REACH`].
 ///
-/// The cube is chosen for the room it makes, not for the physics: nothing here integrates a mass
-/// as inertia, and the nodes are flat quads rather than balls. What the mass settles is a
-/// distance. A pair's repulsion is capped, so the pair pushes at that ceiling out to the distance
-/// where the falloff drops it below, and that distance works out as the square root of the product
-/// of the two masses. Cubed, that is the radii themselves to the power of one and a half, which
-/// opens the hubs out well past the width of the pictures on them - the point of the setting. A
-/// mass proportional to the radius instead would hold each pair at about the sum of its radii,
-/// which is the least that keeps the pictures apart and no more.
-/// How far one connection may stretch, as a multiple of what every connection is allowed: from
-/// whether it is walkable one way only, and how big the larger of the two worlds it joins is.
-///
-/// A one-way connection is the long way round: a chute, a warp, a door that does not open back.
-/// The two worlds it joins are a step apart to walk and nowhere near each other in the map, so it
-/// is left to stretch as far as the rest of the layout wants rather than dragged shut. Every
-/// other connection is held: a leaf's to the reach itself, a hub's to more of it. See
-/// [`HUB_REACH`] and [`SimulationParameters::link_distance_max`].
-///
-/// Read off the drawn size for the same reason [`node_mass`] is: size is already what the graph
-/// says about how much hangs off a world, and a second measure of the same thing would be one
-/// more place for the two to disagree.
+/// Read off the drawn size for the same reason [`node_mass`] is: a second measure of how much
+/// hangs off a world would be one more place for the two to disagree.
 fn edge_reach(one_way: bool, radius: f32, hub_repulsion: f32) -> f32 {
     if one_way {
         return f32::INFINITY;
@@ -4723,15 +4364,25 @@ fn edge_reach(one_way: bool, radius: f32, hub_repulsion: f32) -> f32 {
     1.0 + HUB_REACH * hub_repulsion * (radius / NODE_LEAF_RADIUS - 1.0)
 }
 
+/// How hard a world of a given radius pushes its neighbours away, `hub_repulsion` mixing between
+/// one mass for everything and the mass a solid ball of that radius would have.
+///
+/// At zero every world repels alike and the sizes are drawn on top of a layout spaced for the
+/// smallest of them, so the hubs sit over their neighbours.
+///
+/// The cube is chosen for the room it makes rather than for the physics -- nothing here integrates
+/// a mass as inertia. What the mass settles is a distance: a pair's repulsion is capped, so the
+/// pair pushes at that ceiling out to where the falloff drops it below, which works out as the
+/// square root of the product of the two masses. Cubed, that is the radii to the power of one and
+/// a half, which opens the hubs out well past the width of the pictures on them. A mass
+/// proportional to the radius instead would hold each pair at about the sum of its radii, the
+/// least that keeps the pictures apart.
 fn node_mass(radius: f32, hub_repulsion: f32) -> f32 {
     NODE_BASE_MASS * (1.0 + hub_repulsion * ((radius / NODE_LEAF_RADIUS).powi(3) - 1.0))
 }
 
-/// The rotation that stands a node's quad square to the camera.
-///
 /// A thumbnail is flat, so without this a node would be seen edge-on from half the angles the
-/// graph can be turned to. Taken from the camera's own basis, which is why every node
-/// in the layout shares the one rotation.
+/// graph can be turned to. Taken from the camera's own basis, so every node shares one rotation.
 fn billboard(camera: &Camera) -> Mat4 {
     let forward = camera.view_direction();
     // Normalized because the camera's own up need only be the axis the view is kept upright
@@ -4749,10 +4400,9 @@ fn billboard(camera: &Camera) -> Mat4 {
 
 /// Scatters every node over the spawn volume and stops it dead, restarting the layout.
 ///
-/// Dropping a dimension deforms the layout it was solved in, and picking one back up cannot
-/// undo that: a planar graph gives every pair the same z, so the repulsion along that axis is
-/// exactly zero and the graph would stay flat forever. Both switches therefore start over,
-/// seeding the axes the new mode actually uses.
+/// Dropping a dimension deforms the layout it was solved in and picking one back up cannot undo
+/// that: a planar graph gives every pair the same z, so the repulsion along that axis is exactly
+/// zero and the graph stays flat forever. Both switches therefore start over.
 fn scatter(data: &mut AppEntities) {
     let planar = data.graph.parameters().dimensions == Dimensions::Two;
     let rng = &mut data.rng;
@@ -4770,20 +4420,19 @@ fn scatter(data: &mut AppEntities) {
     });
 }
 
-/// Builds the backdrop: a lattice of soft blue glows on the background color, in the style of the
-/// game's own panoramas.
+/// A lattice of soft blue glows on the background color, in the style of the game's own panoramas.
 ///
-/// Held in linear color, because that is what the shader's own sRGB encoding expects on the way
-/// out, and at half precision because eight bits of linear is not enough for glows this dim: the
-/// darkest steps land far enough apart once encoded to band, and dithering them only trades the
-/// banding for grain across the whole flat backdrop.
+/// Held in linear color, which is what the shader's own sRGB encoding expects on the way out, and
+/// at half precision because eight bits of linear is not enough for glows this dim: the darkest
+/// steps land far enough apart once encoded to band, and dithering them only trades the banding
+/// for grain across the whole flat backdrop.
 fn panorama_tile() -> CpuTexture {
     let cells = PANORAMA_TILE_TEXELS / PANORAMA_CELL_TEXELS;
     let mut data = Vec::with_capacity(PANORAMA_TILE_TEXELS * PANORAMA_TILE_TEXELS);
     for y in 0..PANORAMA_TILE_TEXELS {
         for x in 0..PANORAMA_TILE_TEXELS {
             // Every cell whose glow could reach here, the tile's own neighbours included, so the
-            // glows that straddle an edge match up when the tile repeats.
+            // glows straddling an edge match up when the tile repeats.
             let mut glow: f32 = 0.0;
             for cell_y in -1..=1 {
                 for cell_x in -1..=1 {
@@ -4828,8 +4477,8 @@ fn panorama_tile() -> CpuTexture {
     }
 }
 
-/// The sRGB transfer function, undone. The shader applies it again on the way to the screen, so
-/// what a texel means is what it is worth once this has been taken off it.
+/// The shader applies sRGB again on the way to the screen, so what a texel means is what it is
+/// worth once this has been taken off it.
 fn srgb_to_linear(channel: f32) -> f32 {
     if channel <= 0.04045 {
         channel / 12.92
@@ -4838,33 +4487,25 @@ fn srgb_to_linear(channel: f32) -> f32 {
     }
 }
 
-/// How the backdrop's tile is laid over the window.
-///
 /// Scaled so a tile keeps a fixed size in logical pixels whatever the window and the display
 /// density, and slid by [`PANORAMA_PARALLAX`] as the camera turns. Where the camera *is* does not
-/// enter: a panorama is far enough away that only the direction it is seen from moves it, which is
-/// what keeps the backdrop from reading as a plane the graph slides over.
+/// enter: a panorama is far enough away that only the direction it is seen from moves it, which
+/// keeps the backdrop from reading as a plane the graph slides over.
 ///
-/// The offset is taken straight from the view direction rather than from a yaw and a pitch, so that
-/// it stays continuous all the way around instead of snapping where an angle wraps.
+/// The offset is taken straight from the view direction rather than from a yaw and a pitch, so it
+/// stays continuous all the way around instead of snapping where an angle wraps.
 fn panorama_transform(viewport: Viewport, device_pixel_ratio: f32, view: Vec3) -> Mat3 {
     let tile = PANORAMA_TILE_PIXELS * device_pixel_ratio;
-    // Sampling further along an axis pulls the backdrop the opposite way on screen, so turning the
-    // camera right drifts the backdrop left, as something in the distance does.
+    // Sampling further along an axis pulls the backdrop the opposite way on screen, so turning
+    // the camera right drifts the backdrop left, as something in the distance does.
     let drift = vec2(view.x, view.y) * PANORAMA_PARALLAX;
     Mat3::from_translation(drift)
         * Mat3::from_nonuniform_scale(viewport.width as f32 / tile, viewport.height as f32 / tile)
 }
 
-/// The part of the window that no system decoration covers, in logical pixels.
-///
-/// Everywhere but a phone that is the whole of it. A phone keeps a status bar over the top of the
-/// window and a navigation bar under the bottom, and the framework reports what is left as the
-/// activity's content rect. Only the panel is brought inside it; the graph is left to fill the
-/// window, which is what it is drawn behind them for.
 /// How far the panel and the rocker have to stand off each edge of the window to clear the
-/// system's own furniture, in egui's points. Zero on every side wherever there is no safe area
-/// to keep. See [`safe_rect`].
+/// system's own furniture, in egui's points. Zero on every side where there is no safe area to
+/// keep. See [`safe_rect`].
 fn safe_insets(viewport: Viewport, device_pixel_ratio: f32) -> egui::Margin {
     let safe = safe_rect(viewport, device_pixel_ratio);
     let width = viewport.width as f32 / device_pixel_ratio;
@@ -4880,6 +4521,12 @@ fn safe_insets(viewport: Viewport, device_pixel_ratio: f32) -> egui::Margin {
     }
 }
 
+/// The part of the window no system decoration covers, in logical pixels, which everywhere but a
+/// phone is the whole of it. A phone keeps a status bar over the top and a navigation bar under
+/// the bottom, and the framework reports what is left as the activity's content rect.
+///
+/// Only the panel is brought inside it; the graph is left to fill the window, which is what it is
+/// drawn behind them for.
 fn safe_rect(viewport: Viewport, device_pixel_ratio: f32) -> egui::Rect {
     #[cfg(target_os = "android")]
     if let Some(app) = ANDROID.get() {
@@ -4908,12 +4555,9 @@ fn safe_rect(viewport: Viewport, device_pixel_ratio: f32) -> egui::Rect {
     )
 }
 
-/// Raises and drops the on-screen keyboard to follow what egui is doing with the search field.
-///
-/// egui asks for typing without saying where the typing should come from. On a desk it comes from
-/// a keyboard that is already there, and there is nothing to do; on a phone the app has to ask
-/// the system to draw one. Only the changes are passed on, because both calls are a trip through
-/// the framework and the answer is the same every frame the field stays focused.
+/// egui asks for typing without saying where the typing should come from: on a desk there is
+/// nothing to do, on a phone the app has to ask the system to draw a keyboard. Only the changes
+/// are passed on, both calls being a trip through the framework.
 fn track_keyboard(wanted: bool, shown: &mut bool) {
     if wanted == *shown {
         return;
@@ -4928,14 +4572,11 @@ fn track_keyboard(wanted: bool, shown: &mut bool) {
     }
 }
 
-/// Hands a URL to whatever the person browses with.
+/// Hands a URL to whatever the person browses with: a new tab on the page, a command on a desktop,
+/// an intent on a phone.
 ///
-/// Nothing is awaited and nothing is reported back: the browser is another program, and this app
-/// has no more to do with the page once it has asked for it. A failure is logged rather than
-/// surfaced, because the only thing the person can do about it is open the page themselves.
-///
-/// Three ways of asking, because the three platforms have nothing in common here: a new tab on
-/// the page, a command on a desktop, and an intent on a phone.
+/// Nothing is awaited and a failure is only logged, the only thing the person can do about it
+/// being to open the page themselves.
 fn open_in_browser(url: &str) {
     #[cfg(target_family = "wasm")]
     {
@@ -4949,19 +4590,18 @@ fn open_in_browser(url: &str) {
         use jni::objects::{JObject, JValue};
         use jni::{jni_sig, jni_str};
 
-        // There is no opener to run here. A program says it wants a URL viewed and the system
-        // decides who views it, which is a Java call, and JNI is the only way to reach one.
+        // There is no opener to run here: a program says it wants a URL viewed and the system
+        // decides who views it, which is a Java call and so JNI.
         //
-        // The context the activity glue published is the Application's rather than the Activity's
-        // (see `android_activity`'s `init_android_main_thread`), and an application context may
-        // not start an activity into the task it is asked from. Hence the flag, which gives the
-        // browser a task of its own -- which is where a browser opened out of another app belongs
-        // in any case, so that leaving it comes back here.
+        // The context the activity glue published is the Application's rather than the Activity's,
+        // and an application context may not start an activity into the task it is asked from.
+        // Hence the flag, which gives the browser a task of its own -- so leaving it comes back
+        // here.
         const FLAG_ACTIVITY_NEW_TASK: i32 = 0x1000_0000;
 
         let context = ndk_context::android_context();
-        // Safe as long as the glue really did publish a VM and a context, which it does before
-        // it ever calls `android_main`, and they outlive the app.
+        // SAFETY: the glue publishes the VM and the context before it ever calls `android_main`,
+        // and both outlive the app.
         #[allow(unsafe_code)]
         let vm = unsafe { jni::JavaVM::from_raw(context.vm().cast()) };
         let opened = vm.attach_current_thread(|env| -> Result<(), jni::errors::Error> {
@@ -5018,7 +4658,7 @@ fn open_in_browser(url: &str) {
     }
 }
 
-/// Maps a simulation position (pixel-ish, origin at a corner of the initial cube) into world space.
+/// A simulation position -- pixel-ish, origin at a corner of the initial cube -- in world space.
 fn world_pos([x, y, z]: [f32; 3]) -> Vec3 {
     let center = SPAWN_EXTENT * 0.5;
     vec3(x - center, center - y, z - center) * SIM_TO_WORLD
@@ -5031,9 +4671,9 @@ fn sim_pos(world: Vec3) -> Vec3 {
     vec3(world.x + center, center - world.y, world.z + center)
 }
 
-/// Maps a normalized distance from the origin onto a cyan-green-amber-magenta ramp, so how far a
-/// world sits from the start of the game reads off its color. The stops stay bright, to hold up
-/// against [BACKGROUND_COLOR].
+/// A normalized distance from the origin on a cyan-green-amber-magenta ramp, so how far a world
+/// sits from the start of the game reads off its color. The stops stay bright, to hold up against
+/// [`BACKGROUND_COLOR`].
 fn distance_color(distance: f32) -> Srgba {
     const STOPS: [[f32; 3]; 4] = [
         [0.10, 0.90, 1.00],
@@ -5054,42 +4694,31 @@ fn dim(color: Srgba) -> Srgba {
     scaled(color, DIMMED_BRIGHTNESS)
 }
 
-/// How bright a color reads, against how bright its channels say it is.
-///
 /// The eye's own weighting of the channels, which is what [`EDGE_LUMINANCE_EVENNESS`] levels the
 /// distance ramp by.
 fn luminance(color: Srgba) -> f32 {
     (0.2126 * color.r as f32 + 0.7152 * color.g as f32 + 0.0722 * color.b as f32) / 255.0
 }
 
-/// A color at a fraction of its brightness, keeping its hue and its alpha.
+/// Keeps the hue and the alpha.
 fn scaled(color: Srgba, brightness: f32) -> Srgba {
     let scale = |channel: u8| (channel as f32 * brightness) as u8;
     Srgba::new(scale(color.r), scale(color.g), scale(color.b), color.a)
 }
 
-/// The worlds worth going back to, each with how many ways out of it nobody has walked: the
-/// places a player still has somewhere to go from.
+/// The worlds a player still has somewhere to go from.
 ///
-/// A way out counts only where the player could actually take it. The far end has to be somewhere
-/// they have not been, and the passage has to be walkable in that direction — a connection they
-/// could only come back through leads nowhere they can get to, which is the same reading
-/// `world::Dump::showing` builds the frontier by. Counting one would offer a world for an exit it
-/// has not got, and the list would disagree with the graph beside it.
+/// A way out counts only where the player could actually take it: the far end has to be somewhere
+/// they have not been, and the passage walkable in that direction -- the same reading
+/// `world::Dump::showing` builds the frontier by, so the list cannot disagree with the graph.
 ///
 /// Ranked most first, ties by world so the list is the same every time it is built, and cut to
-/// [`UNTAKEN_WORLDS`]. Worlds with nothing untaken are left out rather than listed at zero: they
-/// are the answer to a different question.
-///
-/// The counts order the list and are then dropped: what the panel says is which worlds to go back
-/// to, and a number beside each would invite the reader to weigh two of them against each other,
-/// which is a question they did not ask.
+/// [`UNTAKEN_WORLDS`]. The counts order the list and are then dropped: a number beside each would
+/// invite the reader to weigh two of them against each other, which is a question they did not ask.
 ///
 /// Empty exactly when the graph has no frontier, which is what tells the panel whether to offer
-/// the list at all — read off the graph itself rather than off the account that asked for it, the
-/// same way the placeholders are. The two go together in both directions: a frontier world is in
-/// the graph only because some visited world has a walkable way out to it, and that way out is
-/// one of these.
+/// the list at all -- read off the graph rather than the account that asked for it, the same way
+/// the placeholders are.
 fn untaken(connections: &[Vec<world::Step>], unknown: &[bool]) -> Vec<usize> {
     let mut ranked: Vec<(usize, usize)> = connections
         .iter()
@@ -5111,17 +4740,14 @@ fn untaken(connections: &[Vec<world::Step>], unknown: &[bool]) -> Vec<usize> {
 
 /// Per connection, the color it carries when nothing is selected.
 ///
-/// The depth ramp lives on the connections rather than on the worlds, which carry pictures: a
+/// The depth ramp lives on the connections rather than the worlds, which carry pictures: a
 /// connection wears the color of the world it is walked *from*, so following a line outward from
-/// the origin walks the ramp. Its brightness says how much of the game lies through it — full for
-/// a connection into a world the whole map is behind, [`EDGE_LEAF_BRIGHTNESS`] for one into a dead
-/// end — which is what makes the trunk of the route tree stand out of its twigs.
-///
-/// Read through a logarithm for the same reason the node sizes are: the counts span the whole
-/// graph, and on a straight scale everything but a handful of hubs would come out at the floor.
+/// the origin walks the ramp. Its brightness says how much of the game lies through it, which
+/// makes the trunk of the route tree stand out of its twigs -- read through a logarithm for the
+/// same reason the node sizes are.
 ///
 /// Which end is walked from is the canonical routes' answer where they have one. A connection that
-/// is nobody's route home — a shortcut across the tree — is taken as walked from its shallower
+/// is nobody's route home -- a shortcut across the tree -- is taken as walked from its shallower
 /// end, which is the direction a player meets it in anyway.
 fn edge_colors(
     graph: &Graph,
@@ -5129,12 +4755,11 @@ fn edge_colors(
     descendants: &[u32],
     depth_colors: &[Srgba],
 ) -> Vec<Srgba> {
-    // Against the busiest world there is, so the brightest connection in the graph is the one the
-    // whole game hangs off rather than one at an arbitrary count.
+    // Against the busiest world there is, so the brightest connection is the one the whole game
+    // hangs off rather than one at an arbitrary count.
     let busiest = (1.0 + descendants.iter().copied().max().unwrap_or(0) as f32).ln();
-    // The apparent brightness the ramp is levelled down to: the dimmest its own stops reach, so
-    // the correction only ever darkens and no channel has to clip to make room. Read off the ramp
-    // by sampling it rather than restated here, because it is [`distance_color`]'s to define.
+    // The dimmest the ramp's own stops reach, so the correction only ever darkens and no channel
+    // has to clip. Sampled rather than restated, the ramp being [`distance_color`]'s to define.
     const SAMPLES: u32 = 64;
     let floor = (0..=SAMPLES)
         .map(|step| luminance(distance_color(step as f32 / SAMPLES as f32)))
@@ -5142,8 +4767,8 @@ fn edge_colors(
     let mut colors = Vec::with_capacity(graph.edge_count());
     graph.visit_edges(|a, b, _| {
         let (a, b) = (a.index().index(), b.index().index());
-        // Unreachable worlds are deeper than any depth rather than shallower than every one, which
-        // is what [Option]'s own order would make of them.
+        // Unreachable worlds are deeper than any depth rather than shallower than every one,
+        // which is what `Option`'s own order would make of them.
         let depth = |world: usize| routes.depth[world].unwrap_or(u32::MAX);
         let from = match (routes.parents[b], routes.parents[a]) {
             (Some(parent), _) if parent == a => a,
@@ -5153,8 +4778,8 @@ fn edge_colors(
         };
         let to = if from == a { b } else { a };
         let reach = (1.0 + descendants[to] as f32).ln() / busiest.max(f32::MIN_POSITIVE);
-        // Never above 1: a color already dimmer than the ramp's own floor — [`UNREACHED_COLOR`],
-        // which is off the ramp entirely — is left alone rather than lifted onto it.
+        // Never above 1: a color already dimmer than the ramp's floor -- [`UNREACHED_COLOR`],
+        // which is off the ramp entirely -- is left alone rather than lifted onto it.
         let even = (floor / luminance(depth_colors[from]).max(f32::MIN_POSITIVE)).min(1.0);
         colors.push(scaled(
             depth_colors[from],
@@ -5182,9 +4807,8 @@ mod tests {
         }
     }
 
-    /// A connection to somewhere unknown counts as a way out only where the player could walk it.
-    /// The frontier is built outward along walkable steps, so counting a passage they could only
-    /// come back through would offer a world an exit it has not got.
+    // The frontier is built outward along walkable steps, so counting a passage the player could
+    // only come back through would offer a world an exit it has not got.
     #[test]
     fn only_ways_out_a_player_could_walk_are_counted_as_untaken() {
         let step = |world, out: bool| world::Step {
@@ -5192,8 +4816,8 @@ mod tests {
             out: out.then(world::Ask::free),
             back: Some(world::Ask::free()),
         };
-        // 0 visited, joined to three unknowns: one it can walk to, one it can only come back
-        // through, and one it can walk to again. 1..=3 are the frontier; 4 is visited.
+        // 0 visited, joined to three unknowns -- one it can walk to, one it can only come back
+        // through, one it can walk to again -- and to a fourth world it has been to.
         let connections = vec![
             vec![step(1, true), step(2, false), step(3, true), step(4, true)],
             vec![step(0, true)],
@@ -5205,8 +4829,6 @@ mod tests {
         assert_eq!(super::untaken(&connections, &unknown), vec![0]);
     }
 
-    /// The list is a ranking, so the busiest world has to come first however the dump orders them,
-    /// and it stops at [`super::UNTAKEN_WORLDS`] however many worlds have somewhere to go.
     #[test]
     fn untaken_worlds_are_ranked_most_first_and_cut_to_the_ten_named() {
         let out = |world| world::Step {
@@ -5214,8 +4836,8 @@ mod tests {
             out: Some(world::Ask::free()),
             back: Some(world::Ask::free()),
         };
-        // Twelve visited worlds, each joined to a different number of unknowns: world 0 to one of
-        // them, world 11 to twelve. The unknowns are numbered above all of them.
+        // Twelve visited worlds, each joined to a different number of unknowns: world 0 to one,
+        // world 11 to twelve. The unknowns are numbered above all of them.
         let visited = 12;
         let mut connections: Vec<Vec<world::Step>> = (0..visited * 2).map(|_| Vec::new()).collect();
         let mut unknown = vec![false; connections.len()];
@@ -5227,15 +4849,12 @@ mod tests {
                 connections[far].push(out(world));
             }
         }
-        // Most first: world 11 has twelve ways out, and world 2 -- with three -- is the last to
-        // make the cut.
+        // World 11 has twelve ways out; world 2, with three, is the last to make the cut.
         let ranked = super::untaken(&connections, &unknown);
         assert_eq!(ranked, vec![11, 10, 9, 8, 7, 6, 5, 4, 3, 2]);
     }
 
-    /// A run drawing the whole game has no unknown world in it, so it has nothing untaken -- which
-    /// is what keeps the panel from offering a list that would say the same thing about every
-    /// world in the graph.
+    // What keeps the panel from offering a list that would say the same thing about every world.
     #[test]
     fn a_graph_with_no_frontier_has_nothing_untaken() {
         let both = |world| world::Step {
@@ -5247,8 +4866,6 @@ mod tests {
         assert!(super::untaken(&connections, &[false, false]).is_empty());
     }
 
-    /// A graph replacing one that had none of its worlds grows all of them in, spaced out, and is
-    /// done with once the last of them has finished.
     #[test]
     fn worlds_the_graph_before_did_not_have_arrive_one_after_another() {
         let before = before(&["Nexus"], &[]);
@@ -5261,7 +4878,7 @@ mod tests {
         // Already standing there, so it is drawn at its own size from the first frame.
         assert_eq!(arrivals.grown(0), 1.0);
         assert_eq!(arrivals.grown(1), 0.0);
-        // Far enough in for the first of the new ones to be part way and the second not yet due.
+        // Far enough in for the first new one to be part way and the second not yet due.
         assert!(arrivals.tick(super::ARRIVAL_STAGGER * 0.5));
         assert!(arrivals.grown(1) > 0.0 && arrivals.grown(1) < 1.0);
         assert_eq!(arrivals.grown(2), 0.0);
@@ -5270,8 +4887,6 @@ mod tests {
         assert_eq!(arrivals.grown(2), 1.0);
     }
 
-    /// A world the player has been to since is turned over where it stands rather than arriving:
-    /// away as the placeholder, back as itself, and the swap at the size where neither shows.
     #[test]
     fn a_world_that_has_become_known_shrinks_away_and_grows_back() {
         let before = before(&["Nexus", "Sugar Hole"], &["Sugar Hole"]);
@@ -5282,7 +4897,7 @@ mod tests {
             &[Some(0), Some(1)],
             Some(&before),
         );
-        // It starts at its full size, because it was already standing there.
+        // Sugar Hole starts at its full size, having already been standing there.
         assert_eq!(arrivals.grown(1), 1.0);
         assert_eq!(arrivals.veiled().collect::<Vec<_>>(), vec![1]);
         // Half way out: smaller, and still wearing the placeholder it is leaving.
@@ -5298,8 +4913,6 @@ mod tests {
         assert_eq!(arrivals.grown(1), 1.0);
     }
 
-    /// A world that is still a placeholder has not become anything, however much of the graph
-    /// around it has changed.
     #[test]
     fn a_world_still_unvisited_is_not_turned_over() {
         let before = before(&["Nexus", "Sugar Hole"], &["Sugar Hole"]);
@@ -5313,8 +4926,7 @@ mod tests {
         assert!(arrivals.arriving().is_none());
     }
 
-    /// The camera goes on being given something to follow after the last world has finished
-    /// growing, because that is when the layout is still settling around it.
+    // The layout is still settling around what arrived after the last of it stops growing.
     #[test]
     fn what_arrived_is_still_framed_after_it_has_finished_growing() {
         let before = before(&["Nexus"], &[]);
@@ -5334,8 +4946,6 @@ mod tests {
         assert!(arrivals.arriving().is_none());
     }
 
-    /// The first graph of a run has nothing to arrive into, and a rebuild that turns up no new
-    /// world has nothing to arrive: both are simply there.
     #[test]
     fn a_graph_with_nothing_new_in_it_animates_nothing() {
         for standing in [None, Some(before(&["Nexus"], &[]))] {
@@ -5346,8 +4956,6 @@ mod tests {
         }
     }
 
-    /// However many worlds turn up at once, watching them all in takes about as long. See
-    /// [`super::ARRIVAL_WINDOW`].
     #[test]
     fn a_great_many_worlds_arriving_still_arrive_within_the_window() {
         let names: Vec<String> = (0..1500).map(|world| world.to_string()).collect();
