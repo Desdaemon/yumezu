@@ -51,6 +51,24 @@ const FORCE_CHARGE: f32 = 1800.0;
 const FORCE_CHARGE_2D: f32 = 10000.0;
 const SETTLE_AFTER: f32 = 32.0;
 
+/// How long one world takes to grow from nothing to its own size when it arrives.
+const ARRIVAL_SECONDS: f32 = 0.45;
+/// The longest the whole of an arrival takes, however many worlds are in it: a refresh that turns
+/// up two worlds should not take as long as one that turns up four hundred, and one that turns up
+/// four hundred should not be watched for a minute. See [`Arrivals::new`].
+const ARRIVAL_WINDOW: f32 = 1.6;
+/// How far apart worlds arrive while there are few enough of them for [`ARRIVAL_WINDOW`] to allow
+/// it, which is what makes it a drip rather than a single pop.
+const ARRIVAL_STAGGER: f32 = 0.05;
+/// How long the camera goes on following what arrived after the last of it has finished growing.
+///
+/// An arrival is not over when the growing is: worlds dropped into a settled layout push their
+/// neighbours around for a while afterwards, and a camera handed back the moment the last one
+/// reached full size would leave what it was showing to drift out of frame. So it keeps hold while
+/// that works itself out. A pan or an orbit takes it back at any point, as it does from any other
+/// framing move.
+const ARRIVAL_TRACKED_SECONDS: f32 = 4.0;
+
 /// How many worlds behind a world put it at [`NODE_HUB_RADIUS`]. It is what fixes where on the
 /// descendant counts the far anchor sits, and so how quickly the sizes climb: the curve keeps the
 /// ranks a player can act on apart, and the origin still fits on the same scale.
@@ -137,6 +155,9 @@ const GESTURE_SLOP_PIXELS: f32 = 6.0;
 const NOTABLE_WORLDS: usize = 10;
 /// A world with at least this many connections counts as a "notable" descendant.
 const NOTABLE_HUB_CONNECTIONS: usize = 3;
+/// How many worlds the panel names as still having ways out of them nobody has walked. See
+/// [`AppEntities::untaken`].
+const UNTAKEN_WORLDS: usize = 10;
 /// Vertical field of view. The camera uses it, and so does the pan, which converts cursor pixels
 /// into world units through it.
 const FOV_Y_DEGREES: f32 = 45.0;
@@ -231,6 +252,14 @@ const BUILDING_ASKED_EVERY_SECONDS: f32 = 1.0;
 /// Longer than the ask above, because this one is not for the screen: nothing about the wait
 /// looks different for having asked, and the server is being polled about its progress anyway.
 const DUMP_ASKED_EVERY_SECONDS: f32 = 3.0;
+/// How long a run waits before asking again, after the dump could not be had at all.
+///
+/// Much longer than the ask above, which is the wait for a server that answered: that one is
+/// building a dump and will have it within the minute, whereas this is a host that is not there.
+/// Twice a minute is as much as asking one is worth, and it is short enough that a server coming
+/// back, or a laptop finding the network again, is picked up while the person is still looking at
+/// the window. See [`Dump::Waiting`].
+const DUMP_RETRIED_AFTER_SECONDS: f32 = 10.0;
 /// How many worlds the search box offers at once.
 const SEARCH_CANDIDATES: usize = 10;
 /// How many of a release's worlds the catalog shows it by, and how tall it draws those pictures,
@@ -268,6 +297,9 @@ mod store;
 mod text_agent;
 mod thumbnails;
 mod world;
+/// The player's own account on YNOproject, and the worlds it says they have been to. See
+/// [`yno::Account`].
+mod yno;
 
 use i18n::t;
 
@@ -295,6 +327,14 @@ pub(super) struct App {
     overlay: Option<Overlay>,
     /// The world dump, which everything in [`AppEntities`] is built out of. See [`Dump`].
     dump: Dump,
+    /// Whose game is being drawn: the whole of it, or only as much of it as one player has seen.
+    /// Kept beside the dump rather than in the entities, because it is one of the two things they
+    /// are built out of. See [`yno::Account`] and [`App::build`].
+    yno: yno::Account,
+    /// What the graph being replaced was, held between the frame that throws it away and the one
+    /// that builds the next out of it. `None` at every other moment, which is every build that is
+    /// not a rebuild. See [`Before`].
+    before: Option<Before>,
     /// What the server says it is building, while the dump is still on its way. See [`Building`].
     building: Building,
     /// What was lit when the drawing surface was last given back, to light again once there is a
@@ -306,6 +346,10 @@ pub(super) struct App {
     /// it is built afresh, so the camera is sent to the selection again rather than left where it
     /// was: see [`App::build`].
     selected: Option<Highlight>,
+    /// The line the loading frame was last showing, which the fade carries out over the graph: a
+    /// line that changed on the way out would read as a new thing to look at, and what is waited
+    /// for is not the same thing throughout. See [`App::draw_loading`] and [`App::veil`].
+    said: String,
     /// How much of the loading frame is still on screen, 1 for all of it and 0 for none.
     ///
     /// The frame is not switched off when the dump lands: it is faded off over the graph that
@@ -318,9 +362,14 @@ pub(super) struct App {
 /// The dump, at whatever stage of arriving it has reached.
 ///
 /// It comes off the network now rather than out of the binary -- see [`world::load`] -- so there
-/// is a stretch at the start of a run with a window on screen and nothing to draw in it, and a
-/// way for a run to end up with nothing to draw at all. Both are states the app is in rather than
-/// reasons to fail: see [`App::draw_loading`], which is the frame each of them shows.
+/// is a stretch at the start of a run with a window on screen and nothing to draw in it. That is a
+/// state the app is in rather than a reason to fail: see [`App::draw_loading`], which is the frame
+/// it shows throughout.
+///
+/// There is no state for having given up. A dump that could not be had is a dump that has not
+/// arrived yet, because every reason one fails to arrive is a reason that passes -- a server
+/// restarting, a laptop off the network, a phone in a tunnel -- and none of them is worth leaving
+/// a person with a window they have to close and open again. So the run keeps asking.
 ///
 /// Kept once it arrives rather than dropped into the entities built from it, because a phone
 /// rebuilds those every time the app comes back to the screen -- see [`App::release`] -- and the
@@ -328,12 +377,19 @@ pub(super) struct App {
 enum Dump {
     /// On its way in. See [`fetch`].
     Loading(fetch::Pending<Result<Option<world::Dump>, String>>),
-    /// The server is building one and said so rather than answering with a dump. Seconds until
-    /// this run asks again -- see [`world::load`] and [`DUMP_ASKED_EVERY_SECONDS`].
-    Waiting(f32),
+    /// Not this time, and this many seconds until the run asks again.
+    ///
+    /// Two things put a run here and they are the same wait to sit through. The server may be
+    /// building a dump and have said so rather than serve one it is about to replace, which is
+    /// `why: None` and is over within the minute. Or the ask may have come to nothing at all, in
+    /// which case `why` is what went wrong, in the words the loading frame offers it in. That is
+    /// the only difference the frame draws, and the reason the two are waited out for different
+    /// lengths of time: see [`DUMP_ASKED_EVERY_SECONDS`] and [`DUMP_RETRIED_AFTER_SECONDS`].
+    Waiting {
+        why: Option<String>,
+        until: f32,
+    },
     Ready(world::Dump),
-    /// Why there is no dump, in the words the loading frame says it in.
-    Failed(String),
 }
 
 /// What the server says it is building, for the loading frame to say instead of the plain wait.
@@ -545,6 +601,10 @@ struct Bounds {
 
 /// Gap the panel and the rocker keep off the edges of the safe area. See [`safe_insets`].
 const PANEL_MARGIN: i8 = 12;
+/// The file that does everything this app does with a YNOproject account, offered beside the
+/// sign-in: a promise about someone's account is worth no more than the code that keeps it.
+const YNO_SOURCE: &str = "https://github.com/Desdaemon/yumezu/blob/main/src/yno.rs";
+
 /// Width of the sidebar before anyone drags its edge.
 const SIDEBAR_WIDTH: f32 = 280.0;
 /// How opaque the sidebar is, out of 255.
@@ -564,6 +624,13 @@ const WALK_SPEED: f32 = 800.0;
 const POPUP_WIDTH: f32 = 240.0;
 /// What the chosen UI scale is kept under. See [`store`].
 const UI_SCALE: &str = "ui-scale";
+/// What the layout choices are kept under. See [`Layout`].
+const DIMENSIONS: &str = "dimensions";
+const LAYERED: &str = "layered";
+const HUB_REPULSION: &str = "hub-push";
+
+/// How far the hub push can be taken either way. Its middle is [`HUB_REPULSION_DEFAULT`].
+const HUB_REPULSION_RANGE: std::ops::RangeInclusive<f32> = 0.5..=1.5;
 
 /// How far the UI scale can be taken either way, and where it starts. The far ends are a phone
 /// held at arm's length and a desk monitor read from close up; the middle is the size the system
@@ -609,6 +676,8 @@ struct Overlay {
     /// The scale the store was last written with, so that a drag writes once at the end of itself
     /// rather than once a frame all the way along it.
     ui_scale_stored: f32,
+    /// The layout choices the store was last written with, for the same reason. See [`Layout`].
+    layout: Layout,
 }
 
 /// What the sidebar keeps between frames.
@@ -631,6 +700,11 @@ struct Sidebar {
     worlds: String,
     authors: String,
     versions: String,
+    /// What has been typed into the sign-in fields, until the button is pressed. Held here with
+    /// the rest of what the sidebar is left holding; neither outlives the run, and the password
+    /// is not written down anywhere at all. See [`Panel::yno`].
+    yno_user: String,
+    yno_password: String,
 }
 
 /// Which of the sidebar's four readings is open.
@@ -673,6 +747,9 @@ struct Panel {
     /// The world whose maps were asked for, if the button was pressed. See [`map::Maps::toggle`],
     /// which is what a second press on the same world reaches.
     mapped: Option<usize>,
+    /// The world the menu was asked to pretend the player has been to. See
+    /// [`yno::Account::pretend`].
+    revealed: Option<usize>,
     /// The language the picker was left set to, if it was changed. Applied after the frame, so a
     /// frame is drawn in one language throughout. See [`Panel::language`], which sets it.
     language: Option<i18n::Language>,
@@ -730,6 +807,12 @@ enum Highlight {
     /// direction: which ways round it can be walked is the connection's own and is read off it,
     /// and holding it this way round is what keeps the panel on the world the reader is reading.
     Connection(usize, usize),
+    /// Where there is still somewhere to go: the worlds the player has stood in that have the
+    /// most ways out of them they have not walked, at most [`UNTAKEN_WORLDS`] of them. Asked for
+    /// from the panel with nothing selected, and offered only in a run drawing a frontier, since
+    /// a run drawing the whole game has no unwalked way in it to count. See
+    /// [`AppEntities::untaken`].
+    Untaken,
 }
 
 impl Highlight {
@@ -743,7 +826,7 @@ impl Highlight {
             Self::Route(world) | Self::Descendants(world) | Self::Connection(world, _) => {
                 Some(world)
             }
-            Self::Author(_) | Self::Version(_) | Self::Layer(_) => None,
+            Self::Author(_) | Self::Version(_) | Self::Layer(_) | Self::Untaken => None,
         }
     }
 }
@@ -787,6 +870,229 @@ enum Gesture {
 /// walkable one, so a one-way connection's dashes march the way the player can go. See
 /// [`AppEntities::march_dashes`].
 type Graph = ForceGraph<(), bool>;
+
+/// Where the worlds of a graph were standing, by name, so the one built after it can start from
+/// there instead of from a fresh scatter.
+///
+/// By name because that is the one thing two graphs of the same game share: a frontier is a part
+/// of the dump renumbered from zero, so a world's index means nothing across a rebuild. See
+/// [`AppEntities::before`] and [`world::Dump::showing`].
+type Standing = std::collections::HashMap<String, [f32; 3]>;
+
+/// The graph a new one is replacing, as much of it as the new one should carry on from.
+///
+/// A rebuild is not a new run: the person is still looking at the same map, still has it turned
+/// the way they turned it, and has only asked what else is on it. So the layout picks up where it
+/// left off and the controls are left where they were set -- everything here is something that was
+/// theirs rather than the dump's, and losing any of it would read as the app having restarted. See
+/// [`resume_from`] and [`Arrivals`].
+struct Before {
+    /// Where each world stood, by name. See [`Standing`].
+    standing: Standing,
+    /// Which of them were drawn as placeholders, by the same name. What a world has become is not
+    /// readable from the new graph alone: a world with a picture may have had one all along. See
+    /// [`Coming::Known`].
+    unvisited: std::collections::HashSet<String>,
+    /// How it was being laid out, which the graph replacing it keeps: a refresh is the same map
+    /// with more of it known, not a reason to put someone back in a view they left. See [`Layout`].
+    layout: Layout,
+}
+
+/// What one world is doing while a graph settles in around the worlds that were already there.
+#[derive(Clone, Copy)]
+enum Coming {
+    /// Already standing there and unchanged, which is nearly every world: drawn at its own size
+    /// from the first frame, with nothing to wait for and nothing to animate.
+    Already,
+    /// Not in the graph before at all, and grows in from nothing this many seconds after it was
+    /// built.
+    New(f32),
+    /// Was standing there as a placeholder and is a world now: the player has been somewhere they
+    /// had only been shown the edge of. It shrinks away as the placeholder and grows back as
+    /// itself, so the swap happens at the moment there is nothing on screen to swap. See
+    /// [`Arrivals::veiled`].
+    Known(f32),
+}
+
+/// The worlds coming into a graph that was already standing, and how far in each of them is.
+///
+/// A refresh does not redraw the same graph: it builds another one, out of a dump cut back by an
+/// account that has been somewhere new since. Left alone, that lands as a jump -- a hundred worlds
+/// where a moment ago there were none, and a placeholder that is suddenly a photograph. So the
+/// ones that were not there before are grown in from nothing, a few at a time, the ones that have
+/// become known are turned over where they stand, and the rest of the graph is left exactly where
+/// it stood.
+///
+/// `None` for the first graph of a run, where nothing arrives because everything is simply there.
+/// It is also what keeps the cost off every other frame of every other run: a graph with no
+/// arrivals has no vector, no clock, and nothing to ask.
+#[derive(Default)]
+struct Arrivals {
+    /// Per world, what it is doing. `None` where nothing is doing anything.
+    coming: Option<Vec<Coming>>,
+    /// How long the graph has been standing.
+    clock: f32,
+    /// When the last of them has finished, which is when there stops being anything to wait for.
+    last: f32,
+}
+
+impl Arrivals {
+    /// Works out which worlds are new, which have become known, and when each of them moves.
+    ///
+    /// `before` is the graph this one replaces; `None` -- a first build -- means nothing is
+    /// arriving, because there was nothing for it to arrive into. `unknown` says which worlds are
+    /// placeholders now, which against [`Before::unvisited`] is what tells a world that has become
+    /// known from one that was always either.
+    ///
+    /// The turning over goes first and the new worlds follow it, because that is the order the
+    /// thing actually happened in: the player walked into a world, and what lies past it is what
+    /// that opened. Arrivals are ordered by how deep a world sits, so they spread outward from
+    /// what the player already had rather than speckling the graph at random, and spaced to fit
+    /// [`ARRIVAL_WINDOW`] however many there are.
+    fn new(
+        names: &[&str],
+        unknown: &[bool],
+        depth: &[Option<u32>],
+        before: Option<&Before>,
+    ) -> Self {
+        let Some(before) = before else {
+            return Self::default();
+        };
+        let mut coming = vec![Coming::Already; names.len()];
+        let mut arriving = Vec::new();
+        let mut turning = Vec::new();
+        for (world, &name) in names.iter().enumerate() {
+            match before.standing.contains_key(name) {
+                false => arriving.push(world),
+                // Both halves have to have changed: a world that is still a placeholder has not
+                // become anything, and one that was never a placeholder has nothing to turn over.
+                true if before.unvisited.contains(name) && !unknown[world] => turning.push(world),
+                true => {}
+            }
+        }
+        if arriving.is_empty() && turning.is_empty() {
+            return Self::default();
+        }
+        for &world in &turning {
+            coming[world] = Coming::Known(0.0);
+        }
+        // Behind the turning over where there is any, so a new world comes out from under a
+        // placeholder that has already gone rather than through one still standing.
+        let after = if turning.is_empty() {
+            0.0
+        } else {
+            ARRIVAL_SECONDS
+        };
+        arriving.sort_by_key(|&world| depth[world].unwrap_or(u32::MAX));
+        let stagger = ARRIVAL_STAGGER.min(ARRIVAL_WINDOW / arriving.len().max(1) as f32);
+        for (nth, &world) in arriving.iter().enumerate() {
+            coming[world] = Coming::New(after + nth as f32 * stagger);
+        }
+        Self {
+            // When the last of them begins its final [`ARRIVAL_SECONDS`]. A turning over is two of
+            // those, one each way, so it begins its second at `after` -- which is where the first
+            // new world starts too, and every one after that is later still.
+            last: match arriving.is_empty() {
+                true => ARRIVAL_SECONDS,
+                false => after + (arriving.len() - 1) as f32 * stagger,
+            },
+            coming: Some(coming),
+            clock: 0.0,
+        }
+    }
+
+    /// How much of its own size a world is drawn at: nothing at all before it is due, its whole
+    /// size once it has arrived, and nothing again at the moment a world that has become known
+    /// turns over.
+    fn grown(&self, world: usize) -> f32 {
+        let Some(coming) = &self.coming else {
+            return 1.0;
+        };
+        match coming[world] {
+            Coming::Already => 1.0,
+            Coming::New(due) => eased((self.clock - due) / ARRIVAL_SECONDS),
+            Coming::Known(due) => {
+                let through = (self.clock - due) / ARRIVAL_SECONDS;
+                match through < 1.0 {
+                    // Away as what it was, and back as what it is.
+                    true => 1.0 - eased(through),
+                    false => eased(through - 1.0),
+                }
+            }
+        }
+    }
+
+    /// Whether a world is still wearing the placeholder it is about to stop being: true for one
+    /// that has become known and has not yet shrunk away.
+    ///
+    /// The placeholder is drawn over a world's own quad rather than instead of it, so this is all
+    /// the swap takes -- underneath, the picture has been the world's own all along, and it comes
+    /// out from under the placeholder at the size where neither can be seen. See
+    /// [`AppEntities::place_unvisited`].
+    fn veiled(&self) -> impl Iterator<Item = usize> + '_ {
+        self.coming
+            .iter()
+            .flatten()
+            .enumerate()
+            .filter_map(|(world, coming)| {
+                matches!(coming, Coming::Known(due) if self.clock < due + ARRIVAL_SECONDS)
+                    .then_some(world)
+            })
+    }
+
+    /// Whether any world is under a placeholder it is about to leave, which is what says the
+    /// graph needs the placeholder picture at all even where nothing in it is unvisited.
+    fn turning(&self) -> bool {
+        self.coming
+            .iter()
+            .flatten()
+            .any(|coming| matches!(coming, Coming::Known(_)))
+    }
+
+    /// Which worlds moved, or `None` for a graph with nothing arriving into it.
+    ///
+    /// Answers past the end of the growing, for as long as the camera is still following them:
+    /// see [`ARRIVAL_TRACKED_SECONDS`] and [`AppEntities::arrival_bounds`], which is what frames
+    /// them.
+    fn arriving(&self) -> Option<impl Iterator<Item = usize> + '_> {
+        let coming = self.coming.as_ref()?;
+        Some(
+            coming
+                .iter()
+                .enumerate()
+                .filter(|(_, coming)| !matches!(coming, Coming::Already))
+                .map(|(world, _)| world),
+        )
+    }
+
+    /// Carries the arrival forward, answering whether anything is still moving -- which is what
+    /// says the geometry has to be built again on a frame the layout did not move in.
+    ///
+    /// The camera goes on following for a while after that answer turns false, which is why this
+    /// is not also what ends the arrival: see [`ARRIVAL_TRACKED_SECONDS`].
+    fn tick(&mut self, dt: f32) -> bool {
+        if self.coming.is_none() {
+            return false;
+        }
+        self.clock += dt;
+        let grown = self.last + ARRIVAL_SECONDS;
+        if self.clock > grown + ARRIVAL_TRACKED_SECONDS {
+            // Done with, and dropped rather than left at rest: from here on this graph is a graph
+            // like any other, and asking it about arrivals costs nothing again.
+            *self = Self::default();
+            return false;
+        }
+        self.clock <= grown
+    }
+}
+
+/// One step of a movement, eased at both ends so a world neither snaps into existence nor
+/// overshoots the size it is going to keep. Clamped, so a world is nothing before it is due and
+/// itself ever after.
+fn eased(through: f32) -> f32 {
+    let through = through.clamp(0.0, 1.0);
+    through * through * (3.0 - 2.0 * through)
+}
 
 struct AppEntities {
     graph: Graph,
@@ -837,6 +1143,10 @@ struct AppEntities {
     /// Per world, how many other worlds it connects to: the degree of the graph as drawn, which
     /// is what tells a junction from a dead end. Only the overlay reads it.
     degrees: Vec<usize>,
+    /// The worlds still worth walking out of, the ones with the most ways out nobody has taken
+    /// first: [`UNTAKEN_WORLDS`] of them at most. Empty in a run drawing the whole game, which is
+    /// what settles whether the panel offers the list at all. See [`Highlight::Untaken`].
+    untaken: Vec<usize>,
     /// Whether the camera is still easing onto the selected route. Set by a selection and cleared
     /// once the camera arrives, or as soon as the person takes the camera back.
     framing: bool,
@@ -851,6 +1161,8 @@ struct AppEntities {
     edge_colors: Vec<Srgba>,
     /// Per node, the half-height of its quad, from how much of the graph hangs off it.
     node_radii: Vec<f32>,
+    /// The worlds still coming into this graph, if it replaced one. See [`Arrivals`].
+    arrivals: Arrivals,
     /// The panel's setting for how much of a world's size goes into how hard it pushes. See
     /// [`node_mass`].
     hub_repulsion: f32,
@@ -884,6 +1196,19 @@ struct AppEntities {
     /// The same atlas as the sidebar's catalog draws out of. `None` until it arrives, and forever
     /// if it cannot be had: see [`thumbnails::Sheet`].
     sheet: Option<thumbnails::Sheet>,
+    /// Per world, which cell of the thumbnail atlas its picture is in. `None` for a world the
+    /// player has not been to, which wears the placeholder: see [`thumbnails::cells`].
+    cells: Vec<Option<usize>>,
+    /// The worlds the player has not been to, which are drawn from the whole placeholder picture
+    /// rather than from their cell of the atlas. Empty in a run drawing the whole game. See
+    /// [`AppEntities::place_unvisited`].
+    unvisited: Vec<usize>,
+    /// The quads those are drawn on: the nodes' own, lifted toward the camera. Kept rather than
+    /// built each frame, since it is one allocation the size of the frontier.
+    unvisited_quads: Instances,
+    /// How many worlds the atlas was packed for, which is the whole dump however few of them this
+    /// graph is drawing. See [`world::Dump::packed`].
+    packed: usize,
     /// Full-size pictures for the worlds the view has come close enough to, over the atlas cells
     /// they stand in for. See [`detail`].
     detail: detail::Detail,
@@ -1059,6 +1384,10 @@ impl App {
             // Started here rather than at the first frame: the fetch is the longest thing a run
             // waits for, and nothing it needs is owned by the window.
             dump: Dump::Loading(fetch::spawn(world::load())),
+            // Started here for the same reason the dump is: a run that left a session behind has
+            // an account to read before it has a window to draw it in.
+            yno: yno::Account::new(),
+            before: None,
             statics: AppStatics {
                 control,
                 camera,
@@ -1071,6 +1400,7 @@ impl App {
             overlay: None,
             building: Building::default(),
             selected: None,
+            said: String::new(),
             veil: 1.0,
         }
     }
@@ -1095,8 +1425,43 @@ impl App {
         let Dump::Ready(dump) = &self.dump else {
             return;
         };
+        // A run that is drawing one player's game needs to know which worlds are theirs before it
+        // draws anything: building on the dump alone would put the whole game on screen and take
+        // it away again a moment later. So this waits, and [`App::draw_loading`] is what the wait
+        // looks like. See [`yno::Account::settled`].
+        if !self.yno.settled() {
+            return;
+        }
+        // The frontier is a different graph rather than a different drawing of one: it takes
+        // worlds out, and a connection names the world it leads to by index. So it is applied
+        // here, where the dump becomes something to build from, and nothing downstream has to
+        // know it happened. See [`world::Dump::showing`].
+        let frontier;
+        let dump = match self.yno.frontier() {
+            Some(visited) => {
+                frontier = dump.showing(&visited);
+                &frontier
+            }
+            None => dump,
+        };
         let ctx = self.ctx.wctx.as_ref().unwrap();
-        let mut data = entities(dump, ctx);
+        // Whether this graph is starting rather than carrying one on, which is what settles
+        // whether the camera is the person's to keep. See below.
+        let opening = self.before.is_none();
+        // Taken rather than borrowed: it belongs to the graph being replaced, and the one built
+        // out of it here is the last thing that has any use for it.
+        let mut data = entities(dump, self.before.take().as_ref(), ctx);
+        // A graph solved on the plane has to be looked at square on, or the layout it was given
+        // depth to avoid is seen edge on anyway. The switch does this when it is thrown; a run
+        // that opens in two dimensions because that is where an earlier run left it never passes
+        // through the switch, and would otherwise open oblique. See [`AppStatics::face_plane`].
+        //
+        // Only on a graph that is opening: one carrying another on keeps whatever the person had
+        // turned the camera to, the same as its layout and its selection do.
+        if opening && data.graph.parameters().dimensions == Dimensions::Two {
+            self.statics.face_plane();
+        }
+
         // Lit again where a resume dropped it, which also aims the camera at it: the layout this
         // is a selection in is a new one, so where the camera was looking is nowhere in
         // particular. See [`App::selected`].
@@ -1112,7 +1477,91 @@ impl App {
 /// A free function rather than a method because it reads the dump the app holds and hands back
 /// what the app is about to hold beside it, which is two borrows of one [`App`] that do not
 /// overlap in fact and cannot both be taken in one.
-fn entities(dump: &world::Dump, ctx: &WindowedContext) -> AppEntities {
+/// How the person has asked for the graph to be laid out.
+///
+/// The three of them together because they are one decision in three parts: they are set from one
+/// place, they are read from one place, and every graph built has to be given all three at once --
+/// a rebuild carrying two of them would put the person somewhere they never asked to be. See
+/// [`Before`], which is how a rebuild picks them up, and [`Layout::remembered`], which is how a
+/// run does.
+#[derive(Clone, Copy, PartialEq)]
+struct Layout {
+    /// Which of the two the layout is solved in.
+    dimensions: Dimensions,
+    /// Whether the worlds are pinned to layers by how deep they sit.
+    layered: bool,
+    /// How much of a world's size settles how hard it pushes. See [`node_mass`].
+    hub_repulsion: f32,
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self {
+            dimensions: Dimensions::Three,
+            layered: true,
+            hub_repulsion: HUB_REPULSION_DEFAULT,
+        }
+    }
+}
+
+impl Layout {
+    /// What an earlier run was left set to, or the default for whatever it did not write down.
+    ///
+    /// Each part read on its own, so a store written by a version that knew fewer of them still
+    /// gives up the ones it has. A push outside the range this version offers is brought inside
+    /// it rather than thrown away, the same way the UI scale is: see [`remembered_scale`].
+    fn remembered() -> Self {
+        let fallback = Self::default();
+        Self {
+            dimensions: match store::read(DIMENSIONS).as_deref() {
+                Some("2") => Dimensions::Two,
+                Some("3") => Dimensions::Three,
+                _ => fallback.dimensions,
+            },
+            layered: store::read(LAYERED)
+                .and_then(|layered| layered.parse().ok())
+                .unwrap_or(fallback.layered),
+            hub_repulsion: store::read(HUB_REPULSION)
+                .and_then(|push| push.parse().ok())
+                .map_or(fallback.hub_repulsion, |push: f32| {
+                    push.clamp(*HUB_REPULSION_RANGE.start(), *HUB_REPULSION_RANGE.end())
+                }),
+        }
+    }
+
+    /// Writes it down for the next run.
+    fn remember(&self) {
+        store::write(
+            DIMENSIONS,
+            Some(match self.dimensions {
+                Dimensions::Two => "2",
+                Dimensions::Three => "3",
+            }),
+        );
+        store::write(LAYERED, Some(&self.layered.to_string()));
+        store::write(HUB_REPULSION, Some(&self.hub_repulsion.to_string()));
+    }
+
+    /// How the simulation is set up to solve it: the distance between layers, how far a world may
+    /// drift off the layer it belongs to, and how hard the worlds push each other apart.
+    ///
+    /// Two dimensions is not the same layout flattened. With every world on one plane there is
+    /// nowhere for a crowd to go but sideways, so the layers close up and the push is turned far
+    /// higher for a graph to read as anything at all.
+    fn parameters(&self) -> (Option<f32>, f32, f32) {
+        let (spacing, slack, charge) = match self.dimensions {
+            Dimensions::Two => (
+                DAG_LEVEL_DISTANCE_2D,
+                DAG_LEVEL_MICROSTEP * DAG_LEVEL_SLACK_MICROSTEPS_2D,
+                FORCE_CHARGE_2D,
+            ),
+            Dimensions::Three => (DAG_LEVEL_DISTANCE, 0.0, FORCE_CHARGE),
+        };
+        (self.layered.then_some(spacing), slack, charge)
+    }
+}
+
+fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) -> AppEntities {
     let rng = Rng(0x5eed_1337);
 
     let worlds = &dump.worlds;
@@ -1136,9 +1585,22 @@ fn entities(dump: &world::Dump, ctx: &WindowedContext) -> AppEntities {
         })
         .collect();
 
+    // How the graph before this one was being read, or -- for the first of a run -- how the last
+    // run was left. Either way the person is put back where they were: a rebuild answering a
+    // refresh with a different view, or an app opening in one nobody chose, is the same surprise.
+    // See [`Layout`].
+    let layout = before.map_or_else(Layout::remembered, |before| before.layout);
+    let Layout {
+        dimensions,
+        hub_repulsion,
+        ..
+    } = layout;
+    let (dag_level_distance, dag_level_slack, force_charge) = layout.parameters();
     let mut graph = Graph::new(SimulationParameters {
-        dag_level_distance: Some(DAG_LEVEL_DISTANCE),
-        force_charge: FORCE_CHARGE,
+        dimensions,
+        dag_level_distance,
+        dag_level_slack,
+        force_charge,
         settle_after: Some(SETTLE_AFTER),
         ..Default::default()
     });
@@ -1152,7 +1614,7 @@ fn entities(dump: &world::Dump, ctx: &WindowedContext) -> AppEntities {
                 // Worlds the origin cannot reach have no depth to share a layer with, so they
                 // get one of their own past the deepest that does.
                 level: depth.map_or(furthest + 1.0, |depth| depth as f32),
-                mass: node_mass(node_radii[world], HUB_REPULSION_DEFAULT),
+                mass: node_mass(node_radii[world], hub_repulsion),
                 ..Default::default()
             })
         })
@@ -1207,6 +1669,14 @@ fn entities(dump: &world::Dump, ctx: &WindowedContext) -> AppEntities {
         })
         .collect();
     let edge_colors = edge_colors(&graph, &routes, &descendants, &depth_colors);
+    // The worlds with no picture of their own, which the placeholder is drawn on instead. Read
+    // off the same thing the atlas cells are, so the two cannot disagree about which worlds those
+    // are. See [`world::World::cell`].
+    let unvisited: Vec<usize> = worlds
+        .iter()
+        .enumerate()
+        .filter_map(|(world, it)| it.cell().is_none().then_some(world))
+        .collect();
     let titles: Vec<world::Title> = worlds.iter().map(world::World::titles).collect();
     let maps: Vec<Vec<world::Map>> = worlds.iter().map(world::World::maps).collect();
     // The catalog's own two readings of the dump, built once here: both group every world,
@@ -1295,6 +1765,24 @@ fn entities(dump: &world::Dump, ctx: &WindowedContext) -> AppEntities {
         ColorMaterial::default(),
     );
 
+    // Before the graph takes them over: what each world is doing is a reading of the names, which
+    // of them wear the placeholder, and the depths -- all of which the graph is about to take.
+    let mut unknown = vec![false; worlds.len()];
+    for &world in &unvisited {
+        unknown[world] = true;
+    }
+    let untaken = untaken(&connections, &unknown);
+    let arrivals = Arrivals::new(
+        &titles
+            .iter()
+            .map(|title| title.en.as_str())
+            .collect::<Vec<_>>(),
+        &unknown,
+        &routes.depth,
+        before,
+    );
+    let arriving = arrivals.arriving().is_some();
+
     let mut data = AppEntities {
         graph,
         gesture: None,
@@ -1312,13 +1800,16 @@ fn entities(dump: &world::Dump, ctx: &WindowedContext) -> AppEntities {
         cursor: None,
         hover: None,
         pointed: None,
-        framing: false,
+        // A graph with worlds coming into it moves the camera onto them: see
+        // [`AppEntities::arrival_bounds`]. A pan or an orbit takes it back at any point.
+        framing: arriving,
         frame_route: false,
         edge_colors,
         node_radii,
-        hub_repulsion: HUB_REPULSION_DEFAULT,
+        hub_repulsion,
         descendants,
         connections,
+        untaken,
         degrees,
         backdrop,
         thumbnails,
@@ -1330,21 +1821,96 @@ fn entities(dump: &world::Dump, ctx: &WindowedContext) -> AppEntities {
         dash_instances,
         atlas: Some(thumbnails::load()),
         sheet: None,
-        detail: detail::Detail::new(worlds.iter().map(|world| world.image.clone()).collect()),
+        cells: worlds.iter().map(world::World::cell).collect(),
+        packed: dump.packed,
+        unvisited: unvisited.clone(),
+        // White until the first [`AppEntities::place_unvisited`], which is the same fan-out the
+        // thumbnails' own colors take.
+        unvisited_quads: Instances {
+            transformations: vec![Mat4::identity(); unvisited.len()],
+            colors: Some(vec![Srgba::WHITE; unvisited.len()]),
+            ..Default::default()
+        },
+        detail: detail::Detail::new(
+            worlds.iter().map(|world| world.image.clone()).collect(),
+            // Or one on its way out from under one, which needs the same picture for as long as
+            // it takes to shrink away. See [`Arrivals::veiled`].
+            !unvisited.is_empty() || arrivals.turning(),
+        ),
         dash_phase: 0.0,
         // Rebuilt on the first frame either way, because a fresh layout has not settled.
         billboard: Mat4::identity(),
+        arrivals,
     };
     // The instance colors have not been written yet, only sized. See above.
     data.repaint();
     scatter(&mut data);
+    // Over the top of the scatter, so a graph replacing another one carries on from where that
+    // one stood instead of restarting. See [`resume_from`].
+    if let Some(before) = before {
+        resume_from(&mut data, &before.standing);
+    }
     data
+}
+
+/// Puts the worlds this graph shares with the one before it back where they were standing, and
+/// starts the new ones off among the neighbours they attach to.
+///
+/// Without this a refresh would reshuffle the whole graph to say that a handful of worlds had been
+/// added to it, and the arrival would be lost in the churn: what a person is watching is the same
+/// map they were already looking at, so it has to still look like it. A returning world is stopped
+/// dead as well as replaced, because the velocity it carried belongs to a layout that no longer
+/// exists.
+///
+/// A world with nothing to stand near keeps the scatter, which is the only honest place for it:
+/// nothing in the graph says where it belongs until the layout has been stepped.
+fn resume_from(data: &mut AppEntities, before: &Standing) {
+    let standing: Vec<Option<[f32; 3]>> = data
+        .titles
+        .iter()
+        .map(|title| before.get(&title.en).copied())
+        .collect();
+    // New worlds are placed among the ones that were already there, so each comes in out of what
+    // it connects to rather than in from the far edge of the spawn volume. Off the old positions
+    // rather than off the placements being made, so no world is seeded from another seed.
+    let seeded: Vec<Option<[f32; 3]>> = (0..standing.len())
+        .map(|world| {
+            if standing[world].is_some() {
+                return standing[world];
+            }
+            let near: Vec<[f32; 3]> = data.connections[world]
+                .iter()
+                .filter_map(|step| standing[step.world])
+                .collect();
+            if near.is_empty() {
+                return None;
+            }
+            let mut at = [0.0; 3];
+            for position in &near {
+                for (at, value) in at.iter_mut().zip(position) {
+                    *at += value / near.len() as f32;
+                }
+            }
+            Some(at)
+        })
+        .collect();
+    // In slot order, which is world order, for the reason [`AppEntities::apply_node_masses`]
+    // gives: one node was added per world and none is ever removed.
+    let mut world = 0;
+    data.graph.visit_nodes_mut(|mut node| {
+        if let Some(at) = seeded[world] {
+            node.set_position(at);
+            node.set_velocity([0.0; 3]);
+        }
+        world += 1;
+    });
 }
 
 impl App {
     /// The frame drawn while there is no graph: the background, and a word about why.
     ///
-    /// The whole of the app until the dump lands, and the whole of it for ever if it does not.
+    /// The whole of the app until the dump lands, however many asks that takes: see [`Dump`],
+    /// which has no state for having given up.
     /// Everything the overlay usually reads is built out of the dump, so none of the panel can be
     /// laid out here -- only the one message, over the same cleared background the graph is drawn
     /// on, so that the window does not change colour when the graph arrives.
@@ -1358,25 +1924,37 @@ impl App {
         // Only while there is still something coming: a run that has given up has nothing to ask
         // about, and the line it says is its own.
         let seconds = (frame_input.elapsed_time as f32 * 1e-3).min(0.05);
-        if !matches!(self.dump, Dump::Failed(_)) {
+        // What the server says it is building, which is only worth asking of a server that is
+        // answering: a host that could not be reached has nothing to say about a dump it is not
+        // building, and one whose dump has arrived has nothing left to say at all.
+        if matches!(
+            self.dump,
+            Dump::Loading(_) | Dump::Waiting { why: None, .. }
+        ) {
             self.building.tick(seconds);
-            // The other clock this frame runs: the server said it is building, and this is the
-            // run waiting that out before asking for the dump again.
-            if let Dump::Waiting(until) = &mut self.dump {
-                *until -= seconds;
-                if *until <= 0.0 {
-                    self.dump = Dump::Loading(fetch::spawn(world::load()));
-                }
+        }
+        // The other clock this frame runs, and the one every wait ends on: however the last ask
+        // turned out, the next one is what this run does about it.
+        if let Dump::Waiting { until, .. } = &mut self.dump {
+            *until -= seconds;
+            if *until <= 0.0 {
+                self.dump = Dump::Loading(fetch::spawn(world::load()));
             }
         }
         let says = match &self.dump {
-            Dump::Failed(_) => t!("dump-failed"),
+            // The dump is here and the graph is not, which leaves one thing being waited for.
+            Dump::Ready(_) => t!("yno-loading"),
+            Dump::Waiting { why: Some(_), .. } => t!("dump-failed"),
             _ => self.building.says(),
         };
+        // What went wrong, for the reader who goes looking. There either was a failure or there
+        // was not; the frame keeps spinning either way, because either way it will ask again.
         let failed = match &self.dump {
-            Dump::Failed(error) => Some(error.as_str()),
+            Dump::Waiting { why, .. } => why.as_deref(),
             _ => None,
         };
+        // Kept for the fade that follows this frame, which carries out whichever line was on it.
+        self.said = says.clone();
         let overlay = self.overlay.as_mut().unwrap();
         // The same scale the panel is laid out at, so the message is the size the rest of the
         // interface will be. See [`Overlay::panel`].
@@ -1406,6 +1984,21 @@ impl App {
 
     /// The meat of this module.
     fn draw(&mut self) {
+        // Before the graph is looked at, and whether or not there is one yet: a run that resumed
+        // a session is reading an account while the dump is still on its way, and the answer has
+        // to be in hand before the graph is built out of it.
+        self.yno.poll();
+        if self.yno.restated() {
+            // A frontier is a different numbering of the worlds, so what was lit means nothing in
+            // the graph about to be built. See [`App::selected`].
+            self.selected = None;
+            // Where this graph had got to, for the next one to carry on from: the person is
+            // looking at a map, and a refresh should add to it rather than replace it. See
+            // [`resume_from`] and [`Arrivals`].
+            self.before = self.data.as_ref().map(AppEntities::before);
+            self.data = None;
+            self.build();
+        }
         if self.data.is_none() {
             // Looked in on once a frame, and only while there is nothing to draw: the frames
             // after this one have a graph in them and nothing left to wait for.
@@ -1418,10 +2011,19 @@ impl App {
                     Ok(Some(dump)) => Dump::Ready(dump),
                     // Not an error and not a dump: the server is building one, and asking again
                     // in a moment is the whole of what this run has to do about it.
-                    Ok(None) => Dump::Waiting(DUMP_ASKED_EVERY_SECONDS),
+                    Ok(None) => Dump::Waiting {
+                        why: None,
+                        until: DUMP_ASKED_EVERY_SECONDS,
+                    },
+                    // Not the end of the run: the loading frame goes on saying so and asking
+                    // again, because everything that stops a dump arriving is something that
+                    // passes. See [`Dump`].
                     Err(error) => {
-                        log::error!("{error}");
-                        Dump::Failed(error)
+                        log::warn!("{error}");
+                        Dump::Waiting {
+                            why: Some(error),
+                            until: DUMP_RETRIED_AFTER_SECONDS,
+                        }
                     }
                 };
                 self.build();
@@ -1442,17 +2044,24 @@ impl App {
             let step = (frame_input.elapsed_time as f32 * 1e-3).min(0.05);
             self.veil = (self.veil - step / LOADING_FADE_SECONDS).max(0.0);
         }
-        // Whatever the frame was saying when the dump landed, still saying it as it goes: a line
-        // that changed on the way out would read as a new thing to look at.
-        let fading = (self.veil > 0.0).then(|| (self.building.says(), self.veil));
+        // Whatever the frame was saying when it gave way to the graph, still saying it as it
+        // goes. See [`App::said`].
+        let fading = (self.veil > 0.0).then(|| (self.said.clone(), self.veil));
         let data = self.data.as_mut().unwrap();
         self.statics.camera.set_viewport(frame_input.viewport);
         // egui marks what it uses as handled, so a click on the panel must not also reach the graph behind it.
+        let account = &mut self.yno;
+        // The whole game, which is the yardstick the settings tab measures one person's share of
+        // it against: the graph beside it may be only the frontier. See [`Panel::yno`].
+        let dump = match &self.dump {
+            Dump::Ready(dump) => Some(dump),
+            _ => None,
+        };
         if self
             .overlay
             .as_mut()
             .unwrap()
-            .run(window, &mut frame_input, data, fading)
+            .run(window, &mut frame_input, data, account, dump, fading)
         {
             // Repulsion acts along the offset between two nodes, so a layout flattened onto the
             // plane has no depth for the forces to reinflate: leaving two dimensions has to
@@ -1518,11 +2127,22 @@ impl App {
             // Recomputed every frame rather than fixed when the selection was made: the layout is
             // usually still moving, and a goal taken once would be stale before the camera
             // reached it.
-            data.framing = match data.highlight_bounds() {
-                Some(bounds) => self
-                    .statics
-                    .ease_to_frame(&bounds, (frame_input.elapsed_time as f32 * 1e-3).min(0.05)),
-                None => false,
+            let dt = (frame_input.elapsed_time as f32 * 1e-3).min(0.05);
+            // What is arriving comes first: while a refresh is coming in, the camera is moving
+            // onto it rather than onto whatever was lit before. Once the arrival is over the
+            // selection has the camera back, and a run with neither stops framing.
+            data.framing = match data.arrival_bounds() {
+                Some(bounds) => {
+                    // Kept on whether or not the camera has caught up, unlike a selection: what
+                    // it is following is still being pushed about by the worlds that landed in
+                    // it, so arriving once is not the end of the move.
+                    self.statics.ease_to_frame(&bounds, dt);
+                    true
+                }
+                None => match data.highlight_bounds() {
+                    Some(bounds) => self.statics.ease_to_frame(&bounds, dt),
+                    None => false,
+                },
             };
         }
 
@@ -1536,7 +2156,12 @@ impl App {
         // The quads face the camera, so turning it dates their transformations even over a layout
         // that has not moved at all.
         let turned = data.billboard != billboard(&self.statics.camera);
-        if stepped || turned {
+        // Clamped as the reveal is, and for the same reason: the frame a graph is built on is a
+        // long one, and an arrival should not be half over before it is first drawn.
+        let arriving = data
+            .arrivals
+            .tick((frame_input.elapsed_time as f32 * 1e-3).min(0.05));
+        if stepped || turned || arriving {
             data.rebuild_instances(&self.statics.camera);
         }
         // Whether or not anything else moved: see [`AppEntities::march_dashes`].
@@ -1546,6 +2171,9 @@ impl App {
         // about how much of the atlas the screen is asking for.
         let magnified = data.magnified(&self.statics.camera, frame_input.viewport);
         data.detail.track(ctx, &magnified);
+        // Beside them, and on the same terms: what it copies is the node quads rebuilt just above,
+        // and the camera it is lifted against is the one that turned them.
+        data.place_unvisited(ctx, &self.statics.camera);
         // Every frame likewise, and after the instances it stands on: a turn of the camera moves
         // the quad it is copied from without moving the layout.
         data.aim_glow(&self.statics.camera);
@@ -1612,6 +2240,7 @@ impl Overlay {
             japanese: japanese::Japanese::new(),
             ui_scale: scale,
             ui_scale_stored: scale,
+            layout: Layout::remembered(),
         }
     }
 
@@ -1625,6 +2254,8 @@ impl Overlay {
         window: &Window,
         frame_input: &mut FrameInput,
         data: &AppEntities,
+        account: &mut yno::Account,
+        dump: Option<&world::Dump>,
         fading: Option<(String, f32)>,
     ) -> Panel {
         // egui's own way of being asked for a bigger interface: it multiplies whatever the window
@@ -1649,6 +2280,7 @@ impl Overlay {
             guide: false,
             refit: false,
             mapped: None,
+            revealed: None,
             language: None,
         };
         // Bound out of `self` so the closure borrows this field alone, leaving `self.gui` free
@@ -1679,7 +2311,7 @@ impl Overlay {
                     egui::Panel::left("yumezu")
                         .frame(frame)
                         .default_size(SIDEBAR_WIDTH)
-                        .show(ui, |ui| panel.window(ui, &read, sidebar));
+                        .show(ui, |ui| panel.window(ui, &read, sidebar, account, dump));
                 }
                 true => sidebar_opener(ui, sidebar, insets),
             }
@@ -1729,13 +2361,15 @@ impl Overlay {
         window: &Window,
         frame_input: &mut FrameInput,
         data: &mut AppEntities,
+        account: &mut yno::Account,
+        dump: Option<&world::Dump>,
         fading: Option<(String, f32)>,
     ) -> bool {
         // Guard the very first frame, which reports no elapsed time at all.
         let elapsed = (frame_input.elapsed_time as f32).max(1e-3);
         self.fps += (1000.0 / elapsed - self.fps) * (elapsed / FPS_WINDOW_MS).min(1.0);
 
-        let panel = self.panel(window, frame_input, data, fading);
+        let panel = self.panel(window, frame_input, data, account, dump, fading);
         if let Some(language) = panel.language {
             i18n::speak(language);
         }
@@ -1761,6 +2395,13 @@ impl Overlay {
         // Every frame, cleared included: the row stops pointing by no longer being hovered, which
         // is a frame that says nothing rather than a frame that says to stop.
         data.pointed = panel.pointed;
+        // Out here rather than in the panel, because the account is what a pretence is laid on and
+        // the panel is handed only what it draws. The English name: it is what the two sides of
+        // the join agree on, and the world is nameless on screen precisely because it is unvisited.
+        // See [`yno::Account::pretend`].
+        if let Some(world) = panel.revealed {
+            account.pretend(data.titles[world].en.clone());
+        }
         // Framing again rather than only from here on: the button is pressed to be taken there
         // now, whether or not the camera had already arrived where it was.
         if panel.refit {
@@ -1795,6 +2436,19 @@ impl Overlay {
             data.hub_repulsion = panel.hub_repulsion;
             data.apply_node_masses();
         }
+        // Ahead of the early return below, because two of the three do not change the simulation's
+        // own parameters and would never be written down if this waited for one that did. Held off
+        // while a slider is under the hand for the reason the UI scale is: a store is not
+        // something to write to every frame of a drag.
+        let layout = Layout {
+            dimensions: panel.dimensions,
+            layered: panel.layered,
+            hub_repulsion: data.hub_repulsion,
+        };
+        if layout != self.layout && !self.gui.context().egui_is_using_pointer() {
+            self.layout = layout;
+            layout.remember();
+        }
 
         let was = data.graph.parameters();
         if panel.dimensions == was.dimensions && panel.layered == was.dag_level_distance.is_some() {
@@ -1803,15 +2457,8 @@ impl Overlay {
         let parameters = data.graph.parameters_mut();
         let reseed = panel.dimensions != parameters.dimensions;
         parameters.dimensions = panel.dimensions;
-        let (spacing, slack, force_charge) = match panel.dimensions {
-            Dimensions::Two => (
-                DAG_LEVEL_DISTANCE_2D,
-                DAG_LEVEL_MICROSTEP * DAG_LEVEL_SLACK_MICROSTEPS_2D,
-                FORCE_CHARGE_2D,
-            ),
-            Dimensions::Three => (DAG_LEVEL_DISTANCE, 0.0, FORCE_CHARGE),
-        };
-        parameters.dag_level_distance = panel.layered.then_some(spacing);
+        let (spacing, slack, force_charge) = layout.parameters();
+        parameters.dag_level_distance = spacing;
         parameters.dag_level_slack = slack;
         parameters.force_charge = force_charge;
         // A switch rearranges the whole layout rather than nudging it, so it gets a full
@@ -1901,7 +2548,14 @@ impl Panel {
     ///
     /// The tab bar stands outside the scroll, so it stays reachable however far down a list the
     /// person has read.
-    fn window(&mut self, ui: &mut egui::Ui, read: &PanelData, sidebar: &mut Sidebar) {
+    fn window(
+        &mut self,
+        ui: &mut egui::Ui,
+        read: &PanelData,
+        sidebar: &mut Sidebar,
+        account: &mut yno::Account,
+        dump: Option<&world::Dump>,
+    ) {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut sidebar.tab, Tab::Worlds, t!("tab-worlds"));
             ui.selectable_value(&mut sidebar.tab, Tab::Authors, t!("tab-authors"));
@@ -1926,7 +2580,7 @@ impl Panel {
             Tab::Worlds => self.graph(ui, read, &mut sidebar.worlds),
             Tab::Authors => self.authors(ui, read, &mut sidebar.authors),
             Tab::Versions => self.versions(ui, read, &mut sidebar.versions),
-            Tab::Settings => self.settings(ui /*, read*/),
+            Tab::Settings => self.settings(ui, sidebar, account, dump),
         });
     }
 
@@ -2090,7 +2744,7 @@ impl Panel {
                     if ui
                         .add(
                             sheet
-                                .picture(world, CATALOG_THUMBNAIL_HEIGHT)
+                                .picture(data.cells[world], CATALOG_THUMBNAIL_HEIGHT)
                                 .sense(egui::Sense::click()),
                         )
                         .on_hover_text(data.titles[world].show())
@@ -2109,10 +2763,13 @@ impl Panel {
         let mut lit = None;
         ui.horizontal(|ui| {
             ui.strong(data.titles[world].show());
-            if ui
-                .button(ICON_OPEN_IN_NEW)
-                .on_hover_text(t!("menu-open-wiki"))
-                .clicked()
+            // Only where there is a name to look up. A world the player has not been to is not
+            // named here, and a page opened on it would say what this is holding back.
+            if data.titles[world].known()
+                && ui
+                    .button(ICON_OPEN_IN_NEW)
+                    .on_hover_text(t!("menu-open-wiki"))
+                    .clicked()
             {
                 open_in_browser(&data.titles[world].wiki_url());
             }
@@ -2135,7 +2792,7 @@ impl Panel {
                 lit = Some(Highlight::Connection(parent, world));
             }
         });
-        if speaking_japanese() {
+        if speaking_japanese() && data.titles[world].known() {
             ui.horizontal(|ui| {
                 ui.label("英名");
                 let link = world::wiki_url(&data.titles[world].en);
@@ -2175,16 +2832,25 @@ impl Panel {
 
     /// The knobs: set once and then left alone, which is why they are not in the way of the
     /// reading tabs.
-    fn settings(&mut self, ui: &mut egui::Ui /*, read: &PanelData*/) {
+    fn settings(
+        &mut self,
+        ui: &mut egui::Ui,
+        sidebar: &mut Sidebar,
+        account: &mut yno::Account,
+        dump: Option<&world::Dump>,
+    ) {
         self.language(ui);
-        ui.add(egui::Slider::new(&mut self.hub_repulsion, 0.5..=1.5).text(t!("hub-push")))
-            .on_hover_text(t!("hub-push-hint"));
+        ui.add(
+            egui::Slider::new(&mut self.hub_repulsion, HUB_REPULSION_RANGE).text(t!("hub-push")),
+        )
+        .on_hover_text(t!("hub-push-hint"));
         ui.add(egui::Slider::new(&mut self.ui_scale, UI_SCALE_RANGE).text(t!("ui-scale")))
             .on_hover_text(t!("ui-scale-hint"));
         // The way back to a panel that was dismissed for good, so ticking that box is not a
         // door that locks behind the person who ticked it.
         self.guide |= ui.button(t!("show-controls")).clicked();
         Self::clear_cache(ui);
+        Self::yno(ui, sidebar, account, dump);
 
         if ui
             .hyperlink_to(
@@ -2204,6 +2870,131 @@ impl Panel {
             .clicked()
         {
             open_in_browser("https://explorer.yumemiru.dev/android");
+        }
+    }
+
+    /// The player's own game: signing in to YNOproject, and drawing only as much of the graph as
+    /// that account has seen.
+    ///
+    /// Nothing of `self`, because none of it is a decision the frame takes and applies afterwards:
+    /// the account owns what it is doing and is told here directly, and what comes of it is a
+    /// graph built again rather than anything this panel draws. See [`App::draw`].
+    fn yno(
+        ui: &mut egui::Ui,
+        sidebar: &mut Sidebar,
+        account: &mut yno::Account,
+        dump: Option<&world::Dump>,
+    ) {
+        ui.separator();
+        ui.strong(t!("yno"));
+        match account.state() {
+            yno::State::SignedOut => {}
+            yno::State::Working => {
+                ui.label(t!("yno-working"));
+            }
+            yno::State::SignedIn => {
+                ui.label(t!("yno-signed-in"));
+            }
+            // The server's own words, which are what say whether it was the password or the
+            // network. Read before the label, since the color is borrowed out of the same `ui`.
+            yno::State::Failed(why) => {
+                let color = ui.visuals().error_fg_color;
+                ui.colored_label(color, why);
+            }
+        }
+        // The refresh below is an answer to an ask that may already be out: a second one would be
+        // dropped on the floor, and a button that looks pressable but does nothing is worse than
+        // one that says it is busy. The same wait the label above is reporting.
+        let working = matches!(account.state(), yno::State::Working);
+        if account.signed_in() {
+            Self::completion(ui, account, dump);
+            let mut frontier = account.frontier_wanted();
+            if ui
+                .checkbox(&mut frontier, t!("frontier"))
+                .on_hover_text(t!("frontier-hint"))
+                .changed()
+            {
+                account.set_frontier(frontier);
+            }
+            ui.horizontal(|ui| {
+                // The account is read once at startup and then not again, while the person is off
+                // playing the game and walking into places. See [`yno::Account::refresh`].
+                if ui
+                    .add_enabled(!working, egui::Button::new(t!("yno-refresh")))
+                    .on_hover_text(t!("yno-refresh-hint"))
+                    .clicked()
+                {
+                    account.refresh();
+                }
+                // The session is forgotten here and left standing on YNOproject: ending it there
+                // would also sign out whatever browser the person plays the game in.
+                if ui.button(t!("yno-sign-out")).clicked() {
+                    account.sign_out();
+                }
+            });
+            return;
+        }
+        ui.label(t!("yno-hint"));
+        Self::promise(ui);
+        ui.add(egui::TextEdit::singleline(&mut sidebar.yno_user).hint_text(t!("yno-user")));
+        ui.add(
+            egui::TextEdit::singleline(&mut sidebar.yno_password)
+                .password(true)
+                .hint_text(t!("yno-password")),
+        );
+        let ready = !sidebar.yno_user.is_empty() && !sidebar.yno_password.is_empty();
+        if ui
+            .add_enabled(ready, egui::Button::new(t!("yno-sign-in")))
+            .clicked()
+        {
+            // Taken rather than copied: the password has no second use, and the field it was
+            // typed into is the only place it was ever held.
+            account.sign_in(
+                std::mem::take(&mut sidebar.yno_user),
+                std::mem::take(&mut sidebar.yno_password),
+            );
+        }
+    }
+
+    /// How much of the game this account has seen, measured against the whole dump.
+    ///
+    /// Against the dump rather than the graph beside it, because the graph may be the frontier --
+    /// a bar reading a hundred per cent the moment the switch was thrown would be measuring the
+    /// person against themselves. Computed here each frame it is drawn rather than kept, since it
+    /// is one pass over the titles and only on the frames this tab is open, and anything kept
+    /// would have to be thrown away again every time either side of it changed.
+    ///
+    /// Nothing at all where there is no dump to measure against, which is a frame that has no
+    /// graph in it either.
+    fn completion(ui: &mut egui::Ui, account: &yno::Account, dump: Option<&world::Dump>) {
+        let (Some(visited), Some(dump)) = (account.visited(), dump) else {
+            return;
+        };
+        let worlds = dump.worlds.len();
+        let seen = dump.visited(visited);
+        let share = seen as f32 / worlds.max(1) as f32;
+        ui.add(egui::ProgressBar::new(share).text(t!(
+            "yno-completion",
+            seen = seen,
+            worlds = worlds,
+            percent = format!("{:.1}", share * 100.0)
+        )))
+        .on_hover_text(t!("yno-completion-hint"));
+    }
+
+    /// What signing in here does with the account, said before anyone types a password into it.
+    ///
+    /// Beside the fields rather than behind a link, because it is the one thing a person has to
+    /// know at the moment they are deciding: this app reads where they have been and writes
+    /// nothing. The link is for whoever would rather read the code than the promise, and points at
+    /// the file that makes it rather than at the project.
+    fn promise(ui: &mut egui::Ui) {
+        ui.label(t!("yno-promise"));
+        if ui
+            .hyperlink_to(format!("{GITHUB}  {}", t!("yno-source")), YNO_SOURCE)
+            .clicked()
+        {
+            open_in_browser(YNO_SOURCE);
         }
     }
 
@@ -2300,6 +3091,16 @@ impl Panel {
         match read.selected {
             None => {
                 ui.label(t!("nothing-selected"));
+                // Only where there is something to offer, which is a run drawing a frontier that
+                // still has an unwalked way in it. See [`untaken`].
+                if !data.untaken.is_empty()
+                    && ui
+                        .link(t!("untaken-worlds"))
+                        .on_hover_text(t!("untaken-worlds-hint"))
+                        .clicked()
+                {
+                    self.lit = Some(Some(Highlight::Untaken));
+                }
             }
             Some(Highlight::Route(world)) => {
                 self.world_info(ui, data, world);
@@ -2397,6 +3198,16 @@ impl Panel {
                     self.world_row(ui, world, false, data.titles[world].show());
                 }
             }
+            // The order is the whole of what this list says, so its rows are bare titles like
+            // every other list of worlds: what ranked them is said once, above them.
+            Some(Highlight::Untaken) => {
+                ui.strong(t!("untaken-worlds"));
+                ui.label(t!("untaken-worlds-hint"));
+                ui.separator();
+                for &world in &data.untaken {
+                    self.world_row(ui, world, false, data.titles[world].show());
+                }
+            }
             // A layer is a shell rather than a list: it is read off the graph, so the panel only
             // says which shell is lit and how much of the game sits on it.
             Some(Highlight::Layer(depth)) => {
@@ -2482,16 +3293,30 @@ impl Panel {
                     if data.descendants[world] > 0 && ui.button(t!("menu-descendants")).clicked() {
                         self.lit = Some(Some(Highlight::Descendants(world)));
                     }
-                    if ui.button(t!("menu-open-wiki")).clicked() {
+                    let named = data.titles[world].known();
+                    if named && ui.button(t!("menu-open-wiki")).clicked() {
                         open_in_browser(&data.titles[world].wiki_url());
                         self.menu_taken = true;
                     }
-                    if speaking_japanese() && ui.button("海外wikiで見る").clicked() {
+                    if named && speaking_japanese() && ui.button("海外wikiで見る").clicked() {
                         open_in_browser(&world::wiki_url(&data.titles[world].en));
                         self.menu_taken = true;
                     }
                     if !data.maps[world].is_empty() && ui.button(t!("world-map-hint")).clicked() {
                         self.mapped = Some(world);
+                        self.menu_taken = true;
+                    }
+                    // Only for a world the player has not been to, which is the only kind there is
+                    // anything to reveal about -- and a kind that exists at all only while the
+                    // graph is a frontier, so the entry is not there to be wondered at in an
+                    // ordinary run. See [`yno::Account::pretend`].
+                    if !named
+                        && ui
+                            .button(t!("menu-reveal"))
+                            .on_hover_text(t!("menu-reveal-hint"))
+                            .clicked()
+                    {
+                        self.revealed = Some(world);
                         self.menu_taken = true;
                     }
                 });
@@ -2910,6 +3735,7 @@ impl AppEntities {
             Some(Highlight::Version(version)) => self.versions[version].worlds.clone(),
             Some(Highlight::Layer(depth)) => self.layer(depth),
             Some(Highlight::Connection(at, far)) => vec![at, far],
+            Some(Highlight::Untaken) => self.untaken.clone(),
         }
     }
 
@@ -2998,15 +3824,43 @@ impl AppEntities {
         for node in highlighted {
             on_route[node] = true;
         }
+        self.bounds_of(&on_route)
+    }
+
+    /// The sphere holding the worlds still coming into the graph, for the camera to move onto as
+    /// they arrive: what a refresh turned up is what a person pressed refresh to see, and it may
+    /// be nowhere near the part of the map they were looking at. `None` once the arrival is over,
+    /// which is what hands the camera back. See [`Arrivals`].
+    ///
+    /// Framed the way [`Highlight::Connection`] is framed, and for the same reason: it holds both
+    /// ends of what it is about rather than only the far one. Both ends are in the arrival itself
+    /// -- the world the person revealed is turning over and so is one of them, and so is every
+    /// world they have walked into since the last refresh. Not the arrivals' neighbours: a new
+    /// world may join back to somewhere the player has been that is nowhere near the rest of it,
+    /// and one edge like that drags the sphere across the whole graph.
+    fn arrival_bounds(&self) -> Option<Bounds> {
+        let arriving = self.arrivals.arriving()?;
+        let mut wanted = vec![false; self.titles.len()];
+        for world in arriving {
+            wanted[world] = true;
+        }
+        self.bounds_of(&wanted)
+    }
+
+    /// The sphere that holds a given set of worlds, pictures and all. See [`Self::highlight_bounds`].
+    fn bounds_of(&self, wanted: &[bool]) -> Option<Bounds> {
         // Paired with the radius, since both ends of the reach below need the two together.
         let mut positions = Vec::new();
         self.graph.visit_nodes(|node| {
             let world = node.index().index();
-            if on_route[world] {
+            if wanted[world] {
                 positions.push((world_pos(node.position()), self.node_radii[world]));
             }
         });
 
+        if positions.is_empty() {
+            return None;
+        }
         let low = positions
             .iter()
             .map(|&(position, radius)| position - vec3(radius, radius, radius))
@@ -3065,6 +3919,31 @@ impl AppEntities {
     /// their depth colors, the steps between the lit worlds are lit brighter still, and everything
     /// else is dimmed. With nothing selected the graph goes back to its plain colors.
     ///
+    /// What the graph that replaces this one should carry on from. See [`Before`].
+    fn before(&self) -> Before {
+        let mut standing = Standing::with_capacity(self.titles.len());
+        self.graph.visit_nodes(|node| {
+            standing.insert(
+                self.titles[node.index().index()].en.clone(),
+                node.position(),
+            );
+        });
+        let parameters = self.graph.parameters();
+        Before {
+            unvisited: self
+                .unvisited
+                .iter()
+                .map(|&world| self.titles[world].en.clone())
+                .collect(),
+            standing,
+            layout: Layout {
+                dimensions: parameters.dimensions,
+                layered: parameters.dag_level_distance.is_some(),
+                hub_repulsion: self.hub_repulsion,
+            },
+        }
+    }
+
     /// Uploads on its own rather than waiting for [`Self::rebuild_instances`], which a settled
     /// graph never reaches.
     fn repaint(&mut self) {
@@ -3153,8 +4032,13 @@ impl AppEntities {
         let radius = self.edge_radius();
         let thumbnails = &mut self.thumbnail_instances.transformations;
         thumbnails.clear();
+        let arrivals = &self.arrivals;
         self.graph.visit_nodes(|node| {
-            let radius = self.node_radii[node.index().index()];
+            let world = node.index().index();
+            // A world that has not arrived yet is drawn at none of its size, which is the whole of
+            // how an arrival looks: everything hung off the node quads -- the placeholder, the
+            // magnified picture, the glow -- is copied from these and comes in with them.
+            let radius = self.node_radii[world] * arrivals.grown(world);
             // Wider than tall, in the shape of the pictures: a world image is a screenshot of the
             // game, so a square node would either crop a third off every one of them or stretch
             // them all.
@@ -3174,6 +4058,12 @@ impl AppEntities {
             }
             let (from, to) = (world_pos(a.position()), world_pos(b.position()));
             let dir = to - from;
+            // As thin as the later of the two worlds it joins is small, so a line is not drawn to
+            // somewhere that is not there yet.
+            let radius = radius
+                * arrivals
+                    .grown(a.index().index())
+                    .min(arrivals.grown(b.index().index()));
             edges.push(
                 Mat4::from_translation(from)
                     * rotation_matrix_from_dir_to_dir(vec3(1.0, 0.0, 0.0), dir.normalize())
@@ -3183,6 +4073,45 @@ impl AppEntities {
         self.thumbnails.set_instances(&self.thumbnail_instances);
         self.edges.set_instances(&self.edge_instances);
         self.billboard = billboard;
+    }
+
+    /// Stands the placeholder over every world the player has not been to.
+    ///
+    /// Taken from the nodes' own quads rather than worked out again, so a placeholder is exactly
+    /// where and how big the world it stands for is, and dims with it. Lifted toward the camera
+    /// the way a magnified picture is, and for the same reason -- two coplanar quads leave the
+    /// depth test to pick between them per pixel. A translation composed onto the node's own
+    /// transformation, since translations commute: see [`AppEntities::magnified`], which builds
+    /// the same thing the long way round from a position it already has.
+    ///
+    /// Every frame, like the magnified pictures: what it copies is rebuilt whenever the layout
+    /// moves, the camera turns, or a selection repaints.
+    fn place_unvisited(&mut self, context: &Context, camera: &Camera) {
+        if self.unvisited.is_empty() && !self.arrivals.turning() {
+            return;
+        }
+        let forward = camera.view_direction();
+        let nodes = &self.thumbnail_instances;
+        let painted = nodes.colors.as_ref();
+        // The worlds that wear the placeholder this frame: the ones that have no picture of their
+        // own, and the ones still shrinking out from under it. See [`Arrivals::veiled`].
+        let wearing = self.unvisited.iter().copied().chain(self.arrivals.veiled());
+        let (transformations, colors) = (
+            &mut self.unvisited_quads.transformations,
+            self.unvisited_quads.colors.as_mut().unwrap(),
+        );
+        transformations.clear();
+        colors.clear();
+        for world in wearing {
+            let Some(node) = nodes.transformations.get(world) else {
+                continue;
+            };
+            transformations.push(
+                Mat4::from_translation(-forward * (self.node_radii[world] * detail::LIFT)) * node,
+            );
+            colors.push(painted.map_or(Srgba::WHITE, |painted| painted[world]));
+        }
+        self.detail.place_unvisited(context, &self.unvisited_quads);
     }
 
     /// Walks the dashes of every one-way connection one step further along it and rebuilds them
@@ -3197,12 +4126,19 @@ impl AppEntities {
         let phase = self.dash_phase;
         let radius = self.edge_radius() * EDGE_DASH_WIDTH;
         let radii = &self.node_radii;
+        let arrivals = &self.arrivals;
         let dashes = &mut self.dash_instances.transformations;
         dashes.clear();
         self.graph.visit_edges(|a, b, data| {
             if !data.user_data {
                 return;
             }
+            // Thin with whichever end is later, as the plain lines are: a one-way passage into a
+            // world that has not arrived is no more drawn than a line to one would be.
+            let radius = radius
+                * arrivals
+                    .grown(a.index().index())
+                    .min(arrivals.grown(b.index().index()));
             let (from, to) = (world_pos(a.position()), world_pos(b.position()));
             let dir = to - from;
             let along = rotation_matrix_from_dir_to_dir(vec3(1.0, 0.0, 0.0), dir.normalize());
@@ -3211,7 +4147,7 @@ impl AppEntities {
             // half-width, which is the furthest a quad ever reaches from the world it draws, so a
             // dash clears it whichever way the billboard has been turned. See
             // [`Self::rebuild_instances`], which draws the quads that wide.
-            let clear = |node: usize| radii[node] * thumbnails::ASPECT;
+            let clear = |node: usize| radii[node] * arrivals.grown(node) * thumbnails::ASPECT;
             let start = clear(a.index().index());
             let span = dir.magnitude() - start - clear(b.index().index());
             // Two worlds closer together than their own pictures leave nothing to draw a run in.
@@ -3253,8 +4189,8 @@ impl AppEntities {
         // Both failures are already logged where they are found, and both leave the graph drawn
         // exactly as it was before thumbnails existed.
         let Some(atlas) = loaded else { return };
-        self.sheet = thumbnails::Sheet::new(egui, self.titles.len(), &atlas);
-        let Some(cells) = thumbnails::cells(self.titles.len(), &atlas) else {
+        self.sheet = thumbnails::Sheet::new(egui, self.packed, &atlas);
+        let Some(cells) = thumbnails::cells(self.packed, &self.cells, &atlas) else {
             return;
         };
         self.thumbnail_instances.texture_transformations = Some(cells);
@@ -3319,6 +4255,14 @@ impl AppEntities {
     /// because its node is drawn wider than [`detail::SWITCH_PIXELS`] and is on screen at all, and
     /// it carries the quad it would have been drawn on so that the full picture lands exactly over
     /// its own thumbnail.
+    ///
+    /// A world in the middle of becoming itself is asked for at the size it is about to be rather
+    /// than the size it is at this instant. Two things follow, and both are wanted. It is drawn on
+    /// a quad that shrinks and grows with its node, so the full picture turns over along with the
+    /// atlas one beneath it instead of standing over the whole thing unmoved. And it is asked for
+    /// throughout, including at the moment it is too small to see: the picture is fetched while the
+    /// placeholder is still shrinking away, so what grows back is the world's own picture from the
+    /// first frame of it rather than a thumbnail that pops sharp part way up. See [`Arrivals`].
     fn magnified(&self, camera: &Camera, viewport: Viewport) -> Vec<detail::Magnified> {
         let billboard = billboard(camera);
         let forward = camera.view_direction();
@@ -3341,11 +4285,14 @@ impl AppEntities {
             {
                 return;
             }
-            let radius = self.node_radii[world];
-            let width = drawn_width(camera, radius, position);
+            let full = self.node_radii[world];
+            let grown = self.arrivals.grown(world);
+            // Ranked and admitted at the size it is settling at, drawn at the size it is now.
+            let width = drawn_width(camera, full, position);
             if width < detail::SWITCH_PIXELS {
                 return;
             }
+            let radius = full * grown;
             magnified.push((
                 width,
                 detail::Magnified {
@@ -3533,16 +4480,17 @@ fn loading_frame(ctx: &egui::Context, says: &str, failed: Option<&str>, opacity:
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             ui.set_opacity(opacity);
-            ui.horizontal(|ui| match failed {
-                // What went wrong is logged in full; on screen it is the one line, since there is
-                // nothing the reader can do with a URL and a status code beyond knowing the
-                // server is not answering.
-                Some(error) => {
-                    ui.label(says).on_hover_text(error);
-                }
-                None => {
-                    ui.add(egui::Spinner::new());
-                    ui.label(says);
+            ui.horizontal(|ui| {
+                // Whatever the frame is saying, it is saying it about something still going on:
+                // a run that could not reach the server is a run that is about to ask it again.
+                // See [`Dump::Waiting`].
+                ui.add(egui::Spinner::new());
+                let line = ui.label(says);
+                // What went wrong is logged in full; on screen it is offered to whoever goes
+                // looking for it, since there is nothing a reader can do with a URL and a status
+                // code beyond knowing the server is not answering.
+                if let Some(error) = failed {
+                    line.on_hover_text(error);
                 }
             });
         });
@@ -3994,6 +4942,47 @@ fn scaled(color: Srgba, brightness: f32) -> Srgba {
     Srgba::new(scale(color.r), scale(color.g), scale(color.b), color.a)
 }
 
+/// The worlds worth going back to, each with how many ways out of it nobody has walked: the
+/// places a player still has somewhere to go from.
+///
+/// A way out counts only where the player could actually take it. The far end has to be somewhere
+/// they have not been, and the passage has to be walkable in that direction — a connection they
+/// could only come back through leads nowhere they can get to, which is the same reading
+/// `world::Dump::showing` builds the frontier by. Counting one would offer a world for an exit it
+/// has not got, and the list would disagree with the graph beside it.
+///
+/// Ranked most first, ties by world so the list is the same every time it is built, and cut to
+/// [`UNTAKEN_WORLDS`]. Worlds with nothing untaken are left out rather than listed at zero: they
+/// are the answer to a different question.
+///
+/// The counts order the list and are then dropped: what the panel says is which worlds to go back
+/// to, and a number beside each would invite the reader to weigh two of them against each other,
+/// which is a question they did not ask.
+///
+/// Empty exactly when the graph has no frontier, which is what tells the panel whether to offer
+/// the list at all — read off the graph itself rather than off the account that asked for it, the
+/// same way the placeholders are. The two go together in both directions: a frontier world is in
+/// the graph only because some visited world has a walkable way out to it, and that way out is
+/// one of these.
+fn untaken(connections: &[Vec<world::Step>], unknown: &[bool]) -> Vec<usize> {
+    let mut ranked: Vec<(usize, usize)> = connections
+        .iter()
+        .enumerate()
+        .filter(|(world, _)| !unknown[*world])
+        .map(|(world, steps)| {
+            let ways = steps
+                .iter()
+                .filter(|step| step.out.is_some() && unknown[step.world])
+                .count();
+            (world, ways)
+        })
+        .filter(|(_, ways)| *ways > 0)
+        .collect();
+    ranked.sort_unstable_by_key(|&(world, ways)| (std::cmp::Reverse(ways), world));
+    ranked.truncate(UNTAKEN_WORLDS);
+    ranked.into_iter().map(|(world, _)| world).collect()
+}
+
 /// Per connection, the color it carries when nothing is selected.
 ///
 /// The depth ramp lives on the connections rather than on the worlds, which carry pictures: a
@@ -4048,4 +5037,200 @@ fn edge_colors(
         ));
     });
     colors
+}
+
+#[cfg(test)]
+mod tests {
+    use super::world;
+
+    /// A graph the person was already looking at, with `unvisited` of its worlds wearing the
+    /// placeholder.
+    fn before(standing: &[&str], unvisited: &[&str]) -> super::Before {
+        super::Before {
+            standing: standing
+                .iter()
+                .map(|name| ((*name).to_owned(), [0.0; 3]))
+                .collect(),
+            unvisited: unvisited.iter().map(|name| (*name).to_owned()).collect(),
+            layout: super::Layout::default(),
+        }
+    }
+
+    /// A connection to somewhere unknown counts as a way out only where the player could walk it.
+    /// The frontier is built outward along walkable steps, so counting a passage they could only
+    /// come back through would offer a world an exit it has not got.
+    #[test]
+    fn only_ways_out_a_player_could_walk_are_counted_as_untaken() {
+        let step = |world, out: bool| world::Step {
+            world,
+            out: out.then(world::Ask::free),
+            back: Some(world::Ask::free()),
+        };
+        // 0 visited, joined to three unknowns: one it can walk to, one it can only come back
+        // through, and one it can walk to again. 1..=3 are the frontier; 4 is visited.
+        let connections = vec![
+            vec![step(1, true), step(2, false), step(3, true), step(4, true)],
+            vec![step(0, true)],
+            vec![step(0, true)],
+            vec![step(0, true)],
+            vec![step(0, true)],
+        ];
+        let unknown = [false, true, true, true, false];
+        assert_eq!(super::untaken(&connections, &unknown), vec![0]);
+    }
+
+    /// The list is a ranking, so the busiest world has to come first however the dump orders them,
+    /// and it stops at [`super::UNTAKEN_WORLDS`] however many worlds have somewhere to go.
+    #[test]
+    fn untaken_worlds_are_ranked_most_first_and_cut_to_the_ten_named() {
+        let out = |world| world::Step {
+            world,
+            out: Some(world::Ask::free()),
+            back: Some(world::Ask::free()),
+        };
+        // Twelve visited worlds, each joined to a different number of unknowns: world 0 to one of
+        // them, world 11 to twelve. The unknowns are numbered above all of them.
+        let visited = 12;
+        let mut connections: Vec<Vec<world::Step>> = (0..visited * 2).map(|_| Vec::new()).collect();
+        let mut unknown = vec![false; connections.len()];
+        for world in 0..visited {
+            for nth in 0..=world {
+                let far = visited + nth;
+                unknown[far] = true;
+                connections[world].push(out(far));
+                connections[far].push(out(world));
+            }
+        }
+        // Most first: world 11 has twelve ways out, and world 2 -- with three -- is the last to
+        // make the cut.
+        let ranked = super::untaken(&connections, &unknown);
+        assert_eq!(ranked, vec![11, 10, 9, 8, 7, 6, 5, 4, 3, 2]);
+    }
+
+    /// A run drawing the whole game has no unknown world in it, so it has nothing untaken -- which
+    /// is what keeps the panel from offering a list that would say the same thing about every
+    /// world in the graph.
+    #[test]
+    fn a_graph_with_no_frontier_has_nothing_untaken() {
+        let both = |world| world::Step {
+            world,
+            out: Some(world::Ask::free()),
+            back: Some(world::Ask::free()),
+        };
+        let connections = vec![vec![both(1)], vec![both(0)]];
+        assert!(super::untaken(&connections, &[false, false]).is_empty());
+    }
+
+    /// A graph replacing one that had none of its worlds grows all of them in, spaced out, and is
+    /// done with once the last of them has finished.
+    #[test]
+    fn worlds_the_graph_before_did_not_have_arrive_one_after_another() {
+        let before = before(&["Nexus"], &[]);
+        let mut arrivals = super::Arrivals::new(
+            &["Nexus", "The Nexus Void", "Marijuana Goddess World"],
+            &[false; 3],
+            &[Some(0), Some(1), Some(2)],
+            Some(&before),
+        );
+        // Already standing there, so it is drawn at its own size from the first frame.
+        assert_eq!(arrivals.grown(0), 1.0);
+        assert_eq!(arrivals.grown(1), 0.0);
+        // Far enough in for the first of the new ones to be part way and the second not yet due.
+        assert!(arrivals.tick(super::ARRIVAL_STAGGER * 0.5));
+        assert!(arrivals.grown(1) > 0.0 && arrivals.grown(1) < 1.0);
+        assert_eq!(arrivals.grown(2), 0.0);
+        // Past the last of them, which is where they stop being redrawn every frame.
+        assert!(!arrivals.tick(super::ARRIVAL_SECONDS + super::ARRIVAL_WINDOW));
+        assert_eq!(arrivals.grown(2), 1.0);
+    }
+
+    /// A world the player has been to since is turned over where it stands rather than arriving:
+    /// away as the placeholder, back as itself, and the swap at the size where neither shows.
+    #[test]
+    fn a_world_that_has_become_known_shrinks_away_and_grows_back() {
+        let before = before(&["Nexus", "Sugar Hole"], &["Sugar Hole"]);
+        let mut arrivals = super::Arrivals::new(
+            &["Nexus", "Sugar Hole"],
+            // No longer a placeholder, which is the whole of what has changed about it.
+            &[false, false],
+            &[Some(0), Some(1)],
+            Some(&before),
+        );
+        // It starts at its full size, because it was already standing there.
+        assert_eq!(arrivals.grown(1), 1.0);
+        assert_eq!(arrivals.veiled().collect::<Vec<_>>(), vec![1]);
+        // Half way out: smaller, and still wearing the placeholder it is leaving.
+        arrivals.tick(super::ARRIVAL_SECONDS * 0.5);
+        assert!(arrivals.grown(1) > 0.0 && arrivals.grown(1) < 1.0);
+        assert_eq!(arrivals.veiled().collect::<Vec<_>>(), vec![1]);
+        // Half way back: the placeholder is gone, and what is growing is the world itself.
+        arrivals.tick(super::ARRIVAL_SECONDS);
+        assert!(arrivals.grown(1) > 0.0 && arrivals.grown(1) < 1.0);
+        assert!(arrivals.veiled().next().is_none());
+        // And it ends at the size it started, having become something else on the way.
+        assert!(!arrivals.tick(super::ARRIVAL_SECONDS));
+        assert_eq!(arrivals.grown(1), 1.0);
+    }
+
+    /// A world that is still a placeholder has not become anything, however much of the graph
+    /// around it has changed.
+    #[test]
+    fn a_world_still_unvisited_is_not_turned_over() {
+        let before = before(&["Nexus", "Sugar Hole"], &["Sugar Hole"]);
+        let arrivals = super::Arrivals::new(
+            &["Nexus", "Sugar Hole"],
+            &[false, true],
+            &[Some(0), Some(1)],
+            Some(&before),
+        );
+        assert!(!arrivals.turning());
+        assert!(arrivals.arriving().is_none());
+    }
+
+    /// The camera goes on being given something to follow after the last world has finished
+    /// growing, because that is when the layout is still settling around it.
+    #[test]
+    fn what_arrived_is_still_framed_after_it_has_finished_growing() {
+        let before = before(&["Nexus"], &[]);
+        let mut arrivals = super::Arrivals::new(
+            &["Nexus", "Sugar Hole"],
+            &[false; 2],
+            &[Some(0), Some(1)],
+            Some(&before),
+        );
+        // Past the growing, which is what stops the geometry being rebuilt every frame.
+        assert!(!arrivals.tick(super::ARRIVAL_SECONDS + 0.1));
+        assert_eq!(arrivals.grown(1), 1.0);
+        // Still something to frame, though, and still the world that arrived.
+        assert_eq!(arrivals.arriving().unwrap().collect::<Vec<_>>(), vec![1]);
+        // And past the following, which is where an arrival stops costing anything at all.
+        assert!(!arrivals.tick(super::ARRIVAL_TRACKED_SECONDS));
+        assert!(arrivals.arriving().is_none());
+    }
+
+    /// The first graph of a run has nothing to arrive into, and a rebuild that turns up no new
+    /// world has nothing to arrive: both are simply there.
+    #[test]
+    fn a_graph_with_nothing_new_in_it_animates_nothing() {
+        for standing in [None, Some(before(&["Nexus"], &[]))] {
+            let mut arrivals =
+                super::Arrivals::new(&["Nexus"], &[false], &[Some(0)], standing.as_ref());
+            assert_eq!(arrivals.grown(0), 1.0);
+            assert!(!arrivals.tick(0.016));
+        }
+    }
+
+    /// However many worlds turn up at once, watching them all in takes about as long. See
+    /// [`super::ARRIVAL_WINDOW`].
+    #[test]
+    fn a_great_many_worlds_arriving_still_arrive_within_the_window() {
+        let names: Vec<String> = (0..1500).map(|world| world.to_string()).collect();
+        let arrivals = super::Arrivals::new(
+            &names.iter().map(String::as_str).collect::<Vec<_>>(),
+            &vec![false; names.len()],
+            &vec![Some(0); names.len()],
+            Some(&before(&[], &[])),
+        );
+        assert!(arrivals.last <= super::ARRIVAL_WINDOW);
+    }
 }

@@ -49,10 +49,16 @@ static JAPANESE_AUTHOR_OVERRIDES: phf::Map<&str, &str> = phf::phf_map! {
 };
 
 /// The dump as it is published: the worlds, and the release history the wiki dates them by.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Dump {
     #[serde(rename = "worldData")]
     pub worlds: Vec<World>,
+    /// How many cells the thumbnail atlas has to hold: every world this dump published, counted
+    /// once, when it was read. Carried through [`Dump::showing`] rather than measured again,
+    /// because a world's cell is its place in the whole dump and a frontier keeps only part of
+    /// it. See [`World::cell`] and `thumbnails`.
+    #[serde(skip)]
+    pub packed: usize,
     /// Every release the wiki knows of, newest first. Most of them added no world at all, so the
     /// catalog is built out of [`Dump::versions`] rather than out of this directly.
     #[serde(rename = "versionInfoData")]
@@ -65,14 +71,14 @@ pub struct Dump {
 }
 
 /// One name the wiki credits, in each of the languages it publishes it in.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Credit {
     name: String,
     #[serde(rename = "nameJP")]
     name_jp: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct World {
     /// As the wiki's English pages name it, which is also what its page is at: see [`wiki_url`].
     pub title: String,
@@ -106,6 +112,33 @@ pub struct World {
     #[serde(default)]
     secret: bool,
     pub connections: Vec<Connection>,
+    /// Which cell of the thumbnail atlas holds this world's picture: its place among the worlds
+    /// the app draws, fixed when the dump was read and kept through every later filtering of it.
+    /// Written by [`parse`], and by nothing else. See [`World::cell`].
+    #[serde(skip)]
+    packed_at: usize,
+    /// Whether the player has never stood here, in a run that is only showing them where they
+    /// have been. Such a world is drawn only because it touches one they have: it is named for
+    /// what it is rather than where it is, carries the placeholder picture rather than its own,
+    /// and has no maps and no page to open. See [`Dump::showing`].
+    #[serde(skip)]
+    unknown: bool,
+}
+
+/// What a world the player has not been to is called instead of its name, in whichever language
+/// the app is being spoken.
+///
+/// Held rather than built where it is read, because [`Title::show`] hands out a borrow of the name
+/// and a message built on the spot would not outlive the call. One slot per language, so choosing
+/// a language renames these worlds along with everything else on screen.
+fn unvisited() -> &'static str {
+    static ENGLISH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    static JAPANESE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let held = match super::i18n::speaking_japanese() {
+        true => &JAPANESE,
+        false => &ENGLISH,
+    };
+    held.get_or_init(|| t!("unvisited-location"))
 }
 
 /// A world's name, in each of the languages the dump publishes one in.
@@ -118,6 +151,11 @@ pub struct Title {
     pub en: String,
     /// The Japanese name, for the worlds the dump has one for.
     jp: Option<String>,
+    /// Whether the names are held back: a world the player has not been to, in a run that is only
+    /// showing them where they have been. Both names are still carried -- the graph is built out
+    /// of the same dump either way -- and neither is shown, searched, or opened. See
+    /// [`Title::known`] and [`Dump::showing`].
+    unknown: bool,
 }
 
 impl Title {
@@ -127,10 +165,21 @@ impl Title {
     /// Read rather than stored, so choosing a language renames every world on screen without
     /// anything having to be rebuilt.
     pub fn show(&self) -> &str {
+        if self.unknown {
+            // Leaked once and leaked for good, so the placeholder is what every reading of the
+            // name gets rather than something the callers have to remember to substitute.
+            return unvisited();
+        }
         match &self.jp {
             Some(jp) if super::i18n::speaking_japanese() => jp,
             _ => &self.en,
         }
+    }
+
+    /// Whether this world may be named, searched for, and looked up. False for a world the player
+    /// has not been to: see [`Title::unknown`].
+    pub fn known(&self) -> bool {
+        !self.unknown
     }
 
     /// Where `needle` falls in this name, and how much name is left over, for whichever of the
@@ -140,6 +189,9 @@ impl Title {
     /// not have to be reading in the other language to find it. `needle` is expected already
     /// lowercased, since one is matched against every world.
     pub fn find(&self, needle: &str) -> Option<(usize, usize)> {
+        if self.unknown {
+            return None;
+        }
         self.names()
             .filter_map(|name| Some((name.to_lowercase().find(needle)?, name.len())))
             .min()
@@ -160,9 +212,13 @@ impl Title {
 
     /// Every name this is known by, English first. What a search reads.
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        [Some(self.en.as_str()), self.jp.as_deref()]
-            .into_iter()
-            .flatten()
+        let named = !self.unknown;
+        [
+            named.then_some(self.en.as_str()),
+            self.jp.as_deref().filter(|_| named),
+        ]
+        .into_iter()
+        .flatten()
     }
 }
 
@@ -182,7 +238,15 @@ impl World {
         Title {
             en: self.title.clone(),
             jp: self.title_jp.clone(),
+            unknown: self.unknown,
         }
+    }
+
+    /// Which cell of the thumbnail atlas to draw this world out of. `None` for a world the player
+    /// has not been to, which wears the atlas's placeholder rather than its own picture -- see
+    /// [`World::unknown`] and `thumbnails::cells`.
+    pub fn cell(&self) -> Option<usize> {
+        (!self.unknown).then_some(self.packed_at)
     }
 
     /// The maps the wiki has of this world, in the order it lists them. Empty for the few hundred
@@ -206,7 +270,7 @@ impl World {
 }
 
 /// One release, as the dump's own version history lists it.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Release {
     name: String,
     /// ISO 8601, of which only the day is ever shown. `None` where the wiki does not date it.
@@ -249,7 +313,7 @@ impl Author {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct Connection {
     #[serde(rename = "targetId")]
     pub target_id: usize,
@@ -269,7 +333,7 @@ pub struct Connection {
 ///
 /// It publishes a Japanese rendering beside the English, but only ever for the seasons, and those
 /// are four fixed words this app names for itself: see `gate-seasonal-detail`. So serde skips it.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct TypeParams {
     params: Option<String>,
 }
@@ -304,6 +368,15 @@ pub struct Ask {
 }
 
 impl Ask {
+    /// A way through that demands nothing, for tests that care only that there is one.
+    #[cfg(test)]
+    pub fn free() -> Self {
+        Self {
+            gate: Gate::Free,
+            detail: None,
+        }
+    }
+
     /// What it asks, in the words the panel names it by: the wiki's own where it has any, and the
     /// bare name of the condition otherwise. Empty for a connection that asks nothing.
     pub fn asks(&self) -> String {
@@ -561,7 +634,7 @@ fn proxied_images() -> &'static str {
 /// Where the page was served from, which is the only host it may ask for anything without being
 /// let: see [`proxied_images`] and [`url`].
 #[cfg(target_family = "wasm")]
-fn origin() -> &'static str {
+pub(super) fn origin() -> &'static str {
     static ORIGIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     ORIGIN.get_or_init(|| {
         web_sys::window()
@@ -704,6 +777,13 @@ async fn download(url: &str) -> Result<String, super::fetch::Error> {
 fn parse(json: &str) -> serde_json::Result<Dump> {
     let mut dump = serde_json::from_str::<Dump>(json)?;
     hide(&mut dump.worlds);
+    // After the secrets have gone and before anything else can take a world out, because this is
+    // the numbering `tools/atlas` packed the thumbnails against. Every later reading of the dump
+    // carries it rather than counting again: see [`Dump::showing`].
+    dump.packed = dump.worlds.len();
+    for (at, world) in dump.worlds.iter_mut().enumerate() {
+        world.packed_at = at;
+    }
     // Every picture address the app fetches at runtime passes through here, and only here: the
     // world's own and its maps'. See [`WIKI_IMAGES`]. The atlas tool reads `data.json` itself and
     // is not touched by this, which is right -- it runs at build time and has no page to be on.
@@ -733,20 +813,32 @@ fn parse(json: &str) -> serde_json::Result<Dump> {
 /// the two agree on what a cell counts, or every picture after the first secret is somewhere
 /// else's.
 fn hide(worlds: &mut Vec<World>) {
+    let keep: Vec<bool> = worlds.iter().map(|world| !world.secret).collect();
+    let dropped = keep.iter().filter(|kept| !**kept).count();
+    if dropped == 0 {
+        return;
+    }
+    log::info!("{dropped} worlds are not for showing");
+    retain(worlds, &keep);
+}
+
+/// Keeps the worlds `keep` says yes to and renumbers what is left, dropping every connection to a
+/// world that has gone.
+///
+/// The one place a world leaves the graph, so the renumbering is written once however many
+/// reasons there are to drop one: the secrets the dump marks, and the worlds a frontier has not
+/// reached. See [`hide`] and [`Dump::showing`].
+fn retain(worlds: &mut Vec<World>, keep: &[bool]) {
     let mut kept = 0;
-    let at: Vec<Option<usize>> = worlds
+    let at: Vec<Option<usize>> = keep
         .iter()
-        .map(|world| {
-            (!world.secret).then(|| {
+        .map(|&keep| {
+            keep.then(|| {
                 kept += 1;
                 kept - 1
             })
         })
         .collect();
-    if kept == worlds.len() {
-        return;
-    }
-    log::info!("{} worlds are not for showing", worlds.len() - kept);
 
     let mut world = 0;
     worlds.retain(|_| {
@@ -776,6 +868,95 @@ fn same_release(name: &str) -> String {
 }
 
 impl Dump {
+    /// How many of the worlds this dump carries a player has stood in.
+    ///
+    /// The dump is the yardstick rather than YNOproject's own catalog, because the dump is what
+    /// is on screen: a share of the game measured against a list of places this app never draws
+    /// would be a number about somebody else's map. It also means the count is under what
+    /// YNOproject would say, since it records rooms the wiki keeps no world for -- the debug room
+    /// and its like. See `yno`, which is where the titles come from, and [`Dump::showing`], which
+    /// is the same reading of them.
+    pub fn visited(&self, visited: &std::collections::HashSet<String>) -> usize {
+        self.worlds
+            .iter()
+            .filter(|world| visited.contains(&world.title))
+            .count()
+    }
+
+    /// The same dump cut back to what a player has actually seen: the worlds they have stood in,
+    /// and the ones a step beyond them, with nothing further in it at all.
+    ///
+    /// `visited` is titles as the wiki writes them, which is how YNOproject names the places it
+    /// records a player having been -- see `yno`. Matched by name because that is the only thing
+    /// the two lists share: the dump numbers worlds by the game's maps and YNOproject by its own
+    /// database, so neither side's ids mean anything to the other.
+    ///
+    /// The worlds a step beyond are kept so that the graph has an edge to grow at rather than
+    /// stopping dead at the last room the player walked into. A step the player could actually
+    /// take: a passage the dump lists but which cannot be walked in that direction leads nowhere
+    /// they can get to, and showing what is on the far side of it would be pointing at a place
+    /// this frontier is no way to reach. See [`walkable_steps`], which is the same reading of the
+    /// dump the routes are walked over.
+    ///
+    /// They are kept as places rather than as worlds: named for what they are, wearing the
+    /// placeholder picture, with no maps and no page, so the graph says there is something there
+    /// without saying what. See [`World::unknown`].
+    ///
+    /// A whole dump rather than a mask over this one, because taking a world out renumbers every
+    /// connection above it: the same reason [`hide`] rebuilds rather than skips. It costs one copy
+    /// of the dump each time the frontier changes, which is a person pressing a button.
+    pub fn showing(&self, visited: &std::collections::HashSet<String>) -> Dump {
+        let been: Vec<bool> = self
+            .worlds
+            .iter()
+            .map(|world| visited.contains(&world.title))
+            .collect();
+        // Outward only, along steps that can be walked: what is one move from somewhere the player
+        // has stood. A passage they could only come back through is not a way onward, so the world
+        // at the far end of it is not on the frontier however plainly the dump lists the two as
+        // joined.
+        let mut shown = been.clone();
+        for (from, onward) in walkable_steps(&self.worlds).into_iter().enumerate() {
+            if !been[from] {
+                continue;
+            }
+            for (to, _) in onward {
+                shown[to] = true;
+            }
+        }
+        log::info!(
+            "{} of the {} worlds visited, {} more within reach",
+            been.iter().filter(|been| **been).count(),
+            been.len(),
+            shown
+                .iter()
+                .zip(&been)
+                .filter(|(shown, been)| **shown && !**been)
+                .count(),
+        );
+
+        let mut worlds = self.worlds.clone();
+        for (world, &been) in worlds.iter_mut().zip(&been) {
+            if been {
+                continue;
+            }
+            world.unknown = true;
+            // Everything that would name the place by another road: the wiki's own captions say
+            // which world each map is of, and the full-size picture is the world itself. The
+            // atlas placeholder is what it is drawn as instead -- see [`World::cell`].
+            world.image = String::new();
+            world.map_url = None;
+            world.map_label = None;
+        }
+        retain(&mut worlds, &shown);
+        Dump {
+            worlds,
+            packed: self.packed,
+            releases: self.releases.clone(),
+            credits: self.credits.clone(),
+        }
+    }
+
     /// The releases that added worlds, newest first, each carrying what it added.
     ///
     /// Ordered by the version history, which is already newest first and is the only ordering the
@@ -858,6 +1039,9 @@ impl Dump {
                     name: Title {
                         en: by.author.clone(),
                         jp: jp.get(by.author.as_str()).map(|&name| name.to_owned()),
+                        // A name is a name: only worlds are ever held back, and never who made
+                        // one. See [`Dump::showing`].
+                        unknown: false,
                     },
                     worlds: Vec::new(),
                 });
@@ -1247,6 +1431,8 @@ mod tests {
             map_url: None,
             map_label: None,
             secret,
+            packed_at: 0,
+            unknown: false,
             connections: out
                 .iter()
                 .map(|&target_id| super::Connection {
@@ -1280,6 +1466,110 @@ mod tests {
             // room is gone rather than pointing at whoever took its place.
             [("Nexus", vec![1]), ("Sofa Room", vec![0])]
         );
+    }
+
+    /// A frontier keeps the worlds the player has stood in and the ones one step past them, and
+    /// nothing further. Getting the renumbering wrong here is as silent as getting it wrong in
+    /// [`super::hide`]: the graph still draws, with lines to the wrong worlds.
+    #[test]
+    fn a_frontier_keeps_one_step_past_what_was_visited() {
+        // A chain: 0 Nexus - 1 Sofa Room - 2 Far Room - 3 Farther Room, each listing only the
+        // step onward, so the step back has to be read off the far side's listing.
+        let mut dump = chain(&["Nexus", "Sofa Room", "Far Room", "Farther Room"], 0);
+        dump.packed = dump.worlds.len();
+        for (at, world) in dump.worlds.iter_mut().enumerate() {
+            world.packed_at = at;
+        }
+        let visited = ["Nexus".to_owned()].into_iter().collect();
+        let shown = dump.showing(&visited);
+
+        assert_eq!(
+            shown
+                .worlds
+                .iter()
+                .map(|world| (world.title.as_str(), world.cell()))
+                .collect::<Vec<_>>(),
+            // Sofa Room is kept because Nexus leads to it, and kept as a place rather than as a
+            // world: no cell of its own, so it wears the atlas's placeholder.
+            [("Nexus", Some(0)), ("Sofa Room", None)]
+        );
+        // The step onward from Sofa Room led to a world that is no longer there, so it is gone
+        // rather than pointing at whoever took its place.
+        assert_eq!(
+            shown
+                .worlds
+                .iter()
+                .map(|world| world
+                    .connections
+                    .iter()
+                    .map(|connection| connection.target_id)
+                    .collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            [vec![1], vec![]]
+        );
+        // The atlas is packed against the whole dump, so a frontier still has to reach the same
+        // cells: what it keeps is a part of that numbering, not a numbering of its own.
+        assert_eq!(shown.packed, 4);
+    }
+
+    /// A frontier is what one step *onward* reaches. A passage the player could only come back
+    /// through is not a way to anywhere, and the world on the far side of it is not on the edge of
+    /// what they have seen.
+    #[test]
+    fn a_frontier_does_not_reach_through_a_passage_it_cannot_be_walked_down() {
+        // The same chain, but every listed step is one-way *into* the world that lists it: from
+        // Nexus there is no way onward at all, only a way back into it from Sofa Room.
+        let mut dump = chain(
+            &["Nexus", "Sofa Room", "Far Room", "Farther Room"],
+            super::flag::NO_ENTRY,
+        );
+        dump.packed = dump.worlds.len();
+        let visited = ["Nexus".to_owned()].into_iter().collect();
+
+        assert_eq!(
+            dump.showing(&visited)
+                .worlds
+                .iter()
+                .map(|world| world.title.as_str())
+                .collect::<Vec<_>>(),
+            // Sofa Room is a step the player cannot take, so the frontier stops at what they have
+            // actually stood in.
+            ["Nexus"]
+        );
+    }
+
+    /// Worlds in a row, each listing the step onward under `flags`.
+    fn chain(titles: &[&str], flags: u16) -> super::Dump {
+        let worlds = titles
+            .iter()
+            .enumerate()
+            .map(|(at, title)| World {
+                title: (*title).to_owned(),
+                title_jp: None,
+                author: String::new(),
+                image: format!("{title}.png"),
+                added: None,
+                map_url: None,
+                map_label: None,
+                secret: false,
+                packed_at: 0,
+                unknown: false,
+                connections: (at + 1 < titles.len())
+                    .then(|| super::Connection {
+                        target_id: at + 1,
+                        flags,
+                        params: Default::default(),
+                    })
+                    .into_iter()
+                    .collect(),
+            })
+            .collect();
+        super::Dump {
+            worlds,
+            packed: 0,
+            releases: Vec::new(),
+            credits: Vec::new(),
+        }
     }
 
     /// A connection is one connection however many of its two worlds list it: both of them carry

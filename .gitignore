@@ -6,6 +6,9 @@
 # `just thumbnails`, and the wiki's to distribute rather than this repository's.
 /tools/atlas/cache
 /static/thumbnails.jpg
+# The placeholder an unvisited world is drawn as, downloaded by the same command. YNOproject's to
+# distribute rather than this repository's, for the same reason as the images above.
+/static/unknown_location.png
 # The key `android/build.sh` signs release apks with. Never committed: whoever holds it can ship
 # an update that Android will accept as this app. Back it up somewhere other than this directory.
 /android/production.jks

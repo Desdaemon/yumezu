@@ -307,12 +307,20 @@ mod tests {
     #[test]
     fn every_english_message_says_something() {
         let mut args = fluent_bundle::FluentArgs::new();
-        for numeric in ["count", "total", "shown", "connections", "degree", "depth"] {
+        for numeric in [
+            "count",
+            "total",
+            "shown",
+            "connections",
+            "degree",
+            "depth",
+            "seen",
+        ] {
             args.set(numeric, 1);
         }
         for worded in [
             "fps", "worlds", "name", "released", "title", "kind", "out", "back", "effects",
-            "chance", "season",
+            "chance", "season", "percent",
         ] {
             args.set(worded, "x");
         }

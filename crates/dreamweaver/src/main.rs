@@ -24,6 +24,10 @@
 //! dreamweaver [--listen ADDR|PATH] [--data PATH] [--sync-every HOURS]
 //! ```
 //!
+//! Besides the dump it answers four routes that are not about the dump at all: what YNOproject
+//! knows about the player reading the page, put through to YNOproject because the page may not ask
+//! it directly. See [`relay`].
+//!
 //! `--listen` takes either a `host:port` or, so that nginx can reach it the other way its
 //! `proxy_pass` knows, the path of a Unix socket -- see [`Listen`].
 
@@ -39,6 +43,9 @@ use axum::routing::get;
 mod depth;
 mod model;
 mod progress;
+/// What the page asks about a player's own YNOproject account, put through to YNOproject. See
+/// [`relay::routes`].
+mod relay;
 mod smw;
 mod store;
 mod sync;
@@ -315,6 +322,11 @@ async fn serve(server: Server, options: Options) {
         .route("/data", get(data))
         .route("/data.json", get(data))
         .route("/pollUpdate", get(poll_update))
+        // The page's own account on YNOproject, which it may not ask about directly. Kept here
+        // rather than left to whatever serves the page, because the sign-in's cookie has to be
+        // handed back for this origin to be keepable at all, and a rewrite nobody wrote down is a
+        // rewrite a deployment forgets. See [`relay`].
+        .merge(relay::routes())
         .with_state(server);
 
     match Listen::read(&options.listen) {

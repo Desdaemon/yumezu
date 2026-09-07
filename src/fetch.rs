@@ -67,6 +67,13 @@ pub type Client = reqwest_middleware::ClientWithMiddleware;
 /// See [`Client`].
 #[cfg(target_family = "wasm")]
 pub type Client = reqwest::Client;
+/// One request being put together, which is the type a caller has to name to hand one on before
+/// sending it. See [`Client`], and `yno`'s `session::sign`, which is what does the handing on.
+#[cfg(not(target_family = "wasm"))]
+pub type RequestBuilder = reqwest_middleware::RequestBuilder;
+/// See [`RequestBuilder`].
+#[cfg(target_family = "wasm")]
+pub type RequestBuilder = reqwest::RequestBuilder;
 /// See [`Client`].
 #[cfg(not(target_family = "wasm"))]
 pub type Error = reqwest_middleware::Error;

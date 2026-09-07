@@ -20,6 +20,11 @@ use std::path::{Path, PathBuf};
 /// keeps cannot bleed one world's thumbnail into its neighbour's.
 const CELL: [u32; 2] = [64, 48];
 const ORIGIN: &str = "https://explorer.yume.wiki";
+/// The picture drawn for a world the player has not been to, which is the one YNOproject's own
+/// client stands in for an unknown place with. Packed into the last cell of the grid rather than
+/// into a cell of its own counted off the worlds, so the app finds it from the atlas's shape alone
+/// and neither side carries a number the other could get wrong. See the app's `thumbnails`.
+const UNKNOWN: &str = "https://ynoproject.net/2kki/images/unknown_location.png";
 /// How hard the atlas is compressed. High enough that the pixel art keeps its edges at the size
 /// it is drawn, low enough that the whole atlas is a download rather than a wait.
 const JPEG_QUALITY: u8 = 85;
@@ -44,11 +49,35 @@ fn main() {
         .collect();
 
     let images = fetch_all(&urls, &cache);
+    let unknown_bytes = fetch_all(&[UNKNOWN.to_owned()], &cache)
+        .into_iter()
+        .next()
+        .flatten()
+        .expect("cannot fetch the placeholder for an unvisited world");
+    // Beside the atlas as well as inside it. The app draws an unvisited world from the whole
+    // picture rather than from its cell -- there is no sharper version of it to switch to, and a
+    // cell of it is this line art run through the atlas's jpeg -- so it needs the file itself.
+    // The cell is still packed, for the one place that reads the atlas alone: the sidebar's
+    // catalog. See the app's `detail` and `thumbnails`.
+    //
+    // Decoded and written out again rather than copied: the wiki serves this one as an indexed
+    // png, and an indexed png is not a format the app's own decoder reads as colour -- it arrives
+    // as one channel, which draws the black background red. Every other picture here goes through
+    // the same conversion on its way into the atlas, so this is only that conversion kept.
+    let unknown_out = repo.join("static/unknown_location.png");
+    let unknown_full = image::load_from_memory(&unknown_bytes)
+        .expect("the placeholder is not an image")
+        .to_rgb8();
+    unknown_full
+        .save(&unknown_out)
+        .expect("cannot write the placeholder");
+    let unknown = thumbnail(&unknown_bytes).expect("the placeholder is not an image");
 
     // Square-ish, so neither dimension of the atlas runs far ahead of the other and into a
-    // driver's texture size limit.
-    let columns = (images.len() as f64).sqrt().ceil() as u32;
-    let rows = images.len().div_ceil(columns as usize) as u32;
+    // driver's texture size limit. Sized for the worlds and the placeholder that follows them, so
+    // there is always a last cell left over for it to be packed into.
+    let columns = ((images.len() + 1) as f64).sqrt().ceil() as u32;
+    let rows = (images.len() + 1).div_ceil(columns as usize) as u32;
     let mut atlas = image::RgbImage::new(columns * CELL[0], rows * CELL[1]);
     let mut packed = 0;
     for (world, bytes) in images.iter().enumerate() {
@@ -67,6 +96,14 @@ fn main() {
         );
         packed += 1;
     }
+    // Last, in the corner the app reads it out of.
+    let last = columns * rows - 1;
+    image::imageops::replace(
+        &mut atlas,
+        &unknown,
+        ((last % columns) * CELL[0]) as i64,
+        ((last / columns) * CELL[1]) as i64,
+    );
 
     // JPEG, at a fifth of what the same atlas costs as a PNG: the app fetches it over the
     // network, and a thumbnail this small has no detail for the compression to lose that survives
@@ -81,6 +118,12 @@ fn main() {
     file.flush().expect("cannot write the atlas");
     drop(file);
     let size = std::fs::metadata(&out).map(|meta| meta.len()).unwrap_or(0);
+    println!(
+        "{}x{} placeholder -> {}",
+        unknown_full.width(),
+        unknown_full.height(),
+        unknown_out.display()
+    );
     println!(
         "{packed}/{} worlds packed into {}x{} -> {} ({:.1} MiB)",
         images.len(),

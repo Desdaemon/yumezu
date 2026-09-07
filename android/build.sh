@@ -53,6 +53,9 @@ mkdir -p "$OUT/staging/lib/$ABI" "$OUT/staging/assets/static"
 # Absent until `just thumbnails` has been run, and the app draws the graph without pictures then.
 cp "$ROOT/static/thumbnails.jpg" "$OUT/staging/assets/static/" 2>/dev/null \
     || echo "no static/thumbnails.jpg; the apk will have no world pictures" >&2
+# The same, and just as survivable: an unvisited world keeps its node without a picture on it.
+cp "$ROOT/static/unknown_location.png" "$OUT/staging/assets/static/" 2>/dev/null \
+    || echo "no static/unknown_location.png; unvisited worlds will have no picture" >&2
 
 # There are no resources to compile, so linking is only the manifest plus the assets beside it.
 "$TOOLS/aapt2" link \

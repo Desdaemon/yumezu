@@ -10,3 +10,17 @@ backend = "http://127.0.0.1:5000/data"
 [[proxy]]
 rewrite = "/pollUpdate"
 backend = "http://127.0.0.1:5000/pollUpdate"
+
+# What the page asks about the player's own account on YNOproject, which it may not ask YNOproject
+# directly: that host allows exactly one origin, its own site, and the credential it answers to is
+# a cookie a browser only keeps for the origin that served it. `dreamweaver` answers both of these
+# and hands that cookie back for this origin on the way past -- see its `relay` module. A page
+# served by anything else needs the same two routes put through to it the same way.
+[[proxy]]
+rewrite = "/yno/"
+backend = "http://127.0.0.1:5000/yno/"
+
+# Signing in, which is its own service upstream and its own path here.
+[[proxy]]
+rewrite = "/ynoauth/"
+backend = "http://127.0.0.1:5000/ynoauth/"

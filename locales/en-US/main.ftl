@@ -21,10 +21,10 @@ dump-failed = The world dump could not be loaded.
 # What the server says it is doing, for a run that arrived while it was still building its first
 # dump and has to wait it out. Named for the stage rather than for the server's own word for it:
 # see `world::building`, which is what maps the one onto the other.
-dump-task-changes = Asking the wiki what has changed…
-dump-task-worlds = Reading the worlds…
-dump-task-passages = Reading the passages between them…
-dump-task-assembling = Putting the graph together…
+dump-task-changes = Querying for wiki updates...
+dump-task-worlds = Loading worlds...
+dump-task-passages = Loading connections...
+dump-task-assembling = Finalizing the graph...
 
 ## The sidebar and its tabs.
 
@@ -85,6 +85,11 @@ junction = junction
 nothing-selected =
     Click a world to trace its route to the origin, or right-click it for more.
 
+## Where there is still somewhere to go, offered with nothing selected while a frontier is drawn.
+
+untaken-worlds = Get hints
+untaken-worlds-hint = Revisit these worlds which are connected to places you haven't been to.
+
 ## The route home.
 
 route-length = { $count ->
@@ -144,6 +149,30 @@ clear-cache-hint = Empties the pictures kept between runs, so the next look at a
 clear-cache-clearing = Clearing...
 clear-cache-done = Downloads cleared
 clear-cache-failed = The downloads could not be cleared
+
+## The player's own game: signing in to YNOproject, and drawing only what that account has seen.
+
+yno = Exploration progress
+yno-loading = Loading visited worlds...
+yno-hint = Sign in to YNOproject to track your exploration progress.
+yno-user = Username
+yno-password = Password
+yno-sign-in = Sign in
+yno-sign-out = Sign out
+yno-working = Signing in...
+yno-signed-out = That session has expired. Sign in again.
+yno-signed-in = Signed in.
+yno-completion = { $seen } / { $worlds } ({ $percent }%)
+yno-completion-hint = The percentage of worlds you have discovered.
+yno-refresh = Refresh
+yno-refresh-hint = Reveals new worlds you've since visited.
+yno-promise = Your account info is only used to retrieve your exploration progress on YNOproject. yumezu will never share your account information or modify it in any way.
+yno-source = Audit the YNOproject connection
+menu-reveal = [Debug] Reveal
+menu-reveal-hint = Mimics adding a new world from the Refresh button.
+frontier = Frontier Mode
+frontier-hint = Only shows worlds you've been to, and those immediately connected become unvisited locations.
+unvisited-location = Unvisited Location
 github-link = yumezu on github
 android-link = Download for Android
 

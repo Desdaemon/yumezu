@@ -61,12 +61,35 @@ enum Held {
 
 /// The full-size pictures currently held, and what to draw them on.
 pub struct Detail {
-    /// Per world, where the wiki serves its picture from.
+    /// Per world, where the wiki serves its picture from. Empty for a world the player has not
+    /// been to, which has no picture of its own to fetch: see [`Unvisited`].
     images: Vec<String>,
     held: HashMap<usize, Held>,
     /// The worlds [`Detail::track`] was last asked for, widest first, which is the order they are
     /// drawn in and the order the budget is spent in.
     wanted: Vec<usize>,
+    unvisited: Unvisited,
+}
+
+/// The picture every world the player has not been to is drawn as, and where it is drawn.
+///
+/// One picture however many worlds wear it, so it is held once and drawn as a single instanced
+/// mesh: a frontier can put hundreds of these on screen at once, and a texture and a draw call
+/// each is the very thing the atlas exists to avoid.
+///
+/// Unlike everything else in this module it is not a level of detail. It is the world's picture,
+/// and it is the only one there will ever be, so it is drawn at every size rather than past
+/// [`SWITCH_PIXELS`] and it spends none of the [`HELD`] budget: there is nothing sharper for a
+/// closer look to switch to, and nothing worth freeing when the view moves away. The atlas carries
+/// a cell of it too, which this stands in front of -- that cell is for the sidebar's catalog,
+/// which reads the atlas and nothing else. See `thumbnails::placeholder`.
+#[derive(Default)]
+struct Unvisited {
+    /// On its way in, until it arrives or turns out not to be there. See [`fetch`].
+    loading: Option<fetch::Pending<Option<CpuTexture>>>,
+    /// The quads, once there is a picture to put on them. `None` before that, and forever if the
+    /// picture cannot be had -- which leaves these worlds their bare nodes and nothing worse.
+    quads: Option<Gm<InstancedMesh, ColorMaterial>>,
 }
 
 /// A world the view is asking for at full size, and how its quad is drawn.
@@ -80,11 +103,44 @@ pub struct Magnified {
 }
 
 impl Detail {
-    pub fn new(images: Vec<String>) -> Self {
+    /// `unvisited` is whether any world here is one the player has not been to, which is the only
+    /// thing that decides whether the placeholder is worth fetching: a run drawing the whole game
+    /// has nothing to draw it on.
+    pub fn new(images: Vec<String>, unvisited: bool) -> Self {
         Self {
             images,
             held: HashMap::new(),
             wanted: Vec::new(),
+            unvisited: Unvisited {
+                loading: unvisited.then(thumbnails::placeholder),
+                quads: None,
+            },
+        }
+    }
+
+    /// Stands the placeholder on the quads it was handed, which are the nodes of every world the
+    /// player has not been to.
+    ///
+    /// Every frame: the layout moves the nodes under it and the camera turns them, and a selection
+    /// dims them, all of which the caller has already worked out for the nodes themselves. See
+    /// `app`'s `AppEntities::place_unvisited`, which is where the quads come from.
+    pub fn place_unvisited(&mut self, context: &Context, quads: &Instances) {
+        if let Some(loading) = &self.unvisited.loading
+            && let Some(loaded) = loading.take()
+        {
+            // Whatever came of it, there is nothing left to poll for.
+            self.unvisited.loading = None;
+            // The failure is logged where it is found, and leaves these worlds drawn the way every
+            // world was before there were any pictures at all.
+            if let Some(picture) = loaded {
+                self.unvisited.quads = Some(Gm::new(
+                    InstancedMesh::new(context, quads, &CpuMesh::square()),
+                    quad_material(context, &picture),
+                ));
+            }
+        }
+        if let Some(drawn) = &mut self.unvisited.quads {
+            drawn.set_instances(quads);
         }
     }
 
@@ -96,7 +152,15 @@ impl Detail {
     /// which is the whole of the eviction policy, because what the view is not looking at costs
     /// nothing to fetch again if it looks back.
     pub fn track(&mut self, context: &Context, magnified: &[Magnified]) {
-        let magnified = &magnified[..magnified.len().min(HELD)];
+        // A world with no picture to fetch is passed over before the budget is counted rather
+        // than after: it is one the player has not been to, already drawn from the whole
+        // placeholder at every size, and letting it take a slot would leave a world that does
+        // have a picture of its own on the atlas. See [`Unvisited`].
+        let magnified: Vec<&Magnified> = magnified
+            .iter()
+            .filter(|it| !self.images[it.world].is_empty())
+            .take(HELD)
+            .collect();
         let wanted: Vec<usize> = magnified.iter().map(|it| it.world).collect();
         // Before the new ones are started, so a picture on its way out frees its budget for one
         // on its way in within the same frame. A world with no picture is kept either way: it
@@ -129,12 +193,25 @@ impl Detail {
 
     /// The pictures ready to draw, widest first. See [`Detail::track`], which is what decides both.
     pub fn drawn(&self) -> impl Iterator<Item = &dyn Object> {
-        self.wanted
+        // The placeholders first: they are one draw call for however many worlds wear them. One
+        // world can wear both for a moment -- a world turning over is still under the placeholder
+        // while its own picture is being fetched for the way back up -- and the placeholder is
+        // meant to win there. It does: both are lifted off the node quad by [`LIFT`], but the
+        // placeholder is lifted against the node's whole radius while the picture is lifted
+        // against the radius it is being drawn at, which is shrinking. See `app`'s
+        // `AppEntities::place_unvisited` and `AppEntities::magnified`.
+        self.unvisited
+            .quads
             .iter()
-            .filter_map(|world| match self.held.get(world) {
-                Some(Held::Ready(quad)) => Some(quad.as_ref() as &dyn Object),
-                _ => None,
-            })
+            .map(|quads| quads as &dyn Object)
+            .chain(
+                self.wanted
+                    .iter()
+                    .filter_map(|world| match self.held.get(world) {
+                        Some(Held::Ready(quad)) => Some(quad.as_ref() as &dyn Object),
+                        _ => None,
+                    }),
+            )
     }
 }
 
@@ -144,6 +221,16 @@ impl Detail {
 /// [`thumbnails::ASPECT`] before packing it, and the node's quad is that shape, so a full picture
 /// shown whole would jump to a different framing of the same screenshot.
 fn quad(context: &Context, picture: &CpuTexture) -> Gm<Mesh, ColorMaterial> {
+    Gm::new(
+        Mesh::new(context, &CpuMesh::square()),
+        quad_material(context, picture),
+    )
+}
+
+/// What such a quad is painted with: the picture, cropped and sampled the way the atlas cells it
+/// stands in for are. Apart from [`quad`] because the placeholder wears the same paint on an
+/// instanced mesh -- see [`Unvisited`].
+fn quad_material(context: &Context, picture: &CpuTexture) -> ColorMaterial {
     let (width, height) = (picture.width as f32, picture.height as f32);
     // Whichever side is long for the shape wanted is the one that gives, centred: the other is
     // kept whole. A symmetric crop, so it does not matter which end of the picture the uv
@@ -167,13 +254,10 @@ fn quad(context: &Context, picture: &CpuTexture) -> Gm<Mesh, ColorMaterial> {
     );
     texture.transformation = Mat3::from_translation((vec2(1.0, 1.0) - visible) * 0.5)
         * Mat3::from_nonuniform_scale(visible.x, visible.y);
-    Gm::new(
-        Mesh::new(context, &CpuMesh::square()),
-        ColorMaterial {
-            texture: Some(texture),
-            ..Default::default()
-        },
-    )
+    ColorMaterial {
+        texture: Some(texture),
+        ..Default::default()
+    }
 }
 
 /// Starts loading one picture from the wiki. See [`fetch`].

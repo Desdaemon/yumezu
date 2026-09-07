@@ -60,6 +60,11 @@ junction = 分岐点
 
 nothing-selected = マップをクリックすると原点までの経路をたどります。右クリックで詳細を表示します。
 
+## Where there is still somewhere to go, offered with nothing selected while a frontier is drawn.
+
+untaken-worlds = ヒントを見る
+untaken-worlds-hint = まだ訪れていない場所につながっている、これらのマップをもう一度訪れてみましょう。
+
 ## The route home.
 
 route-length = 原点から { $count } 接続
@@ -109,6 +114,30 @@ clear-cache-hint = 実行間に保存された画像を消去します。次に�
 clear-cache-clearing = 消去中...
 clear-cache-done = ダウンロードを消去しました
 clear-cache-failed = ダウンロードを消去できませんでした
+
+## YNOproject にログインして、行ったことのある世界だけを描く。
+
+yno = YNOprojectでの探検記録
+yno-loading = 記録を読み込み中...
+yno-hint = YNOprojectにログインすると、あなたの探検記録をこのグラフに表示できるようになります。
+yno-user = ユーザー名
+yno-password = パスワード
+yno-sign-in = ログイン
+yno-sign-out = ログアウト
+yno-working = ログイン中...
+yno-signed-out = セッションの有効期限が切れました。もう一度ログインしてください。
+yno-signed-in = ログイン済み。
+yno-completion = { $seen } / { $worlds }（{ $percent }%）
+yno-completion-hint = 探検記録の完成度です。
+yno-refresh = 更新
+yno-refresh-hint = 訪問済みのマップをYNOprojectから再度読み込みます。
+yno-promise = あなたのアカウントはYNOprojectでの探検記録を収集する以外に使われていません。yumezuは決してあなたのアカウントを他人に共有したり影響したりはしません。
+yno-source = アカウントの扱いについて
+menu-reveal = 【デバグ】訪問済みとみなす
+menu-reveal-hint = YNOproject
+frontier = 探検者モード
+frontier-hint = まだ訪れていないマップを隠し、訪問済みのマップから通行できるマップを探検目標として扱われています。
+unvisited-location = 未訪問の場所
 github-link = GitHubで見る
 android-link = Android版をダウンロード
 
