@@ -23,10 +23,22 @@ production = []
 [profile.min]
 inherits = "release"
 opt-level = "z"
-lto = true
+# Off so that the override below can take effect. Both LTO modes defer the vectorizers to the
+# post-link pipeline, which runs at the `opt-level` above and ignores per-package ones, and a
+# size level there turns off the unroller that the force-graph hot loops need widened before
+# anything can vectorize them. Measured, this pairing is also the smallest the application has
+# been after brotli. See `crates/force_graph_3d/IMPL_DETAILS.md`.
+lto = false
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# The one crate that is compiled for speed. Its inner loops are fixed-width and have to be
+# unrolled before they vectorize at all; at a size level they run one lane at a time and the
+# `+simd128` in `.cargo/config.toml` buys nothing.
+# `crates/force_graph_3d/tests/codegen.rs` fails if this goes away.
+[profile.min.package.force_graph_3d]
+opt-level = 3
 
 [dependencies]
 force_graph_3d.path = "./crates/force_graph_3d"

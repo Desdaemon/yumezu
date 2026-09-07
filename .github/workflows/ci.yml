@@ -1,0 +1,54 @@
+# Three runs, because they cover different ground. The workspace run is every test on the host,
+# `force_graph_3d`'s codegen checks included -- those cross-compile for wasm and aarch64 and read
+# the emitted IR, but never execute it. The other two run the force-graph tests where that IR
+# actually lands, and the hot loop is spelled differently for each: the clamp becomes
+# `f32x4.pmin`/`pmax` on wasm, whose NaN rules are not the ones x86 `minps`/`maxps` follow, and
+# `fmaxnm`/`fminnm` on aarch64, which is a different source body again. Neither is reachable from
+# a host run.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to a branch makes the first one's answer irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # `fontique`, which the renderer pulls in through `three-d`, links fontconfig on Linux and
+      # finds it with pkg-config. Everything else native here is opened at runtime rather than
+      # linked, so it needs nothing installed to build. See README.md.
+      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          # `wasm32-unknown-unknown` and `aarch64-linux-android` are the two cross targets the
+          # codegen checks compile for and read the IR back from -- neither is linked, so the
+          # Android one needs no NDK here. `wasm32-wasip2` is the one that can run a test binary.
+          # All three have to be present: a missing target makes those checks skip themselves off
+          # CI, and the `CI` variable this runner sets is what turns that skip into a failure.
+          targets: wasm32-unknown-unknown, wasm32-wasip2, aarch64-linux-android
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest, just, wasmtime, cross
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: curl -L https://explorer.yumemiru.dev/data -o data.json
+
+      - run: cargo nextest run --workspace
+
+      - run: just test-wasm
+
+      # Slower than the other two together, and the only one that executes the aarch64 clamp
+      # rather than reading the instructions it compiled to. Uses the runner's docker.
+      - run: just test-arm

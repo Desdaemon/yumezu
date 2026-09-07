@@ -21,8 +21,8 @@
 //! Charge repulsion is all-to-all, so summing it exactly is O(n²). By default a Barnes-Hut
 //! octree replaces distant groups of nodes with their center of mass, which brings the pass down
 //! to O(n log n); [`SimulationParameters::theta`] controls the tradeoff, and `0.0` restores exact
-//! summation. Measured on one core, 4000 nodes: 10.2 ms per step exact, 2.2 ms at the default
-//! angle, for a worst-case force error near 1%.
+//! summation. Measured on one core with AVX2, 4000 nodes: 5.5 ms per step exact, 1.4 ms at the
+//! default angle, for a worst-case force error near 1%.
 //!
 //! # Settling
 //!
@@ -39,7 +39,13 @@
 //! one axis after the forces have run, pulling it toward a plane or a depth layer, so a switch
 //! reads as the graph settling into the new arrangement.
 //!
-//! On wasm the vector loops need `-C target-feature=+simd128`; see `.cargo/config.toml`.
+//! # Vectorization
+//!
+//! The hot loops are ordinary scalar Rust that LLVM widens, and both halves of that need help
+//! from the build: `-C target-feature=+simd128` for wasm, in `.cargo/config.toml`, and an
+//! optimization level that leaves the unroller on, in the workspace `min` profile. Neither is
+//! visible from here and neither fails loudly, so `tests/codegen.rs` checks both, and
+//! `IMPL_DETAILS.md` says what they are worth.
 //!
 //! # Example
 //!
@@ -1111,9 +1117,14 @@ impl<UserNodeData> NodeMut<'_, UserNodeData> {
 /// for a cell aggregate that stands in for several. The list may be every node in the graph, or
 /// the interaction list of an octree walk; the kernel does not care, and a list entry at the
 /// target's own position contributes nothing.
-/// Inlined on purpose: at a call site the slice lengths and their disjointness are visible, and
-/// without that LLVM leaves the lane loop scalar. Checked by inspecting the emitted wasm IR.
-#[inline]
+///
+/// The lane loop is written the way it is so that LLVM vectorizes it and neither bounds-checks
+/// nor NaN-corrects inside the body; `IMPL_DETAILS.md` records what each of those spellings is
+/// worth, and `tests/codegen.rs` fails if one of them stops working.
+///
+/// Not `#[inline]`: it is entered once per node and runs over every interaction that node has, so
+/// the call is already amortized, and one out-of-line copy keeps the vectorized body somewhere a
+/// disassembler can find it.
 fn repulsion_on(
     target: [f32; 3],
     charge_target: f32,
@@ -1138,49 +1149,87 @@ fn repulsion_on(
     let mut fy = [0.0f32; LANES];
     let mut fz = [0.0f32; LANES];
 
-    let body = n - n % LANES;
-    for base in (0..body).step_by(LANES) {
-        // Fixed-size views: the length is known at compile time, so no bounds check and no
-        // scalar epilogue inside the chunk.
-        let (xs, ys, zs, ms, ls) = (
-            lane(x, base),
-            lane(y, base),
-            lane(z, base),
-            lane(mass, base),
-            lane(limit, base),
-        );
+    // Chunked rather than indexed by a running base: a `&[[f32; LANES]]` carries the lane count
+    // in its type, so nothing in the body needs a bounds check that LLVM then has to prove
+    // redundant. It does not manage that proof for five slices indexed in step, and the check it
+    // leaves behind sits inside the vector body.
+    let (xc, xr) = x.as_chunks::<LANES>();
+    let (yc, yr) = y.as_chunks::<LANES>();
+    let (zc, zr) = z.as_chunks::<LANES>();
+    let (mc, mr) = mass.as_chunks::<LANES>();
+    let (lc, lr) = limit.as_chunks::<LANES>();
+
+    for ((((xs, ys), zs), ms), ls) in xc.iter().zip(yc).zip(zc).zip(mc).zip(lc) {
         for l in 0..LANES {
             let dx = xs[l] - tx;
             let dy = ys[l] - ty;
             let dz = zs[l] - tz;
-            // Repulsion falls off with the square of the distance, and the direction vector
-            // needs one more division to normalize: three inverse distances.
-            let inv = (dx * dx + dy * dy + dz * dz + SOFTENING).sqrt().recip();
-            let strength = charge_target * ms[l] * inv * inv * inv;
+            let strength = charge_target * ms[l] * inv_cube(dx * dx + dy * dy + dz * dz);
             // Clamped per interaction, as the scalar version clamped per pair, so one close
-            // neighbour cannot dominate the sum. `min`/`max` stay branch-free.
-            fx[l] += (dx * strength).max(-ls[l]).min(ls[l]);
-            fy[l] += (dy * strength).max(-ls[l]).min(ls[l]);
-            fz[l] += (dz * strength).max(-ls[l]).min(ls[l]);
+            // neighbour cannot dominate the sum.
+            fx[l] += clamp_symmetric(dx * strength, ls[l]);
+            fy[l] += clamp_symmetric(dy * strength, ls[l]);
+            fz[l] += clamp_symmetric(dz * strength, ls[l]);
         }
     }
-    for j in body..n {
-        let dx = x[j] - tx;
-        let dy = y[j] - ty;
-        let dz = z[j] - tz;
-        let inv = (dx * dx + dy * dy + dz * dz + SOFTENING).sqrt().recip();
-        let strength = charge_target * mass[j] * inv * inv * inv;
-        let (lo, hi) = (-limit[j], limit[j]);
-        fx[0] += (dx * strength).max(lo).min(hi);
-        fy[0] += (dy * strength).max(lo).min(hi);
-        fz[0] += (dz * strength).max(lo).min(hi);
+    // At most `LANES - 1` of these, a bound the type carries, so this is peeled rather than
+    // looped.
+    for ((((&px, &py), &pz), &m), &l) in xr.iter().zip(yr).zip(zr).zip(mr).zip(lr) {
+        let (dx, dy, dz) = (px - tx, py - ty, pz - tz);
+        let strength = charge_target * m * inv_cube(dx * dx + dy * dy + dz * dz);
+        fx[0] += clamp_symmetric(dx * strength, l);
+        fy[0] += clamp_symmetric(dy * strength, l);
+        fz[0] += clamp_symmetric(dz * strength, l);
     }
 
     [reduce(fx), reduce(fy), reduce(fz)]
 }
 
-fn lane(values: &[f32], base: usize) -> &[f32; LANES] {
-    values[base..base + LANES].try_into().unwrap()
+/// Repulsion falls off with the square of the distance, and the direction vector needs one more
+/// division to normalize: `1 / (d2 + SOFTENING)^(3/2)`.
+#[inline(always)]
+fn inv_cube(d2: f32) -> f32 {
+    let inv = (d2 + SOFTENING).sqrt().recip();
+    inv * inv * inv
+}
+
+/// `v` held to `+/-limit`, and a NaN `v` to `-limit`. `limit` is assumed not to be NaN, the one
+/// input the two bodies disagree on.
+///
+/// There are two because the clamp that lowers to bare instructions is not the same one on every
+/// backend, and this is the innermost expression in the kernel. `f32::max` and `f32::min` are IEEE
+/// `maxNum` and `minNum`, which return the *other* operand when one side is NaN; `maxps`, `minps`
+/// and `f32x4.pmax`/`pmin` do the opposite, and need a compare and a blend per bound to correct.
+/// aarch64 is the one architecture that has the IEEE rule in hardware, as `fmaxnm`/`fminnm`, where
+/// it is the comparisons that need the second instruction instead. `IMPL_DETAILS.md` has what each
+/// is worth, and `tests/codegen.rs` checks that the intended one arrived. `tools/bench.sh` times them
+/// against each other by swapping this block.
+#[inline(always)]
+fn clamp_symmetric(v: f32, limit: f32) -> f32 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        clamp_ieee(v, limit)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        clamp_comparisons(v, limit)
+    }
+}
+
+// Both are compiled everywhere so that either can be tested from one host; only the architecture's
+// own is reachable from the kernel.
+#[allow(dead_code)]
+#[inline(always)]
+fn clamp_ieee(v: f32, limit: f32) -> f32 {
+    v.max(-limit).min(limit)
+}
+
+/// Comparisons in the order the instructions already implement, so nothing is corrected after.
+#[allow(dead_code)]
+#[inline(always)]
+fn clamp_comparisons(v: f32, limit: f32) -> f32 {
+    let v = if v > -limit { v } else { -limit };
+    if v < limit { v } else { limit }
 }
 
 fn reduce(lanes: [f32; LANES]) -> f32 {
@@ -1397,6 +1446,68 @@ mod test {
         for position in positions(&graph) {
             assert!(position.iter().all(|c| c.is_finite()), "{position:?}");
         }
+    }
+
+    /// `clamp_symmetric` picks one of two bodies by architecture, and CI only ever runs the tests
+    /// on one of them, so the Android build would otherwise reach a phone with its clamp never
+    /// having been executed anywhere. Both are compiled everywhere for this.
+    ///
+    /// They part company on a NaN `limit`, which the comparisons propagate and IEEE `minNum`
+    /// discards; nothing in the crate produces one, and the argument is documented as excluding it.
+    ///
+    /// Zeroes are compared by value rather than by bit, because `fmaxnm` and `fminnm` do not pick
+    /// the same zero as the comparisons do and a force of `-0.0` moves a node exactly as far as
+    /// one of `0.0`. That is real hardware behaviour and not a wasm or x86 quirk: it only shows
+    /// up when this runs on aarch64, which `just test-arm` is for.
+    #[test]
+    fn the_two_clamp_bodies_agree() {
+        const INTERESTING: [f32; 11] = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            1e30,
+            -1e30,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ];
+        for v in INTERESTING {
+            for limit in INTERESTING.into_iter().filter(|l| !l.is_nan()) {
+                let (ieee, comparisons) = (clamp_ieee(v, limit), clamp_comparisons(v, limit));
+                assert!(
+                    ieee == comparisons || (ieee.is_nan() && comparisons.is_nan()),
+                    "clamp({v:?}, {limit:?}): aarch64 gives {ieee:?}, everywhere else \
+                     {comparisons:?}"
+                );
+            }
+        }
+    }
+
+    /// The clamp is what keeps a non-finite coordinate from spreading. The distance to one is
+    /// infinite, which makes the falloff zero and the force `inf * 0`, and only the clamp turns
+    /// that back into a number - so the bound it picks for a NaN is load-bearing, not incidental.
+    #[test]
+    fn a_runaway_coordinate_does_not_infect_the_others() {
+        let mut graph = <ForceGraph>::new(Default::default());
+        graph.add_node(NodeData {
+            x: f32::INFINITY,
+            ..Default::default()
+        });
+        graph.add_node(NodeData {
+            x: 10.0,
+            y: 20.0,
+            ..Default::default()
+        });
+
+        graph.update(FIXED_STEP);
+        let neighbour = positions(&graph)[1];
+        assert!(
+            neighbour.iter().all(|c| c.is_finite()),
+            "{neighbour:?} was reached through the node at infinity"
+        );
     }
 
     /// The hot loops scan freed slots too, so a removal must not perturb the survivors.

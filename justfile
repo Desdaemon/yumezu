@@ -25,22 +25,27 @@ dreamweaver:
     cargo run --release -p dreamweaver -- --data data.json
 
 # Builds the server for an Ubuntu 24.04 host, at `target/x86_64-unknown-linux-gnu/release/`.
-# The compile happens in cross's own image rather than here, because this machine's glibc is
-# the newer one: a native build asks for symbols the server has no version of, and refuses to
-# start there. Nothing in this recipe names the server's release -- cross's image is Ubuntu
-# 16.04, whose glibc is older than any live server's, so what it builds runs on all of them.
-# Needs `cross` (`cargo install cross`) and a running docker.
 #
 # The binary carries its own TLS but not the roots it checks against, so the server needs
 # `ca-certificates` installed -- without it the process panics as it starts. See `src/fetch.rs`
 # for the one platform where those roots are compiled in instead.
-#
-# `target-cpu=x86-64` is the toolchain's own default for this target, and is written out only so
-# that a `RUSTFLAGS` in the environment cannot quietly raise the floor: cross forwards that
-# variable into the container. What rustc emits is then SSE2 and nothing later. It says nothing about
-# `ring`'s assembly under rustls, which carries AVX and AES paths that it chooses between by
-# `cpuid` as it starts, and so never runs on a processor that does not have them.
 dreamweaver-release:
     RUSTFLAGS="-C target-cpu=x86-64" cross build --release --locked -p dreamweaver --target x86_64-unknown-linux-gnu
     strip target/x86_64-unknown-linux-gnu/release/dreamweaver
     @ls -lh target/x86_64-unknown-linux-gnu/release/dreamweaver
+
+# Runs the force-graph behaviour tests compiled to wasm with SIMD on,
+test-wasm:
+    cargo test -p force_graph_3d --lib --target wasm32-wasip2
+
+# Runs the force-graph behaviour tests on armv8, under qemu in cross's image.
+test-arm:
+    cross test -p force_graph_3d --lib --target aarch64-unknown-linux-gnu
+
+# Times each of the kernel's load-bearing spellings against the alternative it was chosen over, on
+# this machine and on a phone if one is attached. The only measurement of them that is not a
+# scheduling model's guess, and the model has nothing at all for the core the clamp turned out to
+# matter most on. Args are `<nodes> <theta> <steps>`; the phone half wants adb and the SDK
+# `just apk` wants.
+bench *args:
+    tools/bench.sh {{args}}

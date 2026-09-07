@@ -2,11 +2,20 @@
 
 ## Install
 
+Needs [`just`](https://github.com/casey/just) and, on Linux, fontconfig's headers -- the renderer
+links it. Nothing else native here is linked rather than opened at runtime.
+
 ```bash
+sudo apt install libfontconfig1-dev   # or fontconfig-devel, or fontconfig
 git clone https://github.com/Desdaemon/yumezu.git
 just thumbnails
 cargo install --path . --features=production
 ```
+
+`just test-wasm` additionally needs [`wasmtime`](https://wasmtime.dev) on PATH and the
+`wasm32-wasip2` target; `just test-arm` needs [`cross`](https://github.com/cross-rs/cross) and a
+running docker; `just apk` and the phone half of `just bench` need `ANDROID_HOME` and a device on
+adb; `just dist` needs [`trunk`](https://trunkrs.dev) and `wasm32-unknown-unknown`.
 
 ## Licence
 
