@@ -76,6 +76,21 @@ const ARRIVAL_TRACKED_SECONDS: f32 = 4.0;
 /// The two radii are near each other on purpose. A wider range than this is more than the layout
 /// can hold without the hubs eating their neighbours.
 const NODE_HUB_DESCENDANTS: f32 = 4.0;
+/// How much of a world's size goes into how far its connections may stretch, on top of the reach
+/// every connection has and of the hub push. See [`edge_reach`] and [`LINK_REACH_DEFAULT`].
+///
+/// A hub seats a crowd of connections where a leaf seats one or two, and one ceiling for both
+/// packs that crowd into the same sphere a single connection gets: the children end up shoulder
+/// to shoulder and pulling on the hub from every side at once. Giving the bigger world the
+/// bigger ceiling hands the crowd the room it needs.
+///
+/// Half of the size difference rather than all of it. The sizes span more than threefold across
+/// the graph, and a ceiling that followed them the whole way would put the origin's children as
+/// far out as the ceiling is meant to stop them going. The hub push scales what is left, because
+/// the knob that decides how hard a hub holds its neighbours off has to decide how far it may
+/// hold them too: turning it up against a fixed ceiling only presses the crowd into it harder.
+/// See [`HUB_REPULSION_DEFAULT`] and [`node_mass`].
+const HUB_REACH: f32 = 0.5;
 /// How thick a connection is drawn.
 const EDGE_RADIUS: f32 = 0.05;
 /// A connection a player can only walk one way is drawn as a run of marching dashes rather than
@@ -128,6 +143,17 @@ const DAG_LEVEL_MICROSTEP: f32 = 4.0 * NODE_LEAF_RADIUS / SIM_TO_WORLD;
 /// so it may stack this far either side. Keep the band well under [`DAG_LEVEL_DISTANCE_2D`], or
 /// the layers meet and stop reading as layers.
 const DAG_LEVEL_SLACK_MICROSTEPS_2D: f32 = 3.0;
+/// Where the panel's link-reach knob starts: how far a connection may stretch before its spring
+/// stiffens, as a multiple of the spacing between layers. See
+/// [`SimulationParameters::link_distance_max`].
+///
+/// Without a ceiling the length of a connection is decided by how crowded the graph is rather
+/// than by the connection: the busiest layers hold a few hundred worlds and spread to a radius
+/// near 7000, so two worlds a single door apart could settle most of a layer away from each
+/// other and read as unrelated. Written against the layer spacing because that is the distance
+/// the eye already has to measure against: a connection may reach about this many layers, in
+/// layered mode and out of it alike.
+const LINK_REACH_DEFAULT: f32 = 2.0;
 /// Force per unit of distance between a grabbed node and the cursor.
 ///
 /// The cursor pulls the node rather than places it, so the graph attached to the node travels
@@ -628,9 +654,18 @@ const UI_SCALE: &str = "ui-scale";
 const DIMENSIONS: &str = "dimensions";
 const LAYERED: &str = "layered";
 const HUB_REPULSION: &str = "hub-push";
+const LINK_REACH: &str = "link-reach";
 
 /// How far the hub push can be taken either way. Its middle is [`HUB_REPULSION_DEFAULT`].
 const HUB_REPULSION_RANGE: std::ops::RangeInclusive<f32> = 0.5..=1.5;
+
+/// How far the link reach can be taken either way, in layers. See [`LINK_REACH_DEFAULT`].
+///
+/// The low end is under one layer, which pulls a connected pair together hard enough to read as
+/// one clump. The high end is past the radius the busiest layer spreads to, which is the same as
+/// no ceiling at all: between them the knob covers everything from a knot to the layout the app
+/// had before there was a ceiling.
+const LINK_REACH_RANGE: std::ops::RangeInclusive<f32> = 0.5..=6.0;
 
 /// How far the UI scale can be taken either way, and where it starts. The far ends are a phone
 /// held at arm's length and a desk monitor read from close up; the middle is the size the system
@@ -725,6 +760,7 @@ enum Tab {
 struct Panel {
     dimensions: Dimensions,
     hub_repulsion: f32,
+    link_reach: f32,
     /// The scale the settings tab was left at. See [`Overlay::ui_scale`].
     ui_scale: f32,
     layered: bool,
@@ -1166,6 +1202,10 @@ struct AppEntities {
     /// The panel's setting for how much of a world's size goes into how hard it pushes. See
     /// [`node_mass`].
     hub_repulsion: f32,
+    /// The panel's setting for how far a connection may stretch, in layers. Held here rather
+    /// than read back off the simulation, which knows it only as the distance the layer spacing
+    /// turns it into. See [`LINK_REACH_DEFAULT`].
+    link_reach: f32,
     /// Per world, how many worlds hang off it. See [`world::Routes::descendant_counts`].
     descendants: Vec<u32>,
     /// The backdrop, drawn as a screen-filling quad before the graph. Not a [Gm] like the rest:
@@ -1477,6 +1517,17 @@ impl App {
 /// A free function rather than a method because it reads the dump the app holds and hands back
 /// what the app is about to hold beside it, which is two borrows of one [`App`] that do not
 /// overlap in fact and cannot both be taken in one.
+/// The simulation parameters a [`Layout`] decides, and the only ones the app sets from it.
+///
+/// Named rather than a tuple because they are four numbers of three kinds, and a caller reading
+/// them out positionally has nothing to check itself against.
+struct Solve {
+    dag_level_distance: Option<f32>,
+    dag_level_slack: f32,
+    force_charge: f32,
+    link_distance_max: Option<f32>,
+}
+
 /// How the person has asked for the graph to be laid out.
 ///
 /// The three of them together because they are one decision in three parts: they are set from one
@@ -1492,6 +1543,8 @@ struct Layout {
     layered: bool,
     /// How much of a world's size settles how hard it pushes. See [`node_mass`].
     hub_repulsion: f32,
+    /// How far a connection may stretch, in layers. See [`LINK_REACH_DEFAULT`].
+    link_reach: f32,
 }
 
 impl Default for Layout {
@@ -1500,6 +1553,7 @@ impl Default for Layout {
             dimensions: Dimensions::Three,
             layered: true,
             hub_repulsion: HUB_REPULSION_DEFAULT,
+            link_reach: LINK_REACH_DEFAULT,
         }
     }
 }
@@ -1526,6 +1580,11 @@ impl Layout {
                 .map_or(fallback.hub_repulsion, |push: f32| {
                     push.clamp(*HUB_REPULSION_RANGE.start(), *HUB_REPULSION_RANGE.end())
                 }),
+            link_reach: store::read(LINK_REACH)
+                .and_then(|reach| reach.parse().ok())
+                .map_or(fallback.link_reach, |reach: f32| {
+                    reach.clamp(*LINK_REACH_RANGE.start(), *LINK_REACH_RANGE.end())
+                }),
         }
     }
 
@@ -1540,15 +1599,18 @@ impl Layout {
         );
         store::write(LAYERED, Some(&self.layered.to_string()));
         store::write(HUB_REPULSION, Some(&self.hub_repulsion.to_string()));
+        store::write(LINK_REACH, Some(&self.link_reach.to_string()));
     }
 
     /// How the simulation is set up to solve it: the distance between layers, how far a world may
-    /// drift off the layer it belongs to, and how hard the worlds push each other apart.
+    /// drift off the layer it belongs to, how hard the worlds push each other apart, and how far
+    /// a connection between two of them may stretch.
     ///
     /// Two dimensions is not the same layout flattened. With every world on one plane there is
     /// nowhere for a crowd to go but sideways, so the layers close up and the push is turned far
-    /// higher for a graph to read as anything at all.
-    fn parameters(&self) -> (Option<f32>, f32, f32) {
+    /// higher for a graph to read as anything at all. The reach of a connection follows the same
+    /// spacing, so it is turned up with everything else.
+    fn parameters(&self) -> Solve {
         let (spacing, slack, charge) = match self.dimensions {
             Dimensions::Two => (
                 DAG_LEVEL_DISTANCE_2D,
@@ -1557,7 +1619,12 @@ impl Layout {
             ),
             Dimensions::Three => (DAG_LEVEL_DISTANCE, 0.0, FORCE_CHARGE),
         };
-        (self.layered.then_some(spacing), slack, charge)
+        Solve {
+            dag_level_distance: self.layered.then_some(spacing),
+            dag_level_slack: slack,
+            force_charge: charge,
+            link_distance_max: Some(spacing * self.link_reach),
+        }
     }
 }
 
@@ -1593,14 +1660,21 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
     let Layout {
         dimensions,
         hub_repulsion,
+        link_reach,
         ..
     } = layout;
-    let (dag_level_distance, dag_level_slack, force_charge) = layout.parameters();
+    let Solve {
+        dag_level_distance,
+        dag_level_slack,
+        force_charge,
+        link_distance_max,
+    } = layout.parameters();
     let mut graph = Graph::new(SimulationParameters {
         dimensions,
         dag_level_distance,
         dag_level_slack,
         force_charge,
+        link_distance_max,
         settle_after: Some(SETTLE_AFTER),
         ..Default::default()
     });
@@ -1650,6 +1724,11 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
                 nodes[from],
                 nodes[to],
                 EdgeData {
+                    reach: edge_reach(
+                        step.one_way(),
+                        node_radii[from].max(node_radii[to]),
+                        hub_repulsion,
+                    ),
                     user_data: step.one_way(),
                 },
             );
@@ -1807,6 +1886,7 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
         edge_colors,
         node_radii,
         hub_repulsion,
+        link_reach,
         descendants,
         connections,
         untaken,
@@ -1894,7 +1974,7 @@ fn resume_from(data: &mut AppEntities, before: &Standing) {
             Some(at)
         })
         .collect();
-    // In slot order, which is world order, for the reason [`AppEntities::apply_node_masses`]
+    // In slot order, which is world order, for the reason [`AppEntities::apply_hub_push`]
     // gives: one node was added per world and none is ever removed.
     let mut world = 0;
     data.graph.visit_nodes_mut(|mut node| {
@@ -2270,6 +2350,7 @@ impl Overlay {
         let mut panel = Panel {
             dimensions: parameters.dimensions,
             hub_repulsion: data.hub_repulsion,
+            link_reach: data.link_reach,
             ui_scale: self.ui_scale,
             layered: parameters.dag_level_distance.is_some(),
             chosen: None,
@@ -2432,19 +2513,27 @@ impl Overlay {
             store::write(UI_SCALE, Some(&self.ui_scale.to_string()));
         }
 
-        if panel.hub_repulsion != data.hub_repulsion {
-            data.hub_repulsion = panel.hub_repulsion;
-            data.apply_node_masses();
-        }
-        // Ahead of the early return below, because two of the three do not change the simulation's
+        // Ahead of the early return below, because two of the four do not change the simulation's
         // own parameters and would never be written down if this waited for one that did. Held off
         // while a slider is under the hand for the reason the UI scale is: a store is not
         // something to write to every frame of a drag.
         let layout = Layout {
             dimensions: panel.dimensions,
             layered: panel.layered,
-            hub_repulsion: data.hub_repulsion,
+            hub_repulsion: panel.hub_repulsion,
+            link_reach: panel.link_reach,
         };
+        // The two knobs reach the simulation on their own, ahead of that same return: neither
+        // rearranges the layout the way a mode switch does, and both are dragged, so each is
+        // followed live rather than waiting for the hand to come off it.
+        if panel.hub_repulsion != data.hub_repulsion {
+            data.hub_repulsion = panel.hub_repulsion;
+            data.apply_hub_push();
+        }
+        if panel.link_reach != data.link_reach {
+            data.link_reach = panel.link_reach;
+            data.graph.parameters_mut().link_distance_max = layout.parameters().link_distance_max;
+        }
         if layout != self.layout && !self.gui.context().egui_is_using_pointer() {
             self.layout = layout;
             layout.remember();
@@ -2457,10 +2546,11 @@ impl Overlay {
         let parameters = data.graph.parameters_mut();
         let reseed = panel.dimensions != parameters.dimensions;
         parameters.dimensions = panel.dimensions;
-        let (spacing, slack, force_charge) = layout.parameters();
-        parameters.dag_level_distance = spacing;
-        parameters.dag_level_slack = slack;
-        parameters.force_charge = force_charge;
+        let solve = layout.parameters();
+        parameters.dag_level_distance = solve.dag_level_distance;
+        parameters.dag_level_slack = solve.dag_level_slack;
+        parameters.force_charge = solve.force_charge;
+        parameters.link_distance_max = solve.link_distance_max;
         // A switch rearranges the whole layout rather than nudging it, so it gets a full
         // settling window instead of what a settled graph has left: see [ForceGraph::revive].
         data.graph.revive();
@@ -2844,6 +2934,8 @@ impl Panel {
             egui::Slider::new(&mut self.hub_repulsion, HUB_REPULSION_RANGE).text(t!("hub-push")),
         )
         .on_hover_text(t!("hub-push-hint"));
+        ui.add(egui::Slider::new(&mut self.link_reach, LINK_REACH_RANGE).text(t!("link-reach")))
+            .on_hover_text(t!("link-reach-hint"));
         ui.add(egui::Slider::new(&mut self.ui_scale, UI_SCALE_RANGE).text(t!("ui-scale")))
             .on_hover_text(t!("ui-scale-hint"));
         // The way back to a panel that was dismissed for good, so ticking that box is not a
@@ -3494,16 +3586,30 @@ impl AppStatics {
 }
 
 impl AppEntities {
-    /// Rewrites every mass from the current [`AppEntities::hub_repulsion`].
+    /// Rewrites every mass and every connection's reach from the current
+    /// [`AppEntities::hub_repulsion`].
+    ///
+    /// Both together because the knob means one thing: how much of a world's size is worth paying
+    /// attention to. A hub that pushes its neighbours harder needs the room to push them into.
+    /// See [`node_mass`] and [`edge_reach`].
     ///
     /// The visit runs in slot order, which is world order: the nodes were added one per world and
     /// none is ever removed, which is the same reading of an index the rest of the module makes.
-    fn apply_node_masses(&mut self) {
+    fn apply_hub_push(&mut self) {
         let (radii, hub_repulsion) = (&self.node_radii, self.hub_repulsion);
         let mut world = 0;
         self.graph.visit_nodes_mut(|mut node| {
             node.set_mass(node_mass(radii[world], hub_repulsion));
             world += 1;
+        });
+        self.graph.visit_edges_mut(|from, to, edge| {
+            // Whether the connection is walkable one way only is what the edge was given to
+            // carry, so the reach is rewritten from the same answer it was first built from.
+            edge.reach = edge_reach(
+                edge.user_data,
+                radii[from.index()].max(radii[to.index()]),
+                hub_repulsion,
+            );
         });
     }
 
@@ -3940,6 +4046,7 @@ impl AppEntities {
                 dimensions: parameters.dimensions,
                 layered: parameters.dag_level_distance.is_some(),
                 hub_repulsion: self.hub_repulsion,
+                link_reach: self.link_reach,
             },
         }
     }
@@ -4597,6 +4704,25 @@ fn lock_rotation(events: &mut [Event]) {
 /// opens the hubs out well past the width of the pictures on them - the point of the setting. A
 /// mass proportional to the radius instead would hold each pair at about the sum of its radii,
 /// which is the least that keeps the pictures apart and no more.
+/// How far one connection may stretch, as a multiple of what every connection is allowed: from
+/// whether it is walkable one way only, and how big the larger of the two worlds it joins is.
+///
+/// A one-way connection is the long way round: a chute, a warp, a door that does not open back.
+/// The two worlds it joins are a step apart to walk and nowhere near each other in the map, so it
+/// is left to stretch as far as the rest of the layout wants rather than dragged shut. Every
+/// other connection is held: a leaf's to the reach itself, a hub's to more of it. See
+/// [`HUB_REACH`] and [`SimulationParameters::link_distance_max`].
+///
+/// Read off the drawn size for the same reason [`node_mass`] is: size is already what the graph
+/// says about how much hangs off a world, and a second measure of the same thing would be one
+/// more place for the two to disagree.
+fn edge_reach(one_way: bool, radius: f32, hub_repulsion: f32) -> f32 {
+    if one_way {
+        return f32::INFINITY;
+    }
+    1.0 + HUB_REACH * hub_repulsion * (radius / NODE_LEAF_RADIUS - 1.0)
+}
+
 fn node_mass(radius: f32, hub_repulsion: f32) -> f32 {
     NODE_BASE_MASS * (1.0 + hub_repulsion * ((radius / NODE_LEAF_RADIUS).powi(3) - 1.0))
 }

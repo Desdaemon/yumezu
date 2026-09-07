@@ -137,6 +137,14 @@ const MAX_STEPS_PER_UPDATE: usize = 3;
 /// coordinates that are actually planar. Simulation units are pixel-sized, so this is invisible.
 const CONSTRAINT_SNAP: f32 = 1e-2;
 
+/// How much stiffer a spring gets once it is stretched past
+/// [`SimulationParameters::link_distance_max`], as a multiple of its own rate.
+///
+/// It decides how soft the ceiling is, not where it is: the overshoot at a given pull shrinks
+/// with this number. Large enough that a stretched edge is visibly held, small enough that the
+/// term stays an ordinary force the fixed step can integrate rather than a snap.
+const OVERSTRETCH_STIFFNESS: f32 = 20.0;
+
 /// Which axes the layout may use.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Dimensions {
@@ -152,6 +160,11 @@ pub enum Dimensions {
 pub struct SimulationParameters {
     pub force_charge: f32,
     pub force_spring: f32,
+    /// Ceiling on what one repulsion interaction may contribute per component.
+    ///
+    /// It keeps a single close neighbour from dominating the sum, which is what the softening
+    /// alone does not do. Repulsion only; the springs and [`ForceGraph::apply_force`] are not
+    /// clamped.
     pub force_max: f32,
     pub node_speed: f32,
     pub damping_factor: f32,
@@ -201,6 +214,19 @@ pub struct SimulationParameters {
     /// slack, at [`CONSTRAINT_RATE`], so a node the forces push outward hard enough settles a
     /// little past the band rather than exactly on it.
     pub dag_level_slack: f32,
+    /// How far an edge may stretch, in position units, or `None` to leave every spring linear
+    /// however far apart its nodes drift.
+    ///
+    /// A linear spring balances the repulsion of a whole graph at whatever length that happens
+    /// to take, and in a large graph that length is most of the graph: the summed push of every
+    /// other node grows with the node count while one edge's pull does not. Past this distance
+    /// the spring gains a second, [`OVERSTRETCH_STIFFNESS`] times stiffer term proportional to
+    /// the excess, so an edge's length is set by this number rather than by how crowded the rest
+    /// of the layout is.
+    ///
+    /// The ceiling is soft: an edge held open harder settles somewhat past it. Nothing else
+    /// changes -- unconnected nodes spread as far as the repulsion takes them.
+    pub link_distance_max: Option<f32>,
 }
 
 impl Default for SimulationParameters {
@@ -217,6 +243,7 @@ impl Default for SimulationParameters {
             dimensions: Dimensions::default(),
             dag_level_distance: Some(800.0),
             dag_level_slack: 0.0,
+            link_distance_max: None,
         }
     }
 }
@@ -265,6 +292,14 @@ where
 
 /// Stores data associated with an edge that can be modified by the user.
 pub struct EdgeData<UserEdgeData = ()> {
+    /// This edge's own ceiling, as a multiple of [`SimulationParameters::link_distance_max`].
+    ///
+    /// One edge is not always worth the same as another: an end with a crowd of edges on it needs
+    /// more room to seat them than an end with one, and an edge that is a long way round rather
+    /// than a short hop should not drag two ends together that the layout has good reason to keep
+    /// apart. `f32::INFINITY` exempts the edge from the ceiling altogether, which leaves it the
+    /// plain linear spring however far it stretches.
+    pub reach: f32,
     /// Arbitrary user data.
     ///
     /// Defaults to `()` if not specified.
@@ -277,6 +312,7 @@ where
 {
     fn default() -> Self {
         EdgeData {
+            reach: 1.0,
             user_data: Default::default(),
         }
     }
@@ -805,22 +841,38 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
     /// Spring attraction along the edges.
     ///
     /// The spring force is `spring * distance * 0.5` along the unit vector between the nodes,
-    /// which is just the offset vector scaled: no square root needed.
+    /// which is just the offset vector scaled: an edge within the ceiling
+    /// [`SimulationParameters::link_distance_max`] and [`EdgeData::reach`] set between them needs
+    /// no square root. One stretched past it pays for one, and pulls harder than linearly on the
+    /// excess.
+    ///
+    /// Unclamped, unlike the repulsion: this is the only force that grows with distance, so it
+    /// is the one that decides how far an edge ends up. Holding it to
+    /// [`SimulationParameters::force_max`] would leave a node held by a single edge losing to
+    /// the summed repulsion of a large graph, and the two would separate until that sum decayed
+    /// below the cap rather than until the spring caught them.
     fn attract(&mut self) {
-        let strength = self.parameters.force_spring * 0.5;
-        let force_max = self.parameters.force_max;
+        let rate = self.parameters.force_spring * 0.5;
+        let max = self.parameters.link_distance_max.unwrap_or(f32::INFINITY);
         let nodes = &mut self.nodes;
         for edge in self.graph.edge_references() {
             let (i, j) = (edge.source().index(), edge.target().index());
-            let fx = ((nodes.x[j] - nodes.x[i]) * strength)
-                .max(-force_max)
-                .min(force_max);
-            let fy = ((nodes.y[j] - nodes.y[i]) * strength)
-                .max(-force_max)
-                .min(force_max);
-            let fz = ((nodes.z[j] - nodes.z[i]) * strength)
-                .max(-force_max)
-                .min(force_max);
+            let (dx, dy, dz) = (
+                nodes.x[j] - nodes.x[i],
+                nodes.y[j] - nodes.y[i],
+                nodes.z[j] - nodes.z[i],
+            );
+            // Only an edge stretched past its own ceiling pays for the square root, and only the
+            // excess is stiffened: up to there the spring is the plain linear one.
+            let ceiling = max * edge.weight().reach;
+            let squared = dx * dx + dy * dy + dz * dz;
+            let strength = if squared > ceiling * ceiling {
+                let distance = squared.sqrt();
+                rate * (1.0 + OVERSTRETCH_STIFFNESS * (distance - ceiling) / distance)
+            } else {
+                rate
+            };
+            let (fx, fy, fz) = (dx * strength, dy * strength, dz * strength);
             nodes.ax[i] += fx;
             nodes.ay[i] += fy;
             nodes.az[i] += fz;
@@ -936,6 +988,28 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
                 rest: &mut self.rest,
                 user_data: &mut self.graph[idx],
             });
+        }
+    }
+
+    /// Mutates each edge with a user-defined callback `cb`, given the two nodes it joins.
+    ///
+    /// Wakes the layout whether or not the callback changes anything, the same way
+    /// [`ForceGraph::parameters_mut`] does: what an edge carries is read every step, so there is
+    /// no telling from here whether the next one still holds.
+    pub fn visit_edges_mut<
+        F: FnMut(DefaultNodeIdx, DefaultNodeIdx, &mut EdgeData<UserEdgeData>),
+    >(
+        &mut self,
+        mut cb: F,
+    ) {
+        self.rest.wake();
+        for idx in self.graph.edge_indices().collect::<Vec<_>>() {
+            let Some((source, target)) = self.graph.edge_endpoints(idx) else {
+                continue;
+            };
+            if let Some(edge) = self.graph.edge_weight_mut(idx) {
+                cb(source, target, edge);
+            }
         }
     }
 
@@ -1267,6 +1341,7 @@ mod test {
             n1_idx,
             n2_idx,
             EdgeData {
+                reach: 1.0,
                 user_data: UserEdgeData {},
             },
         );
@@ -1782,6 +1857,65 @@ mod test {
         assert!(ys.iter().all(|y| (y - 1000.0).abs() <= 220.0), "{ys:?}");
         let spread = ys.iter().fold(0.0f32, |a, y| a.max((y - 1000.0).abs()));
         assert!(spread > 1.0, "{ys:?}");
+    }
+
+    /// A ceiling holds an edge to about its length however hard the rest of the graph pulls the
+    /// two ends apart. The plain linear spring does not, an edge given more reach is held further
+    /// out, and an exempt one is not held at all.
+    #[test]
+    fn a_ceiling_bounds_how_far_an_edge_stretches() {
+        const CEILING: f32 = 250.0;
+
+        /// The longest edge of a hub with sixteen leaves on it. The leaves push each other off
+        /// the hub, so every edge carries the repulsion of the whole star rather than of one
+        /// neighbour.
+        fn star(link_distance_max: Option<f32>, reach: f32) -> f32 {
+            let mut graph = <ForceGraph>::new(SimulationParameters {
+                link_distance_max,
+                ..Default::default()
+            });
+            let hub = graph.add_node(Default::default());
+            for i in 0..16 {
+                // Seeded off the hub in different directions: a star started from one point has
+                // no offset for the repulsion to act along.
+                let leaf = graph.add_node(NodeData {
+                    x: (i % 4) as f32,
+                    y: (i / 4) as f32,
+                    z: (i % 3) as f32,
+                    ..Default::default()
+                });
+                graph.add_edge(
+                    hub,
+                    leaf,
+                    EdgeData {
+                        reach,
+                        user_data: (),
+                    },
+                );
+            }
+            for _ in 0..900 {
+                graph.update(FIXED_STEP);
+            }
+            let nodes = positions(&graph);
+            let [hx, hy, hz] = nodes[0];
+            nodes[1..].iter().fold(0.0f32, |longest, [x, y, z]| {
+                longest.max(((x - hx).powi(2) + (y - hy).powi(2) + (z - hz).powi(2)).sqrt())
+            })
+        }
+
+        let held = star(Some(CEILING), 1.0);
+        let free = star(None, 1.0);
+        // Soft, like the layer band: an edge under this much load settles somewhat past the
+        // ceiling. See [`OVERSTRETCH_STIFFNESS`].
+        assert!(held < CEILING * 1.3, "{held}");
+        assert!(free > held * 1.5, "{free} vs {held}");
+        // Reach is a multiple of the ceiling, so half again as much room seats the same star
+        // half again as far out.
+        let roomier = star(Some(CEILING), 1.5);
+        assert!(roomier > held * 1.3, "{roomier} vs {held}");
+        assert!(roomier < CEILING * 1.5 * 1.3, "{roomier}");
+        // An exempt edge is laid out as though no ceiling had been set at all.
+        assert_eq!(star(Some(CEILING), f32::INFINITY), free);
     }
 
     /// Layered mode pins each node to the layer its level names, however the forces would rather

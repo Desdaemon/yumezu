@@ -106,6 +106,8 @@ rocker-deeper = 深く
 
 hub-push = ハブの反発
 hub-push-hint = 値が大きいほど、接続の多いマップの反発力が強くなります
+link-reach = 接続の長さ
+link-reach-hint = 接続された2つのマップが離れられる距離を階層数で表します。一方通行の接続はこの制限を受けません
 ui-scale = UIの大きさ
 ui-scale-hint = パネルと文字を描く大きさ
 show-controls = 操作方法を表示

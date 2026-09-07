@@ -141,6 +141,8 @@ rocker-deeper = Deeper
 
 hub-push = hub push
 hub-push-hint = The higher the value, the harder bigger worlds' repulsion force is
+link-reach = link reach
+link-reach-hint = How far apart two connected worlds may settle, in layers. One-way connections are not held to it
 ui-scale = UI scale
 ui-scale-hint = How large the panel and its text are drawn
 show-controls = Show controls
