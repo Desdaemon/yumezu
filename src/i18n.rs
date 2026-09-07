@@ -274,7 +274,7 @@ mod tests {
         }
         for worded in [
             "fps", "worlds", "name", "released", "title", "kind", "out", "back", "effects",
-            "chance", "season", "percent",
+            "chance", "season", "percent", "when",
         ] {
             args.set(worded, "x");
         }

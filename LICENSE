@@ -1,0 +1,30 @@
+# Licensing
+
+## The code
+
+Dual licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+
+at your option, except for the following reimplementations/pieces of vendored code:
+
+- **`crates/force_graph_3d`** is derived from `force_graph`, (c) 2020 Tobias Mansfield-Williams,
+  and so is **MIT only**. See [crates/force_graph_3d/LICENSE](crates/force_graph_3d/LICENSE).
+- **`crates/dreamweaver`** reimplements the data half of Yume-2kki-Explorer, (c) 2020 Samuel H,
+  and so is **MIT only**. See [crates/dreamweaver/LICENSE](crates/dreamweaver/LICENSE).
+- **`src/text_agent.rs`** is vendored from `eframe`, (c) Emil Ernerfeldt and the egui contributors,
+  under MIT OR Apache-2.0.
+
+Unless you state otherwise, a contribution you send in is dual licensed as above, with no
+additional terms.
+
+## The data and the thumbnails
+
+`data.json` and `static/thumbnails.jpg` -- and every build artifact carrying them, including
+`dist/` and the apk -- are derived from [yume.wiki](https://yume.wiki) and are licensed
+[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode), the wiki's own
+terms. So: attribution to the wiki, no commercial use, and anything built out of them carries the
+same licence.
+
+See [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md).

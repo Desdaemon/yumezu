@@ -2709,6 +2709,7 @@ impl Panel {
         // that locks behind the person who ticked it.
         self.guide |= ui.button(t!("show-controls")).clicked();
         Self::clear_cache(ui);
+        Self::freshness(ui, dump);
         Self::yno(ui, sidebar, account, dump);
 
         if ui
@@ -2730,6 +2731,30 @@ impl Panel {
         {
             open_in_browser("https://explorer.yumemiru.dev/android");
         }
+    }
+
+    /// How old the graph is: the dump's own two stamps, which say when it was built and when the
+    /// wiki behind it was last read whole. A dump can be hours old and still be missing an edit an
+    /// incremental read never asked about, so both are worth reading.
+    fn freshness(ui: &mut egui::Ui, dump: Option<&world::Dump>) {
+        let Some(dump) = dump else {
+            return;
+        };
+        if let Some(built) = dump.last_update.as_deref() {
+            ui.label(t!("last-update", when = Self::stamped(built)))
+                .on_hover_text(t!("last-update-hint"));
+        }
+        if let Some(whole) = dump.last_full_update.as_deref() {
+            ui.label(t!("last-full-update", when = Self::stamped(whole)))
+                .on_hover_text(t!("last-full-update-hint"));
+        }
+    }
+
+    /// `2026-09-07T00:05:25.000Z` read as `2026-09-07 00:05`. To the minute, the dump being built
+    /// a few times a day at most, and left in UTC as the dump stamps it: the reader's own zone
+    /// would need a calendar this app does not carry.
+    fn stamped(iso: &str) -> String {
+        iso.get(..16).unwrap_or(iso).replace('T', " ")
     }
 
     /// Signing in to YNOproject, and drawing only as much of the graph as that account has seen.

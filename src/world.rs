@@ -60,6 +60,15 @@ pub struct Dump {
     /// [`World::author`].
     #[serde(rename = "authorInfoData", default)]
     credits: Vec<Credit>,
+    /// When the dump was built, ISO 8601. Shown in the settings tab, so a reader can tell how old
+    /// the graph in front of them is.
+    #[serde(rename = "lastUpdate", default)]
+    pub last_update: Option<String>,
+    /// When the wiki was last read whole rather than only where it had changed: a dump can be
+    /// fresh and still be missing an edit an incremental read did not think to ask about. See
+    /// `crates/dreamweaver`.
+    #[serde(rename = "lastFullUpdate", default)]
+    pub last_full_update: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -846,6 +855,8 @@ impl Dump {
             packed: self.packed,
             releases: self.releases.clone(),
             credits: self.credits.clone(),
+            last_update: self.last_update.clone(),
+            last_full_update: self.last_full_update.clone(),
         }
     }
 
@@ -1419,6 +1430,8 @@ mod tests {
             packed: 0,
             releases: Vec::new(),
             credits: Vec::new(),
+            last_update: None,
+            last_full_update: None,
         }
     }
 

@@ -151,6 +151,10 @@ clear-cache-hint = Empties the pictures kept between runs, so the next look at a
 clear-cache-clearing = Clearing...
 clear-cache-done = Downloads cleared
 clear-cache-failed = The downloads could not be cleared
+last-update = Data from { $when } UTC
+last-update-hint = When this app's copy of the wiki was built
+last-full-update = Last read whole { $when } UTC
+last-full-update-hint = When the wiki was last read entirely rather than only where it said it had changed. An edit the wiki did not report is picked up by such a read
 
 ## The player's own game: signing in to YNOproject, and drawing only what that account has seen.
 

@@ -2,6 +2,7 @@
 name = "force_graph_3d"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 petgraph = "0.8.3"

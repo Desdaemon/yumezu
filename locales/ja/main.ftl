@@ -116,6 +116,10 @@ clear-cache-hint = 実行間に保存された画像を消去します。次に�
 clear-cache-clearing = 消去中...
 clear-cache-done = ダウンロードを消去しました
 clear-cache-failed = ダウンロードを消去できませんでした
+last-update = データの作成: { $when } UTC
+last-update-hint = このアプリが持つウィキの写しが作られた時刻
+last-full-update = 全体の読み直し: { $when } UTC
+last-full-update-hint = 変更点だけでなくウィキ全体を読み直した時刻。ウィキが変更として報告しなかった編集はこの読み直しで反映されます
 
 ## YNOproject にログインして、行ったことのある世界だけを描く。
 

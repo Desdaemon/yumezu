@@ -2,6 +2,7 @@
 name = "dreamweaver"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 # The wiki is asked over its own `api.php`, which answers in JSON, so talking to it needs nothing
