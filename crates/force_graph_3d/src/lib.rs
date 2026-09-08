@@ -668,7 +668,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         // Reslicing to one common length lets the bounds checks fold away.
         let (x, y, z, mass) = (&x[..n], &y[..n], &z[..n], &mass[..n]);
         let (ax, ay, az) = (&mut ax[..n], &mut ay[..n], &mut az[..n]);
-        // Every entry is a single node here, so every entry gets one pair's worth of headroom.
+        // Every entry is a single node here, so every entry's clamp limit is one pair's `force_max`.
         self.limits.clear();
         self.limits.resize(n, force_max);
 
@@ -1041,12 +1041,11 @@ impl<UserNodeData> NodeMut<'_, UserNodeData> {
 /// cell aggregate standing in for several. The list may be every node in the graph or the
 /// interaction list of an octree walk; an entry at the target's own position contributes nothing.
 ///
-/// The lane loop is spelled the way it is so LLVM vectorizes it without bounds-checking or
-/// NaN-correcting inside the body; `tests/codegen.rs` fails if one of those spellings stops
-/// working.
+/// The lane loop is written the way it is so LLVM vectorizes it without bounds-checking or
+/// NaN-correcting inside the loop; `tests/codegen.rs` fails if either of those stops working.
 ///
 /// Not `#[inline]`: entered once per node and run over every interaction that node has, so the
-/// call is already amortized and one out-of-line copy keeps the vectorized body somewhere a
+/// call is already amortized and one out-of-line copy keeps the vectorized loop somewhere a
 /// disassembler can find it.
 fn repulsion_on(
     target: [f32; 3],
@@ -1072,8 +1071,8 @@ fn repulsion_on(
     let mut fz = [0.0f32; LANES];
 
     // Chunked rather than indexed by a running base: `&[[f32; LANES]]` carries the lane count in
-    // its type, so the body needs no bounds check. LLVM does not prove that redundant for five
-    // slices indexed in step, and the check it leaves behind sits inside the vector body.
+    // its type, so the loop needs no bounds check. LLVM does not prove that redundant for five
+    // slices indexed in step, and the check it leaves behind sits inside the vectorized loop.
     let (xc, xr) = x.as_chunks::<LANES>();
     let (yc, yr) = y.as_chunks::<LANES>();
     let (zc, zr) = z.as_chunks::<LANES>();
@@ -1114,12 +1113,13 @@ fn inv_cube(d2: f32) -> f32 {
 }
 
 /// `v` held to `+/-limit`, and a NaN `v` to `-limit`. `limit` is assumed not to be NaN, the one
-/// input the two bodies disagree on.
+/// input the two variants disagree on.
 ///
 /// There are two because the clamp that lowers to bare instructions differs by backend, and this
 /// is the innermost expression in the kernel. `f32::max` and `f32::min` are IEEE `maxNum` and
-/// `minNum`, which return the *other* operand when one side is NaN; `maxps`, `minps` and
-/// `f32x4.pmax`/`pmin` do the opposite and need a compare and a blend per bound to correct.
+/// `minNum`, which return the operand that is *not* NaN when one side is NaN. The hardware minimum
+/// and maximum do the opposite — `maxps`/`minps` on x86, `f32x4.pmax`/`pmin` on wasm — and need a
+/// NaN test and a select per bound to correct.
 /// aarch64 alone has the IEEE rule in hardware, as `fmaxnm`/`fminnm`, where it is the comparisons
 /// that need the second instruction. `tests/codegen.rs` checks that the intended one arrived.
 #[inline(always)]
@@ -1362,14 +1362,14 @@ mod test {
     }
 
     /// CI runs on one architecture, so without this the Android build would reach a phone with its
-    /// clamp never having been executed anywhere.
+    /// clamp never executed anywhere.
     ///
     /// A NaN `limit` is excluded: the comparisons propagate it and IEEE `minNum` discards it.
     /// Zeroes are compared by value rather than by bit, because `fmaxnm`/`fminnm` do not pick the
     /// same zero as the comparisons and `-0.0` moves a node exactly as far as `0.0`. That shows up
     /// only on aarch64, which `just test-arm` is for.
     #[test]
-    fn the_two_clamp_bodies_agree() {
+    fn the_two_clamp_variants_agree() {
         const INTERESTING: [f32; 11] = [
             0.0,
             -0.0,
@@ -1397,7 +1397,7 @@ mod test {
 
     /// The distance to a non-finite coordinate is infinite, making the falloff zero and the force
     /// `inf * 0`; only the clamp turns that back into a number, so the bound it picks for a NaN is
-    /// load-bearing.
+    /// what keeps the rest of the graph finite.
     #[test]
     fn a_runaway_coordinate_does_not_infect_the_others() {
         let mut graph = <ForceGraph>::new(Default::default());

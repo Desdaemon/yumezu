@@ -1,6 +1,6 @@
-//! Guards the shape of the code LLVM emits for the repulsion kernel.
+//! Guards the instructions LLVM emits for the repulsion kernel.
 //!
-//! The kernel is safe Rust spelled the way the auto-vectorizer wants it. Nothing in the language
+//! The kernel is safe Rust written in a way amenable to the auto-vectorizer. Nothing in the language
 //! enforces that, so a refactor, a profile change or a new compiler can quietly drop it back to
 //! one lane at a time -- the layout still looks right and the tests still pass, only slower. Each
 //! check builds the crate the way something really ships it and asserts on the LLVM IR.
@@ -99,7 +99,7 @@ pub extern "C" fn drive(graph: &mut ForceGraph, dt: f32) -> bool { graph.update(
     }
 
     // Newest first: the scratch target directory outlives one run and cargo never cleans it, so
-    // IR from an earlier build of a different shape can still be lying there. A build that
+    // IR from an earlier build of a different revision can still be lying there. A build that
     // changed nothing rewrites nothing, which leaves the newest file the current one either way.
     let mut emitted: Vec<PathBuf> = walk(&dir.join("target"))
         .filter(|p| p.extension().is_some_and(|e| e == "ll"))
@@ -141,12 +141,8 @@ fn function(ir: &str, name: &str) -> Option<String> {
     let start = ir
         .lines()
         .position(|l| l.starts_with("define") && l.contains(name))?;
-    let body: Vec<&str> = ir
-        .lines()
-        .skip(start)
-        .take_while(|l| *l != "}")
-        .collect();
-    Some(body.join("\n"))
+    let block: Vec<&str> = ir.lines().skip(start).take_while(|l| *l != "}").collect();
+    Some(block.join("\n"))
 }
 
 /// A bounds check left in the middle of the loop would make `as_chunks` pointless.
@@ -163,8 +159,8 @@ fn assert_vectorized(ir: &str, width: usize) {
     );
 }
 
-/// `clamp_symmetric`'s two bodies are not interchangeable: each lowers to bare instructions on its
-/// own architecture and needs correcting after on the other. A `cfg` reaching the wrong target is
+/// `clamp_symmetric`'s two variants are not interchangeable: each lowers to bare instructions on
+/// its own architecture and needs correcting after on the opposite one. A `cfg` reaching the wrong target is
 /// silent and costs about a tenth of the loop.
 #[track_caller]
 fn assert_clamp_is_ieee(ir: &str, expected: bool) {
@@ -181,7 +177,7 @@ fn assert_clamp_is_ieee(ir: &str, expected: bool) {
             "the clamp is comparisons here, which aarch64 needs two instructions for where \
              `fmaxnm`/`fminnm` would do"
         } else {
-            "the clamp is IEEE min/max here, which costs a compare and a blend per bound"
+            "the clamp is IEEE min/max here, which costs a NaN test and a select per bound"
         }
     );
 }
@@ -190,10 +186,7 @@ fn assert_clamp_is_ieee(ir: &str, expected: bool) {
 /// `simd128` is off by default and set in `.cargo/config.toml`.
 #[test]
 fn the_lane_loop_vectorizes_on_wasm() {
-    let Some(ir) = kernel_ir(
-        Some("wasm32-unknown-unknown"),
-        "-C target-feature=+simd128",
-    ) else {
+    let Some(ir) = kernel_ir(Some("wasm32-unknown-unknown"), "-C target-feature=+simd128") else {
         return;
     };
     // wasm `v128` is four lanes wide whatever `LANES` is; the loop is unrolled to fill it.
@@ -224,7 +217,7 @@ fn the_lane_loop_vectorizes_on_the_host() {
         "the lane loop is scalar: no vector type in the emitted IR"
     );
     assert_vectorized(&ir, if ir.contains("<8 x float>") { 8 } else { 4 });
-    // Whichever body this host's own architecture selects, which is the aarch64 one when the
+    // Whichever variant this host's own architecture selects, which is the aarch64 one when the
     // machine running the tests is itself aarch64.
     assert_clamp_is_ieee(&ir, cfg!(target_arch = "aarch64"));
 }
@@ -260,8 +253,8 @@ fn the_shipping_profile_builds_this_crate_for_speed() {
     let min = profile("[profile.min]");
     let package = profile("[profile.min.package.force_graph_3d]");
     let whole_profile = for_speed(setting(&min, "opt-level"));
-    let this_package =
-        for_speed(setting(&package, "opt-level")) && setting(&min, "lto").as_deref() == Some("false");
+    let this_package = for_speed(setting(&package, "opt-level"))
+        && setting(&min, "lto").as_deref() == Some("false");
 
     assert!(
         whole_profile || this_package,
