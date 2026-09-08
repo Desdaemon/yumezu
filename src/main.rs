@@ -1,6 +1,6 @@
-#![cfg_attr(any(target_os = "android", feature = "gpu-profile"), deny(unsafe_code))]
+#![cfg_attr(any(target_os = "android", feature = "profile"), deny(unsafe_code))]
 #![cfg_attr(
-    not(any(target_os = "android", feature = "gpu-profile")),
+    not(any(target_os = "android", feature = "profile")),
     forbid(unsafe_code)
 )]
 

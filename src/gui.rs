@@ -105,7 +105,9 @@ impl Gui {
 
     /// Must be called inside the write callback of the render target the scene was drawn to, so
     /// the overlay lands over it.
-    pub(crate) fn paint(&mut self, window: &Window) {
+    ///
+    /// Answers with the draw calls it made, egui painting one per clipped primitive.
+    pub(crate) fn paint(&mut self, window: &Window) -> usize {
         let shapes = std::mem::take(&mut self.shapes);
         let mut textures = std::mem::take(&mut self.textures);
         for (id, delta) in &textures.set {
@@ -120,6 +122,7 @@ impl Gui {
         for id in textures.free.drain(..) {
             self.painter.free_texture(id);
         }
+        primitives.len()
     }
 
     /// A call rather than a `Drop` because on a phone the context holding the buffers goes away

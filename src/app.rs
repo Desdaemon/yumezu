@@ -62,8 +62,6 @@ const IDLE_REDRAW_HZ: f32 = 30.0;
 /// Frames a second while the only reason to draw one is to see whether something asked for over
 /// the network has landed. Nothing on screen is moving, so this is a poll and not an animation.
 const POLL_REDRAW_HZ: f32 = 10.0;
-/// How often [`FrameStats`] says what it has counted.
-const FRAME_STATS_SECONDS: f64 = 2.0;
 
 /// How long one world takes to grow from nothing to its own size when it arrives.
 const ARRIVAL_SECONDS: f32 = 0.45;
@@ -291,6 +289,51 @@ mod guide;
 pub(crate) mod i18n;
 mod japanese;
 mod map;
+#[cfg(all(feature = "profile", not(target_family = "wasm")))]
+mod profile;
+
+/// What [`profile`] is everywhere it is not compiled: the same surface, all of it nothing, so no
+/// other file has to know which build this is and the frame that ships has no counters, no timer
+/// queries and no branches on either.
+#[cfg(not(all(feature = "profile", not(target_family = "wasm"))))]
+mod profile {
+    use three_d::{Camera, Context};
+
+    pub(super) fn eager() -> bool {
+        false
+    }
+
+    pub(super) fn unlocked() -> bool {
+        false
+    }
+
+    pub(super) fn pan_aside(_camera: &mut Camera) {}
+
+    pub(super) fn controls(_ui: &mut egui::Ui) {}
+
+    pub(super) struct FrameStats;
+
+    impl FrameStats {
+        pub(super) fn new() -> Self {
+            Self
+        }
+
+        pub(super) fn timed(
+            &mut self,
+            _name: &'static str,
+            _context: &Context,
+            body: impl FnOnce() -> u32,
+        ) {
+            body();
+        }
+
+        pub(super) fn stepped(&mut self, _spent: std::time::Duration) {}
+
+        pub(super) fn began(&mut self, _context: &Context) {}
+
+        pub(super) fn frame(&mut self, _spent: std::time::Duration, _rebuilt: bool) {}
+    }
+}
 mod store;
 #[cfg(target_family = "wasm")]
 mod text_agent;
@@ -299,6 +342,7 @@ mod world;
 mod yno;
 
 use i18n::t;
+use profile::FrameStats;
 
 use crate::i18n::speaking_japanese;
 
@@ -364,7 +408,7 @@ fn antialias_remember(on: bool) {
 /// When the next frame is wanted, which is what a frame ends by working out.
 ///
 /// The window is redrawn on demand rather than continuously: see [`App::wanted`] for what is
-/// asking, and [`Pacing`] for the switch that puts the old always-on behaviour back.
+/// asking, and [`profile::eager`] for the switch that puts the old always-on behaviour back.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Wanted {
     /// As soon as the display will take one: something is moving.
@@ -395,304 +439,6 @@ impl Wanted {
         } else {
             Self::After(delay)
         }
-    }
-}
-
-/// Whether the window is drawn on demand or continuously.
-///
-/// [`Pacing::Eager`] is how every frame was drawn before the demand was worked out, kept so that
-/// the two can be measured against each other in one binary: it redraws at the display's rate
-/// whatever is on screen, rebuilds the whole frame's geometry whether or not anything it is built
-/// from has changed, and lays the dash runs out again every frame. What it does not put back is
-/// the pair of matrix products a dash used to cost -- see [`DashRun`] -- so it reads as a floor on
-/// the old cost rather than the old cost itself.
-///
-/// `YUMEZU_FRAMES=eager` selects it and `YUMEZU_FRAMES=stats` turns [`FrameStats`] on; `eager,stats`
-/// does both. The page has no environment to name them in, so there the two are separate builds.
-#[derive(Clone, Copy, PartialEq)]
-enum Pacing {
-    Adaptive,
-    Eager,
-}
-
-impl Pacing {
-    fn eager(self) -> bool {
-        self == Self::Eager
-    }
-}
-
-/// Whether `YUMEZU_FRAMES` names `word`. Always false on the page, which has no environment to
-/// name it in; the two pacings are separate builds there. See [`Pacing`].
-fn asked(word: &str) -> bool {
-    std::env::var("YUMEZU_FRAMES").is_ok_and(|asked| asked.split(',').any(|it| it.trim() == word))
-}
-
-/// How far each step of [`AppStatics::pan_aside`] moves, and how long it waits for the layout to
-/// stop growing first.
-#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-const PAN_ASIDE_STEP: f32 = 40.0;
-#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-const PAN_ASIDE_SETTLES_SECONDS: f64 = 8.0;
-
-/// How many frames of queries are kept, and so how many frames late an answer may be without
-/// being thrown away. The card is a few frames behind the processor and asking it for an answer it
-/// has not reached would stall the very thing being measured.
-#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-const GPU_CLOCK_DEPTH: usize = 4;
-
-/// Seconds the card spent on a frame, which the processor's own milliseconds never say: a frame
-/// here spends under one of them and then waits in the driver, so this is the number that tells a
-/// view that is slow from one that is merely paced.
-///
-/// Native only. The page's equivalent is an extension browsers do not hand out, a clock this exact
-/// being a way to read what other tabs are doing.
-#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-struct GpuClock {
-    context: Context,
-    queries: Vec<three_d::context::Query>,
-    /// Frames begun, which picks both this frame's query and the one old enough to read.
-    begun: usize,
-}
-
-#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-impl GpuClock {
-    /// An empty set of queries is a driver that would not give them out, which costs the report a
-    /// column and nothing else.
-    fn new(context: &Context) -> Self {
-        // SAFETY: names no object and reads no memory. A refusal comes back as an error.
-        #[allow(unsafe_code)]
-        let queries = (0..GPU_CLOCK_DEPTH)
-            .map_while(|_| unsafe { context.create_query() }.ok())
-            .collect();
-        Self {
-            context: context.clone(),
-            queries,
-            begun: 0,
-        }
-    }
-
-    /// Whether there are queries to keep, which there are unless the driver refused them.
-    fn ready(&self) -> bool {
-        self.queries.len() == GPU_CLOCK_DEPTH
-    }
-
-    fn begin(&self) {
-        if !self.ready() {
-            return;
-        }
-        // SAFETY: the query is this context's own and no other is open -- `end` closes each one
-        // before `begin` opens the next, and nothing else in the app opens one at all.
-        #[allow(unsafe_code)]
-        unsafe {
-            self.context.begin_query(
-                three_d::context::TIME_ELAPSED,
-                self.queries[self.begun % GPU_CLOCK_DEPTH],
-            );
-        }
-    }
-
-    /// Ends this frame's query and answers with the frame from [`GPU_CLOCK_DEPTH`] ago, if the
-    /// card has finished it. `None` is a frame's measurement missed rather than an error.
-    fn end(&mut self) -> Option<f64> {
-        use three_d::context::{QUERY_RESULT, QUERY_RESULT_AVAILABLE, TIME_ELAPSED};
-        if !self.ready() {
-            return None;
-        }
-        // SAFETY: `begin` opened this context's query, and every object named below is its own.
-        #[allow(unsafe_code)]
-        unsafe {
-            self.context.end_query(TIME_ELAPSED)
-        };
-        self.begun += 1;
-        // Nothing has gone all the way round yet, so the slot below holds a query never begun and
-        // an answer that would read as an instant frame.
-        if self.begun < GPU_CLOCK_DEPTH {
-            return None;
-        }
-        // The slot about to be written next is the oldest one written, which is the frame
-        // `GPU_CLOCK_DEPTH` back. Asked whether it is ready rather than for the answer: the answer
-        // would stall the processor on the very card it is timing.
-        let oldest = self.queries[self.begun % GPU_CLOCK_DEPTH];
-        #[allow(unsafe_code)]
-        unsafe {
-            (self
-                .context
-                .get_query_parameter_u32(oldest, QUERY_RESULT_AVAILABLE)
-                != 0)
-                .then(|| self.context.get_query_parameter_u64(oldest, QUERY_RESULT) as f64 * 1e-9)
-        }
-    }
-}
-
-/// One pass of a frame, timed on its own. See the `gpu-profile` feature and [`FrameStats::timed`].
-#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-struct Section {
-    name: &'static str,
-    clock: GpuClock,
-    /// Seconds this pass took over the [`Section::answered`] frames the card answered for. Reset
-    /// by the report rather than by [`Tally`], which would take the queries with it.
-    spent: f64,
-    answered: u32,
-}
-
-/// What a reporting window has added up so far.
-#[derive(Default)]
-struct Tally {
-    frames: u32,
-    /// Seconds of processor time inside [`App::draw`], which is the frame without the wait for
-    /// the display that follows it.
-    spent: f64,
-    /// The worst single frame of the window, which is what a stutter is.
-    worst: f64,
-    /// Frames that got as far as rebuilding the layout's geometry, of the [`Tally::frames`] that
-    /// were drawn at all.
-    rebuilt: u32,
-    /// Seconds the card spent, over the [`Tally::carded`] frames it answered for. See [`GpuClock`].
-    card: f64,
-    carded: u32,
-}
-
-/// What one frame cost and how many of them there were.
-///
-/// Reported rather than drawn, because a counter on screen is one more thing the frame has to
-/// paint. Off unless `YUMEZU_FRAMES=stats` asks for it.
-struct FrameStats {
-    on: bool,
-    since: web_time::Instant,
-    tally: Tally,
-    /// Built on the first frame, the context being younger than this, and `None` for as long
-    /// as the driver will not give out the queries. See [`GpuClock`].
-    #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-    clock: Option<GpuClock>,
-    /// Whether the frame is timed pass by pass rather than whole. The whole-frame clock stands
-    /// down while it is, a card's timer being unable to hold another inside it.
-    #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-    parts: bool,
-    /// In the order the frame draws them, which is the order they are first timed in.
-    #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-    sections: Vec<Section>,
-}
-
-impl FrameStats {
-    fn new(on: bool) -> Self {
-        Self {
-            on,
-            since: web_time::Instant::now(),
-            tally: Tally::default(),
-            #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-            clock: None,
-            #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-            parts: asked("parts"),
-            #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-            sections: Vec::new(),
-        }
-    }
-
-    /// Runs `body` with the card's clock on it, under `name`, when the frame is being taken apart.
-    /// Otherwise it is `body` and nothing else.
-    ///
-    /// Every pass of the frame goes through here whether or not anything is being measured, so
-    /// that what is measured is the frame that ships rather than one drawn differently to be
-    /// looked at.
-    fn timed(&mut self, name: &'static str, context: &Context, body: impl FnOnce()) {
-        #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-        if self.parts {
-            let which = match self.sections.iter().position(|it| it.name == name) {
-                Some(which) => which,
-                None => {
-                    self.sections.push(Section {
-                        name,
-                        clock: GpuClock::new(context),
-                        spent: 0.0,
-                        answered: 0,
-                    });
-                    self.sections.len() - 1
-                }
-            };
-            self.sections[which].clock.begin();
-            body();
-            if let Some(spent) = self.sections[which].clock.end() {
-                self.sections[which].spent += spent;
-                self.sections[which].answered += 1;
-            }
-            return;
-        }
-        let _ = (name, context);
-        body();
-    }
-
-    /// Opens the frame the next [`FrameStats::frame`] closes.
-    fn began(&mut self, context: &Context) {
-        if !self.on {
-            return;
-        }
-#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-        if !self.parts {
-            self.clock
-                .get_or_insert_with(|| GpuClock::new(context))
-                .begin();
-        }
-        let _ = context;
-    }
-
-    fn frame(&mut self, spent: std::time::Duration, rebuilt: bool) {
-        if !self.on {
-            return;
-        }
-#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-        if let Some(card) = self.clock.as_mut().and_then(GpuClock::end) {
-            self.tally.card += card;
-            self.tally.carded += 1;
-        }
-        let spent = spent.as_secs_f64();
-        self.tally.frames += 1;
-        self.tally.spent += spent;
-        self.tally.worst = self.tally.worst.max(spent);
-        self.tally.rebuilt += u32::from(rebuilt);
-        let window = self.since.elapsed().as_secs_f64();
-        if window < FRAME_STATS_SECONDS {
-            return;
-        }
-        let Tally {
-            frames,
-            spent,
-            worst,
-            rebuilt,
-            card,
-            carded,
-        } = std::mem::take(&mut self.tally);
-        self.since = web_time::Instant::now();
-        // Absent wherever the card will not be asked, which is the page and any driver that
-        // refused the queries.
-        let card = match carded {
-            0 => String::new(),
-            carded => format!("{:.2} ms on the card, ", 1e3 * card / carded as f64),
-        };
-        #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-        {
-            let each: Vec<String> = self
-                .sections
-                .iter_mut()
-                .filter(|it| it.answered > 0)
-                .map(|it| {
-                    let each =
-                        format!("{} {:.2}", it.name, 1e3 * it.spent / f64::from(it.answered));
-                    (it.spent, it.answered) = (0.0, 0);
-                    each
-                })
-                .collect();
-            if !each.is_empty() {
-                log::info!("ms on the card, pass by pass: {}", each.join(", "));
-            }
-        }
-        log::info!(
-            "{:.1} fps, {:.2} ms drawing a frame, {:.2} ms worst, \
-             {:.0}% of the wall clock, {card}{rebuilt} of {frames} frames rebuilt",
-            frames as f64 / window,
-            1e3 * spent / frames as f64,
-            1e3 * worst,
-            100.0 * spent / window,
-        );
     }
 }
 
@@ -736,7 +482,6 @@ pub(super) struct App {
     asked: bool,
     /// Seconds since anything on screen last moved. See [`IDLE_AFTER_SECONDS`].
     still: f32,
-    pacing: Pacing,
     stats: FrameStats,
 }
 
@@ -1845,21 +1590,14 @@ impl App {
             wanted: Wanted::Now,
             asked: false,
             still: 0.0,
-            pacing: match asked("eager") {
-                true => Pacing::Eager,
-                false => Pacing::Adaptive,
-            },
-            stats: FrameStats::new(asked("stats")),
+            stats: FrameStats::new(),
         }
     }
     fn reset(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, window: Window) {
         self.ctx.window = Some(window);
         let window = self.ctx.window.as_ref().unwrap();
         let surface = SurfaceSettings {
-            // Off leaves the loop free to draw as fast as the card will let it, which is the only
-            // way to see the card's cost move: with it on, everything short of the refresh
-            // interval reads the same. See [`asked`].
-            vsync: !asked("unlocked"),
+            vsync: !profile::unlocked(),
             // Read here rather than carried, so the surface and the overlay that reports it are
             // built from one answer. See [`Overlay::antialias_running`].
             multisamples: match antialias_remembered() {
@@ -2509,8 +2247,7 @@ impl App {
         let fading = (self.veil > 0.0).then(|| (self.said.clone(), self.veil));
         let data = self.data.as_mut().unwrap();
         self.statics.camera.set_viewport(frame_input.viewport);
-        #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-        self.statics.pan_aside();
+        profile::pan_aside(&mut self.statics.camera);
         let account = &mut self.yno;
         // The whole game, which is the yardstick the settings tab measures one person's share
         // against: the graph beside it may be only the frontier.
@@ -2611,7 +2348,9 @@ impl App {
         // Unclamped: the layout steps at a fixed rate and caps how much of a long frame it catches
         // up on itself, so a stalled tab is already its problem. What it returns is whether there
         // is geometry to rebuild.
+        let stepping = web_time::Instant::now();
         let stepped = data.graph.update(frame_input.elapsed_time as f32 * 1e-3);
+        self.stats.stepped(stepping.elapsed());
         // The quads face the camera, so turning it dates their transformations even over a layout
         // that has not moved at all.
         let turned = data.billboard != billboard(&self.statics.camera);
@@ -2623,13 +2362,13 @@ impl App {
         // Everything below reads the node quads, the camera, or the instance colors, so this is
         // what says any of it has to be worked out again.
         let recolored = std::mem::take(&mut data.recolored);
-        let moved = stepped || turned || arriving || recolored || self.pacing.eager();
+        let moved = stepped || turned || arriving || recolored || profile::eager();
         if moved {
             data.rebuild_instances(&self.statics.camera);
         }
         // Not `turned`: a dash is a solid in the scene rather than a quad held square to the
         // camera, so only the layout dates the runs it marches along.
-        data.dash_runs_stale |= stepped || arriving || self.pacing.eager();
+        data.dash_runs_stale |= stepped || arriving || profile::eager();
         // Whether or not anything else moved: see [`AppEntities::march_dashes`].
         data.march_dashes((frame_input.elapsed_time as f32 * 1e-3).min(0.05));
         // Both of these are also where a picture that has arrived is taken out of its fetch, and a
@@ -2668,10 +2407,9 @@ impl App {
         // with the depth test off and no blending, so the color is written twice otherwise.
         //
         // Which way this goes depends on the renderer, and only one of the two has been
-        // measured. An immediate-mode desktop card saves the write. A tile-based one may
-        // instead have to read the previous frame's color back into each tile, because a
-        // clear is what tells it the tile can start empty -- and phones are all tile-based,
-        // as are most of the machines the page runs on. Measure there before shipping it.
+        // measured. An IMR keeps the target in memory, so this is a write saved. A TBDR
+        // resolves per tile and the clear is its LoadOp: drop it and every tile loads the last
+        // frame back instead. Phones are all TBDR, as is Apple silicon. Measure there first.
         screen.clear(ClearState::depth(1.0));
         // Split only to fix the order: one call would sort these by each mesh's centre, which says
         // nothing about which covers which. Pictures before lines, so the depth they write drops
@@ -2684,32 +2422,49 @@ impl App {
                     Ok(())
                 })
                 .unwrap();
+            1
         });
         self.stats.timed("pictures", ctx, || {
+            let mut calls = 0;
             screen.render(
                 camera,
                 data.drawn_thumbnails()
                     .into_iter()
-                    .chain(data.detail.drawn()),
+                    .chain(data.detail.drawn())
+                    .inspect(|_| calls += 1),
                 &[],
             );
+            calls
         });
         self.stats.timed("lines", ctx, || {
-            screen.render(camera, data.edges.into_iter().chain(&data.dashes), &[]);
+            let mut calls = 0;
+            screen.render(
+                camera,
+                data.edges
+                    .into_iter()
+                    .chain(&data.dashes)
+                    .inspect(|_| calls += 1),
+                &[],
+            );
+            calls
         });
         // Last of the scene, because it brightens whichever pass above drew the world it is over.
         self.stats.timed("glow", ctx, || {
-            screen.render(camera, data.drawn_glow(), &[]);
+            let glow = data.drawn_glow();
+            screen.render(camera, glow, &[]);
+            u32::from(glow.is_some())
         });
         // Over the scene, into the same target, which is what makes it an overlay.
         let overlay = self.overlay.as_mut().unwrap();
         self.stats.timed("panel", ctx, || {
+            let mut calls = 0;
             screen
                 .write::<std::convert::Infallible>(|| {
-                    overlay.gui.paint(window);
+                    calls = overlay.gui.paint(window) as u32;
                     Ok(())
                 })
                 .unwrap();
+            calls
         });
 
         // Last, so that everything able to start something moving has had its turn.
@@ -2729,7 +2484,7 @@ impl App {
             true => 0.0,
             false => self.still + frame_input.elapsed_time as f32 * 1e-3,
         };
-        self.wanted = if self.pacing.eager() {
+        self.wanted = if profile::eager() {
             Wanted::Now
         } else {
             [
@@ -3418,6 +3173,7 @@ impl Panel {
         ui.add(egui::Slider::new(&mut self.ui_scale, UI_SCALE_RANGE).text(t!("ui-scale")))
             .on_hover_text(t!("ui-scale-hint"));
         self.antialiasing(ui);
+        profile::controls(ui);
         // The way back to a panel that was dismissed for good, so ticking that box is not a door
         // that locks behind the person who ticked it.
         self.guide |= ui.button(t!("show-controls")).clicked();
@@ -4011,36 +3767,6 @@ impl AppStatics {
     /// Turns the camera square to the `z = 0` plane, keeping where it looks and how far off it
     /// stands. The one turn two-dimensional mode makes on its own, because it is also the one the
     /// person can no longer make: see [`lock_rotation`].
-    /// Holds the pose a run opens on and then pans away from it, a reporting window a step.
-    /// `YUMEZU_FRAMES=dolly` asks for it.
-    ///
-    /// A pan rather than a dolly because it changes what is in the frame and nothing else -- the
-    /// distance and the orientation stay, so two reports differ only by what they were drawing.
-    #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
-    fn pan_aside(&mut self) {
-        if !asked("dolly") {
-            return;
-        }
-        static SINCE: std::sync::OnceLock<web_time::Instant> = std::sync::OnceLock::new();
-        static OPENED: std::sync::OnceLock<(Vec3, Vec3)> = std::sync::OnceLock::new();
-        let camera = &mut self.camera;
-        let (eye, at) = *OPENED.get_or_init(|| (camera.position(), camera.target()));
-        // Held off while the layout is still blowing out from its seed, which is not a view
-        // anybody looks at and not one worth timing.
-        let waited = SINCE
-            .get_or_init(web_time::Instant::now)
-            .elapsed()
-            .as_secs_f64()
-            - PAN_ASIDE_SETTLES_SECONDS;
-        let step = (waited / FRAME_STATS_SECONDS).max(0.0) as u32;
-        let aside = camera.right_direction().normalize() * PAN_ASIDE_STEP * step as f32;
-        if step > 0 {
-            log::info!("{:.0} units aside", PAN_ASIDE_STEP * step as f32);
-        }
-        let up = camera.up();
-        camera.set_view(eye + aside, at + aside, up);
-    }
-
     fn face_plane(&mut self) {
         let target = self.control.target;
         let distance = target.distance(self.camera.position());

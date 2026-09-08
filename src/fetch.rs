@@ -126,7 +126,7 @@ fn judged<'a>(
                 .unwrap_or("none")
                 .to_owned()
         };
-        log::info!(
+        log::debug!(
             "{} {}: cache lookup {}, served {}",
             response.status().as_u16(),
             url,
@@ -234,7 +234,7 @@ pub fn clear() {
         };
         *CLEARED.lock().unwrap() = match outcome {
             Ok(()) => {
-                log::info!("the download cache has been emptied");
+                log::warn!("the download cache has been emptied");
                 Cleared::Done
             }
             Err(error) => {
