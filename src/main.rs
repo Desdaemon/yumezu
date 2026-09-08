@@ -1,3 +1,9 @@
+#![cfg_attr(any(target_os = "android", feature = "gpu-profile"), deny(unsafe_code))]
+#![cfg_attr(
+    not(any(target_os = "android", feature = "gpu-profile")),
+    forbid(unsafe_code)
+)]
+
 #[cfg(target_family = "wasm")]
 use winit::platform::web::EventLoopExtWebSys;
 

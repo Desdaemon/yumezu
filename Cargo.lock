@@ -4868,6 +4868,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "web-time",
  "webpki-root-certs",
  "winit",
 ]

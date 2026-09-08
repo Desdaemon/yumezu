@@ -21,6 +21,10 @@ pub(crate) struct Gui {
     shapes: Vec<egui::epaint::ClippedShape>,
     textures: egui::TexturesDelta,
     pixels_per_point: f32,
+    /// How long egui is content to wait before it is drawn again: zero while something in the
+    /// panel is animating, [`Duration::MAX`] when the overlay would come out identical. What
+    /// stops [`super::app::App`] idling the window over a fade or a blinking caret.
+    repaint_after: std::time::Duration,
     #[cfg(target_family = "wasm")]
     agent: super::text_agent::TextAgent,
 }
@@ -57,11 +61,17 @@ impl Gui {
             shapes: Vec::new(),
             textures: Default::default(),
             pixels_per_point: window.scale_factor() as f32,
+            repaint_after: std::time::Duration::ZERO,
         }
     }
 
     pub(crate) fn context(&self) -> &egui::Context {
         &self.ctx
+    }
+
+    /// See [`Gui::repaint_after`].
+    pub(crate) fn repaint_after(&self) -> std::time::Duration {
+        self.repaint_after
     }
 
     /// The caller passes the event to the 3D scene regardless: whether the overlay took it is
@@ -76,9 +86,12 @@ impl Gui {
         self.agent.lend_focus(&mut self.state);
 
         let input = self.state.take_egui_input(window);
-        // `output.viewport_output` goes unread: this app opens one window and never asks for
-        // another.
+        // Only the root viewport is read: this app opens one window and never asks for another.
         let output = self.ctx.run_ui(input, run_ui);
+        self.repaint_after = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map_or(std::time::Duration::MAX, |it| it.repaint_delay);
 
         #[cfg(target_family = "wasm")]
         self.agent.follow(&self.ctx, output.platform_output.ime);

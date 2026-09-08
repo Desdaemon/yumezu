@@ -101,6 +101,12 @@ impl Account {
         }
     }
 
+    /// Whether an answer is still on its way, and so whether [`Account::poll`] has anything left
+    /// to find. What keeps the window drawing over a wait nothing on screen is moving through.
+    pub fn asking(&self) -> bool {
+        self.asking.is_some()
+    }
+
     /// Called once a frame, and does nothing on the frames there is nothing to read.
     pub fn poll(&mut self) {
         let Some(answer) = self.asking.as_ref().and_then(fetch::Pending::take) else {

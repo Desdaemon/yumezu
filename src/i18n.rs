@@ -269,12 +269,14 @@ mod tests {
             "degree",
             "depth",
             "seen",
+            "width",
+            "height",
         ] {
             args.set(numeric, 1);
         }
         for worded in [
-            "fps", "worlds", "name", "released", "title", "kind", "out", "back", "effects",
-            "chance", "season", "percent", "when",
+            "fps", "pixels", "worlds", "name", "released", "title", "kind", "out", "back",
+            "effects", "chance", "season", "percent", "when",
         ] {
             args.set(worded, "x");
         }

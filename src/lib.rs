@@ -1,6 +1,3 @@
-#![cfg_attr(target_os = "android", deny(unsafe_code))]
-#![cfg_attr(not(target_os = "android"), forbid(unsafe_code))]
-
 #[path = "main.rs"]
 mod entry;
 

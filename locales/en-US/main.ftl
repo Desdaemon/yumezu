@@ -37,6 +37,11 @@ show-sidebar = Show the sidebar
 ## The graph tab: what is on screen, and how it is laid out.
 
 fps = { $fps } fps
+fps-hint = The rate frames are drawn at. A view with nothing moving in it is drawn slowly on
+    purpose, so a low number here is usually the pacing rather than the cost of a frame. Where
+    something is moving and this still falls short of the display, what is left is filling
+    { $width }x{ $height } pixels ({ $pixels } million of them) rather than working out what goes
+    in them.
 graph-size = { $worlds } worlds, { $connections } connections
 dimensions-2d = 2D
 dimensions-3d = 3D
@@ -145,6 +150,10 @@ link-reach = link reach
 link-reach-hint = How far apart two connected worlds may settle, in layers. One-way connections are not held to it
 ui-scale = UI scale
 ui-scale-hint = How large the panel and its text are drawn
+antialias = Smooth edges
+antialias-hint = Whether the edges of the graph are softened. The most expensive part of drawing a
+    frame, and the one thing to turn off when the rate falls short of the display.
+antialias-restart = Takes effect the next time yumezu starts.
 show-controls = Show controls
 clear-cache = Clear downloads
 clear-cache-hint = Empties the pictures kept between runs, so the next look at a world fetches it again

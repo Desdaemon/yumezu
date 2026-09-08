@@ -32,6 +32,9 @@ show-sidebar = サイドバーを表示
 ## The graph tab.
 
 fps = { $fps } fps
+fps-hint = 実際の描画レート。動きのない画面は意図的に低いレートで描くため、この値が低いのは通常
+    描画コストではなくペース調整による。動きがあるのにリフレッシュレートに届かない場合、残るのは
+    { $width }x{ $height }（{ $pixels } 百万）ピクセルの塗りつぶし。
 graph-size = { $worlds } マップ、{ $connections } 接続
 layered = 階層表示
 layered-hint = マップを深さごとの層に分ける
@@ -110,6 +113,10 @@ link-reach = 接続の長さ
 link-reach-hint = 接続された2つのマップが離れられる距離を階層数で表します。一方通行の接続はこの制限を受けません
 ui-scale = UIの大きさ
 ui-scale-hint = パネルと文字を描く大きさ
+antialias = 輪郭をなめらかに
+antialias-hint = グラフの輪郭を整えるかどうか。フレームを描く中で最も重いため、リフレッシュレート
+    に届かないときはまずこれを切る。
+antialias-restart = 次回の起動から反映される。
 show-controls = 操作方法を表示
 clear-cache = ダウンロードを消去
 clear-cache-hint = 実行間に保存された画像を消去します。次に見るときは再取得されます

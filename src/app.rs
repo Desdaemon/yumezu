@@ -5,7 +5,7 @@ use egui_material_icons::icons::*;
 use force_graph_3d::{
     DefaultNodeIdx, Dimensions, EdgeData, ForceGraph, NodeData, SimulationParameters,
 };
-use three_d::{FrameInput, FrameInputGenerator, WindowedContext, renderer::*};
+use three_d::{FrameInput, FrameInputGenerator, SurfaceSettings, WindowedContext, renderer::*};
 use winit::{
     application::ApplicationHandler,
     event::{Touch, TouchPhase, WindowEvent},
@@ -44,6 +44,27 @@ const FORCE_CHARGE: f32 = 1800.0;
 const FORCE_CHARGE_2D: f32 = 10000.0;
 const SETTLE_AFTER: f32 = 32.0;
 
+/// How long after the last thing that moved the window goes on being drawn at the display's rate.
+///
+/// Without it the pacing would follow the input rather than the view: a drag reaches the app as
+/// events that arrive unevenly and stop the moment a hand pauses, so a frame that saw no event
+/// would drop straight to [`IDLE_REDRAW_HZ`] and the next one back to the display's rate. What
+/// settles into the slow rate is a view that has genuinely stopped -- the layout at rest and the
+/// camera untouched this long.
+const IDLE_AFTER_SECONDS: f32 = 2.0;
+/// Frames a second the window falls back to when the dashes are the only thing still moving.
+///
+/// A settled layout nobody is touching would otherwise be redrawn at the display's own rate for
+/// as long as the app is open, which on a phone is most of what it costs. The marching is by wall
+/// clock rather than by frame, so a slower rate makes it coarser and not slower. See
+/// [`App::wanted`].
+const IDLE_REDRAW_HZ: f32 = 30.0;
+/// Frames a second while the only reason to draw one is to see whether something asked for over
+/// the network has landed. Nothing on screen is moving, so this is a poll and not an animation.
+const POLL_REDRAW_HZ: f32 = 10.0;
+/// How often [`FrameStats`] says what it has counted.
+const FRAME_STATS_SECONDS: f64 = 2.0;
+
 /// How long one world takes to grow from nothing to its own size when it arrives.
 const ARRIVAL_SECONDS: f32 = 0.45;
 /// The longest a whole arrival takes, however many worlds are in it: two worlds should not take as
@@ -78,6 +99,9 @@ const NODE_HUB_DESCENDANTS: f32 = 4.0;
 const HUB_REACH: f32 = 0.5;
 /// How thick a connection is drawn.
 const EDGE_RADIUS: f32 = 0.05;
+/// Sides of the tube a connection is drawn as. Tens of thousands of them come out a pixel wide, so
+/// the cost is triangle setup rather than fill and the sides are very nearly the whole of it.
+const EDGE_SIDES: u32 = 3;
 /// A connection a player can only walk one way is drawn as marching dashes. A fixed count rather
 /// than a fixed dash length, so it is settled when the graph is built and never moves with the
 /// layout -- the dashes stretch with the connection instead.
@@ -216,9 +240,9 @@ const POINTED_BRIGHTNESS: f32 = 0.85;
 /// Deliberately off the distance ramp: the worlds the origin cannot reach are at no distance at
 /// all rather than at a large one, and reading them as the far end of the ramp would be a lie.
 const UNREACHED_COLOR: Srgba = Srgba::new(110, 110, 120, 255);
-/// Time constant of the frame-rate smoothing, in milliseconds. The per-frame number swings far too
-/// much to read from a moving graph.
-const FPS_WINDOW_MS: f32 = 500.0;
+/// How long the panel counts frames over before saying how many there were, in milliseconds. The
+/// per-frame number swings far too much to read from a moving graph.
+const FRAME_WINDOW_MS: f32 = 500.0;
 
 /// How long the loading frame takes to fade off the graph behind it. See [`App::veil`].
 const LOADING_FADE_SECONDS: f32 = 0.5;
@@ -291,6 +315,387 @@ pub(crate) fn use_android_app(app: winit::platform::android::activity::AndroidAp
     let _ = ANDROID.set(app);
 }
 
+/// One one-way connection's dashes, less where along the connection each of them has marched to.
+///
+/// The marching moves a dash along its own slot and changes nothing else about it, so a settled
+/// layout can keep the orientation and the size and write only the position. That matters because
+/// this is the one piece of geometry rebuilt on every frame however still the graph is -- the
+/// marching is the whole point of the dashes -- and there are [`EDGE_DASHES`] of them per
+/// connection, half again as many instances as there are solid lines in the whole graph.
+struct DashRun {
+    /// Where the run starts, clear of the picture drawn on the world at that end.
+    origin: Vec3,
+    /// From there to where the dash one slot ahead starts. A dash stands at `origin + travel * at`
+    /// for its own `at` in `0.0..1.0`.
+    travel: Vec3,
+    /// The dash's orientation and size: everything about its transformation except the position,
+    /// which is written into the fourth column. Scaled to nothing for a connection whose ends are
+    /// closer together than their own pictures, there being no run to draw in.
+    basis: Mat4,
+}
+
+/// Samples the surface is asked for when the edges are being smoothed, and the frame's largest
+/// cost by a distance: multisampling rasterizes every covered fragment this many times over, and
+/// at the size the graph is drawn that was the whole difference between keeping up with the
+/// display and not -- measured, by turning it off.
+///
+/// Never shown, and there is no setting for it, because it is not a number everywhere: the page
+/// hears only "on" or "off", WebGL taking a boolean and the browser picking the count. A count
+/// the person could lower would lower nothing there, and the one screen where lowering it is free
+/// is the one where the cost was never a problem.
+const MULTISAMPLES: u8 = 4;
+
+/// Whether the surface smooths the edges, which is settled as it is built. Multisampling until
+/// someone says otherwise -- it is the only thing that reads the geometry, and the graph is mostly
+/// thin high-contrast cylinders.
+///
+/// The one thing a pass over the finished frame would have to offer is being cheaper, and it is
+/// only cheaper where the fill is the limit: on a desktop it costs the same and looks worse, and
+/// on the page it turned out to cost more than the surface's own. So there is nothing between
+/// these two.
+fn antialias_remembered() -> bool {
+    store::read(ANTIALIAS).as_deref() != Some("off")
+}
+
+fn antialias_remember(on: bool) {
+    store::write(ANTIALIAS, Some(if on { "on" } else { "off" }));
+}
+
+/// When the next frame is wanted, which is what a frame ends by working out.
+///
+/// The window is redrawn on demand rather than continuously: see [`App::wanted`] for what is
+/// asking, and [`Pacing`] for the switch that puts the old always-on behaviour back.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Wanted {
+    /// As soon as the display will take one: something is moving.
+    Now,
+    /// Not before this long has passed. Nothing is moving fast enough to need the display's rate.
+    After(std::time::Duration),
+    /// Not until an event arrives. Every pixel would come out the way it already is.
+    Never,
+}
+
+impl Wanted {
+    /// The stricter of two demands, a frame being drawn for whichever of them asks first.
+    fn or_sooner(self, other: Self) -> Self {
+        self.min(other)
+    }
+
+    fn after_hz(hz: f32) -> Self {
+        Self::After(std::time::Duration::from_secs_f32(1.0 / hz))
+    }
+
+    /// Zero reads as [`Wanted::Now`] and [`std::time::Duration::MAX`] as [`Wanted::Never`], which
+    /// is how egui spells both.
+    fn after(delay: std::time::Duration) -> Self {
+        if delay.is_zero() {
+            Self::Now
+        } else if delay == std::time::Duration::MAX {
+            Self::Never
+        } else {
+            Self::After(delay)
+        }
+    }
+}
+
+/// Whether the window is drawn on demand or continuously.
+///
+/// [`Pacing::Eager`] is how every frame was drawn before the demand was worked out, kept so that
+/// the two can be measured against each other in one binary: it redraws at the display's rate
+/// whatever is on screen, rebuilds the whole frame's geometry whether or not anything it is built
+/// from has changed, and lays the dash runs out again every frame. What it does not put back is
+/// the pair of matrix products a dash used to cost -- see [`DashRun`] -- so it reads as a floor on
+/// the old cost rather than the old cost itself.
+///
+/// `YUMEZU_FRAMES=eager` selects it and `YUMEZU_FRAMES=stats` turns [`FrameStats`] on; `eager,stats`
+/// does both. The page has no environment to name them in, so there the two are separate builds.
+#[derive(Clone, Copy, PartialEq)]
+enum Pacing {
+    Adaptive,
+    Eager,
+}
+
+impl Pacing {
+    fn eager(self) -> bool {
+        self == Self::Eager
+    }
+}
+
+/// Whether `YUMEZU_FRAMES` names `word`. Always false on the page, which has no environment to
+/// name it in; the two pacings are separate builds there. See [`Pacing`].
+fn asked(word: &str) -> bool {
+    std::env::var("YUMEZU_FRAMES").is_ok_and(|asked| asked.split(',').any(|it| it.trim() == word))
+}
+
+/// How far each step of [`AppStatics::pan_aside`] moves, and how long it waits for the layout to
+/// stop growing first.
+#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+const PAN_ASIDE_STEP: f32 = 40.0;
+#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+const PAN_ASIDE_SETTLES_SECONDS: f64 = 8.0;
+
+/// How many frames of queries are kept, and so how many frames late an answer may be without
+/// being thrown away. The card is a few frames behind the processor and asking it for an answer it
+/// has not reached would stall the very thing being measured.
+#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+const GPU_CLOCK_DEPTH: usize = 4;
+
+/// Seconds the card spent on a frame, which the processor's own milliseconds never say: a frame
+/// here spends under one of them and then waits in the driver, so this is the number that tells a
+/// view that is slow from one that is merely paced.
+///
+/// Native only. The page's equivalent is an extension browsers do not hand out, a clock this exact
+/// being a way to read what other tabs are doing.
+#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+struct GpuClock {
+    context: Context,
+    queries: Vec<three_d::context::Query>,
+    /// Frames begun, which picks both this frame's query and the one old enough to read.
+    begun: usize,
+}
+
+#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+impl GpuClock {
+    /// An empty set of queries is a driver that would not give them out, which costs the report a
+    /// column and nothing else.
+    fn new(context: &Context) -> Self {
+        // SAFETY: names no object and reads no memory. A refusal comes back as an error.
+        #[allow(unsafe_code)]
+        let queries = (0..GPU_CLOCK_DEPTH)
+            .map_while(|_| unsafe { context.create_query() }.ok())
+            .collect();
+        Self {
+            context: context.clone(),
+            queries,
+            begun: 0,
+        }
+    }
+
+    /// Whether there are queries to keep, which there are unless the driver refused them.
+    fn ready(&self) -> bool {
+        self.queries.len() == GPU_CLOCK_DEPTH
+    }
+
+    fn begin(&self) {
+        if !self.ready() {
+            return;
+        }
+        // SAFETY: the query is this context's own and no other is open -- `end` closes each one
+        // before `begin` opens the next, and nothing else in the app opens one at all.
+        #[allow(unsafe_code)]
+        unsafe {
+            self.context.begin_query(
+                three_d::context::TIME_ELAPSED,
+                self.queries[self.begun % GPU_CLOCK_DEPTH],
+            );
+        }
+    }
+
+    /// Ends this frame's query and answers with the frame from [`GPU_CLOCK_DEPTH`] ago, if the
+    /// card has finished it. `None` is a frame's measurement missed rather than an error.
+    fn end(&mut self) -> Option<f64> {
+        use three_d::context::{QUERY_RESULT, QUERY_RESULT_AVAILABLE, TIME_ELAPSED};
+        if !self.ready() {
+            return None;
+        }
+        // SAFETY: `begin` opened this context's query, and every object named below is its own.
+        #[allow(unsafe_code)]
+        unsafe {
+            self.context.end_query(TIME_ELAPSED)
+        };
+        self.begun += 1;
+        // Nothing has gone all the way round yet, so the slot below holds a query never begun and
+        // an answer that would read as an instant frame.
+        if self.begun < GPU_CLOCK_DEPTH {
+            return None;
+        }
+        // The slot about to be written next is the oldest one written, which is the frame
+        // `GPU_CLOCK_DEPTH` back. Asked whether it is ready rather than for the answer: the answer
+        // would stall the processor on the very card it is timing.
+        let oldest = self.queries[self.begun % GPU_CLOCK_DEPTH];
+        #[allow(unsafe_code)]
+        unsafe {
+            (self
+                .context
+                .get_query_parameter_u32(oldest, QUERY_RESULT_AVAILABLE)
+                != 0)
+                .then(|| self.context.get_query_parameter_u64(oldest, QUERY_RESULT) as f64 * 1e-9)
+        }
+    }
+}
+
+/// One pass of a frame, timed on its own. See the `gpu-profile` feature and [`FrameStats::timed`].
+#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+struct Section {
+    name: &'static str,
+    clock: GpuClock,
+    /// Seconds this pass took over the [`Section::answered`] frames the card answered for. Reset
+    /// by the report rather than by [`Tally`], which would take the queries with it.
+    spent: f64,
+    answered: u32,
+}
+
+/// What a reporting window has added up so far.
+#[derive(Default)]
+struct Tally {
+    frames: u32,
+    /// Seconds of processor time inside [`App::draw`], which is the frame without the wait for
+    /// the display that follows it.
+    spent: f64,
+    /// The worst single frame of the window, which is what a stutter is.
+    worst: f64,
+    /// Frames that got as far as rebuilding the layout's geometry, of the [`Tally::frames`] that
+    /// were drawn at all.
+    rebuilt: u32,
+    /// Seconds the card spent, over the [`Tally::carded`] frames it answered for. See [`GpuClock`].
+    card: f64,
+    carded: u32,
+}
+
+/// What one frame cost and how many of them there were.
+///
+/// Reported rather than drawn, because a counter on screen is one more thing the frame has to
+/// paint. Off unless `YUMEZU_FRAMES=stats` asks for it.
+struct FrameStats {
+    on: bool,
+    since: web_time::Instant,
+    tally: Tally,
+    /// Built on the first frame, the context being younger than this, and `None` for as long
+    /// as the driver will not give out the queries. See [`GpuClock`].
+    #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+    clock: Option<GpuClock>,
+    /// Whether the frame is timed pass by pass rather than whole. The whole-frame clock stands
+    /// down while it is, a card's timer being unable to hold another inside it.
+    #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+    parts: bool,
+    /// In the order the frame draws them, which is the order they are first timed in.
+    #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+    sections: Vec<Section>,
+}
+
+impl FrameStats {
+    fn new(on: bool) -> Self {
+        Self {
+            on,
+            since: web_time::Instant::now(),
+            tally: Tally::default(),
+            #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+            clock: None,
+            #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+            parts: asked("parts"),
+            #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+            sections: Vec::new(),
+        }
+    }
+
+    /// Runs `body` with the card's clock on it, under `name`, when the frame is being taken apart.
+    /// Otherwise it is `body` and nothing else.
+    ///
+    /// Every pass of the frame goes through here whether or not anything is being measured, so
+    /// that what is measured is the frame that ships rather than one drawn differently to be
+    /// looked at.
+    fn timed(&mut self, name: &'static str, context: &Context, body: impl FnOnce()) {
+        #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+        if self.parts {
+            let which = match self.sections.iter().position(|it| it.name == name) {
+                Some(which) => which,
+                None => {
+                    self.sections.push(Section {
+                        name,
+                        clock: GpuClock::new(context),
+                        spent: 0.0,
+                        answered: 0,
+                    });
+                    self.sections.len() - 1
+                }
+            };
+            self.sections[which].clock.begin();
+            body();
+            if let Some(spent) = self.sections[which].clock.end() {
+                self.sections[which].spent += spent;
+                self.sections[which].answered += 1;
+            }
+            return;
+        }
+        let _ = (name, context);
+        body();
+    }
+
+    /// Opens the frame the next [`FrameStats::frame`] closes.
+    fn began(&mut self, context: &Context) {
+        if !self.on {
+            return;
+        }
+#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+        if !self.parts {
+            self.clock
+                .get_or_insert_with(|| GpuClock::new(context))
+                .begin();
+        }
+        let _ = context;
+    }
+
+    fn frame(&mut self, spent: std::time::Duration, rebuilt: bool) {
+        if !self.on {
+            return;
+        }
+#[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+        if let Some(card) = self.clock.as_mut().and_then(GpuClock::end) {
+            self.tally.card += card;
+            self.tally.carded += 1;
+        }
+        let spent = spent.as_secs_f64();
+        self.tally.frames += 1;
+        self.tally.spent += spent;
+        self.tally.worst = self.tally.worst.max(spent);
+        self.tally.rebuilt += u32::from(rebuilt);
+        let window = self.since.elapsed().as_secs_f64();
+        if window < FRAME_STATS_SECONDS {
+            return;
+        }
+        let Tally {
+            frames,
+            spent,
+            worst,
+            rebuilt,
+            card,
+            carded,
+        } = std::mem::take(&mut self.tally);
+        self.since = web_time::Instant::now();
+        // Absent wherever the card will not be asked, which is the page and any driver that
+        // refused the queries.
+        let card = match carded {
+            0 => String::new(),
+            carded => format!("{:.2} ms on the card, ", 1e3 * card / carded as f64),
+        };
+        #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+        {
+            let each: Vec<String> = self
+                .sections
+                .iter_mut()
+                .filter(|it| it.answered > 0)
+                .map(|it| {
+                    let each =
+                        format!("{} {:.2}", it.name, 1e3 * it.spent / f64::from(it.answered));
+                    (it.spent, it.answered) = (0.0, 0);
+                    each
+                })
+                .collect();
+            if !each.is_empty() {
+                log::info!("ms on the card, pass by pass: {}", each.join(", "));
+            }
+        }
+        log::info!(
+            "{:.1} fps, {:.2} ms drawing a frame, {:.2} ms worst, \
+             {:.0}% of the wall clock, {card}{rebuilt} of {frames} frames rebuilt",
+            frames as f64 / window,
+            1e3 * spent / frames as f64,
+            1e3 * worst,
+            100.0 * spent / window,
+        );
+    }
+}
+
 pub(super) struct App {
     ctx: AppContext,
     data: Option<AppEntities>,
@@ -324,6 +729,15 @@ pub(super) struct App {
     /// replaced it, so the graph is uncovered rather than dropped on screen. Written back to 1 by
     /// every [`App::draw_loading`], so a run that has to wait again gets the reveal again.
     veil: f32,
+    /// When the frame just drawn wants the next one. Read by the event loop, which is where the
+    /// asking is turned into a wait. See [`Wanted`].
+    wanted: Wanted,
+    /// Whether a frame has been asked for and not yet drawn. See [`App::ask_for_a_frame`].
+    asked: bool,
+    /// Seconds since anything on screen last moved. See [`IDLE_AFTER_SECONDS`].
+    still: f32,
+    pacing: Pacing,
+    stats: FrameStats,
 }
 
 /// The dump, at whatever stage of arriving it has reached.
@@ -417,6 +831,14 @@ struct AppStatics {
     cursor: CursorIcon,
     touches: Touches,
     walk: Walk,
+    /// Whether the window is the one being typed at. What the dashes march for is somebody
+    /// watching them, so this is what lets a settled layout stop being drawn at all rather than
+    /// go on at [`IDLE_REDRAW_HZ`] for as long as the app is open.
+    ///
+    /// Not read on the page, where the canvas is unfocused until it is clicked and the browser
+    /// already stops serving frames to a tab nobody is looking at. A phone hands the drawing
+    /// surface back instead: see [`App::suspended`].
+    focused: bool,
 }
 
 /// A key says only that it went down or came up, and walking has to carry on between the two, so
@@ -576,6 +998,8 @@ const DIMENSIONS: &str = "dimensions";
 const LAYERED: &str = "layered";
 const HUB_REPULSION: &str = "hub-push";
 const LINK_REACH: &str = "link-reach";
+/// Whether the edges are smoothed. See [`antialias_remembered`].
+const ANTIALIAS: &str = "antialias";
 
 /// How far the hub push can be taken either way. Its middle is [`HUB_REPULSION_DEFAULT`].
 const HUB_REPULSION_RANGE: std::ops::RangeInclusive<f32> = 0.5..=1.5;
@@ -601,10 +1025,46 @@ const TOOLTIP_OFFSET: f32 = 16.0;
 /// else.
 const ROCKER_SCALE: f32 = 3.0;
 
+/// Frames counted over a window.
+///
+/// Counted rather than averaged frame by frame. An exponential average has to weight each sample
+/// by how long it stood for or its time constant moves with the frame rate, and that weighting
+/// gives a single long frame a share of the answer proportional to how long it was: one 100 ms
+/// stall is a fifth of a 500 ms window, so a view drawing every other frame perfectly still reads
+/// as though it were not. Counting answers the question actually being asked -- how many frames
+/// arrived in this long -- and is the same arithmetic [`FrameStats`] reports.
+#[derive(Default)]
+struct Counted {
+    frames: u32,
+    /// Wall milliseconds the counted frames spanned.
+    window: f32,
+    /// The last full window's answer, kept because the next one is not ready yet.
+    rate: f32,
+}
+
+impl Counted {
+    fn frame(&mut self, elapsed: f32) {
+        self.frames += 1;
+        self.window += elapsed;
+        if self.window < FRAME_WINDOW_MS {
+            return;
+        }
+        self.rate = 1e3 * self.frames as f32 / self.window;
+        *self = Self {
+            rate: self.rate,
+            ..Default::default()
+        };
+    }
+
+    fn rate(&self) -> f32 {
+        self.rate
+    }
+}
+
 struct Overlay {
     gui: gui::Gui,
-    /// Exponentially smoothed frame rate, over [`FPS_WINDOW_MS`].
-    fps: f32,
+    /// Frames counted over the [`FRAME_WINDOW_MS`] so far. See [`Overlay::timed`].
+    counted: Counted,
     sidebar: Sidebar,
     /// Whether the on-screen keyboard was last asked for. See [`track_keyboard`].
     keyboard: bool,
@@ -623,6 +1083,12 @@ struct Overlay {
     ui_scale_stored: f32,
     /// The layout choices the store was last written with, for the same reason.
     layout: Layout,
+    /// Whether the person has asked for the edges to be smoothed, which is not always whether
+    /// they are being smoothed. See [`Overlay::antialias_running`].
+    antialias: bool,
+    /// What the running surface was built for. Kept because a surface is asked for its samples
+    /// once, as it is built, so this is a choice only the next start can honour.
+    antialias_running: bool,
 }
 
 /// What the sidebar keeps between frames: held apart from [`Panel`], which is this frame's
@@ -664,6 +1130,10 @@ struct Panel {
     link_reach: f32,
     ui_scale: f32,
     layered: bool,
+    /// What the smoothing was left set to, and what the running surface is actually doing, so the
+    /// tab can say when the two have parted. See [`Overlay::antialias_running`].
+    antialias: bool,
+    antialias_running: bool,
     /// A world picked out of one of the lists, to be routed to.
     chosen: Option<usize>,
     /// A world a list row is pointing at, to be brightened where it sits in the graph. At most one:
@@ -692,7 +1162,11 @@ struct Panel {
 /// Everything the panel reads, walked out of [`AppEntities`] before it is built.
 struct PanelData<'a> {
     data: &'a AppEntities,
+    /// See [`Counted::rate`].
     fps: f32,
+    /// The drawing surface, in the pixels actually filled rather than the ones laid out: what the
+    /// rate beside it has to be read against. See [`Overlay::graph`].
+    surface: (u32, u32),
     /// The route home from what is lit, origin last.
     route: Vec<usize>,
     /// The worlds worth naming among the descendants of what is lit.
@@ -1092,6 +1566,18 @@ struct AppEntities {
     /// reaches the same slot of whichever of the two it belongs to.
     edge_instances: Instances,
     dash_instances: Instances,
+    /// Where each one-way connection's dashes march, rebuilt only when the layout moves under
+    /// them. See [`DashRun`].
+    dash_runs: Vec<DashRun>,
+    /// Whether [`AppEntities::dash_runs`] still describes where the nodes are.
+    dash_runs_stale: bool,
+    /// Whether [`AppEntities::repaint`] has changed an instance colour since the last frame was
+    /// built. A highlight moves no node, so nothing else in a settled graph would say so.
+    recolored: bool,
+    /// The world [`AppEntities::aim_glow`] last stood the glow quad over, so that a frame in
+    /// which the pointer moved from one row to another is told apart from one in which it did
+    /// not move at all.
+    glowing: Option<usize>,
     /// The thumbnail atlas on its way in, until [`AppEntities::receive_atlas`] takes it.
     atlas: Option<fetch::Pending<Option<CpuTexture>>>,
     /// The same atlas as the sidebar's catalog draws out of. `None` until it arrives, and forever
@@ -1135,6 +1621,25 @@ impl Rng {
 }
 
 impl ApplicationHandler for App {
+    /// Makes a timed wake-up one-shot.
+    ///
+    /// winit re-arms a `WaitUntil` whose deadline has already passed with no delay at all rather
+    /// than dropping it, so the deadline the loop stops at is not the end of it: the loop wakes on
+    /// it again immediately, and goes on doing so until something replaces it. What replaces it is
+    /// the frame this asks for. On a page that frame can be a long way off -- a browser serves no
+    /// animation frames to a hidden tab, so a tab put in the background between the two would
+    /// otherwise wake, ask, find the deadline still in the past, and spin there for as long as it
+    /// stayed hidden.
+    fn new_events(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        cause: winit::event::StartCause,
+    ) {
+        if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+            self.ask_for_a_frame();
+        }
+    }
     fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         #[cfg(all(not(target_family = "wasm"), not(target_os = "android")))]
         let window_builder = Window::default_attributes()
@@ -1183,6 +1688,7 @@ impl ApplicationHandler for App {
     /// connection on the display the loop owns, torn down on a thread of its own that reaches a
     /// freed display and takes the process with it.
     fn exiting(&mut self, _: &winit::event_loop::ActiveEventLoop) {
+        self.call_the_camera_out();
         self.release();
     }
     fn window_event(
@@ -1196,6 +1702,9 @@ impl ApplicationHandler for App {
         let Some(fig) = self.ctx.fig.as_mut() else {
             return;
         };
+        // Anything that is not the frame itself may have changed what the frame would draw, and
+        // nothing is drawn here that was not asked for. See [`App::ask_for_a_frame`].
+        let asks_for_a_frame = !matches!(event, WindowEvent::RedrawRequested);
         fig.handle_winit_window_event(&event);
         // Offered to the overlay as well, and to the scene either way: what the panel took is
         // settled after it has been laid out, not here. See `Overlay::run`.
@@ -1209,19 +1718,29 @@ impl ApplicationHandler for App {
                 self.ctx.wctx.as_ref().unwrap().resize(physical_size);
             }
             WindowEvent::RedrawRequested => {
-                self.draw();
+                self.asked = false;
+                self.stats.began(self.ctx.wctx.as_ref().unwrap());
+                let began = web_time::Instant::now();
+                let rebuilt = self.draw();
+                // Taken before the buffers are swapped, which is where the wait for the display
+                // is: this is the frame's own cost, not the rate it is shown at.
+                self.stats.frame(began.elapsed(), rebuilt);
                 // After the frame rather than before it, so the page never has neither.
                 #[cfg(target_family = "wasm")]
                 take_placeholder();
                 self.ctx.wctx.as_ref().unwrap().swap_buffers().unwrap();
-                self.ctx.window.as_ref().unwrap().request_redraw();
+                self.pace(event_loop);
             }
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
             // A key held as the window is left never comes back up, so the view would go on
             // walking. Nothing else three-d reports says the window stopped hearing the keyboard.
-            WindowEvent::Focused(false) => self.statics.walk = Walk::default(),
+            WindowEvent::Focused(false) => {
+                self.statics.walk = Walk::default();
+                self.statics.focused = false;
+            }
+            WindowEvent::Focused(true) => self.statics.focused = true,
             WindowEvent::Touch(touch) => {
                 // A second finger settles what the first was doing: not a tap, not a node drag and
                 // not an orbit, but the start of a pinch.
@@ -1232,6 +1751,9 @@ impl ApplicationHandler for App {
                 }
             }
             _ => (),
+        }
+        if asks_for_a_frame {
+            self.ask_for_a_frame();
         }
     }
 }
@@ -1259,12 +1781,34 @@ impl App {
         self.ctx.wctx = None;
         self.ctx.window = None;
     }
+    /// Says where the camera was left, in the shape of the literal in [`App::new`]: the view a run
+    /// opens on is picked by flying to one worth opening on and copying this line out of the log.
+    /// The layout is the same every run -- see `scatter` -- so the numbers mean the same thing
+    /// next time, but only within the dimensions they were read in.
+    fn call_the_camera_out(&self) {
+        let (eye, at) = (self.statics.camera.position(), self.statics.camera.target());
+        let dimensions = self
+            .data
+            .as_ref()
+            .map_or(Dimensions::Three, |data| data.graph.parameters().dimensions);
+        log::info!(
+            "camera in {dimensions:?} dimensions: \
+             vec3({:.1}, {:.1}, {:.1}), vec3({:.1}, {:.1}, {:.1})",
+            eye.x,
+            eye.y,
+            eye.z,
+            at.x,
+            at.y,
+            at.z,
+        );
+    }
+
     pub fn new() -> Self {
         let camera = Camera::new_perspective(
             Viewport::new_at_origo(1, 1),
             // Picked by hand off a settled three-dimensional layout.
-            vec3(-263.8, 8.0, -238.9),
-            vec3(4.4, -118.4, -27.3),
+            vec3(-49.7, -47.1, -31.0),
+            vec3(218.5, -173.5, 180.6),
             vec3(0.0, 1.0, 0.0),
             degrees(FOV_Y_DEGREES),
             0.1,
@@ -1290,6 +1834,7 @@ impl App {
                 cursor: CursorIcon::Default,
                 touches: Touches::default(),
                 walk: Walk::default(),
+                focused: true,
             },
             data: None,
             overlay: None,
@@ -1297,17 +1842,40 @@ impl App {
             selected: None,
             said: String::new(),
             veil: 1.0,
+            wanted: Wanted::Now,
+            asked: false,
+            still: 0.0,
+            pacing: match asked("eager") {
+                true => Pacing::Eager,
+                false => Pacing::Adaptive,
+            },
+            stats: FrameStats::new(asked("stats")),
         }
     }
     fn reset(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, window: Window) {
         self.ctx.window = Some(window);
         let window = self.ctx.window.as_ref().unwrap();
-        self.ctx.wctx =
-            Some(WindowedContext::from_winit_window(window, Default::default()).unwrap());
+        let surface = SurfaceSettings {
+            // Off leaves the loop free to draw as fast as the card will let it, which is the only
+            // way to see the card's cost move: with it on, everything short of the refresh
+            // interval reads the same. See [`asked`].
+            vsync: !asked("unlocked"),
+            // Read here rather than carried, so the surface and the overlay that reports it are
+            // built from one answer. See [`Overlay::antialias_running`].
+            multisamples: match antialias_remembered() {
+                true => MULTISAMPLES,
+                false => 0,
+            },
+            ..Default::default()
+        };
+        self.ctx.wctx = Some(WindowedContext::from_winit_window(window, surface).unwrap());
         let ctx = self.ctx.wctx.as_ref().unwrap();
         self.ctx.fig = Some(FrameInputGenerator::from_winit_window(window));
         self.overlay = Some(Overlay::new(event_loop, window, ctx));
         self.build();
+        // Nothing else would: the window is drawn on demand, and this is the first demand.
+        self.asked = false;
+        self.ask_for_a_frame();
     }
 
     /// Builds the graph, once there is a dump to build it out of, and does nothing until there
@@ -1652,12 +2220,12 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
         },
     );
     let edges = Gm::new(
-        InstancedMesh::new(ctx, &edge_instances, &CpuMesh::cylinder(8)),
+        InstancedMesh::new(ctx, &edge_instances, &CpuMesh::cylinder(EDGE_SIDES)),
         ColorMaterial::default(),
     );
     // The same shape as a solid line, placed the same way, only shorter.
     let dashes = Gm::new(
-        InstancedMesh::new(ctx, &dash_instances, &CpuMesh::cylinder(8)),
+        InstancedMesh::new(ctx, &dash_instances, &CpuMesh::cylinder(EDGE_SIDES)),
         ColorMaterial::default(),
     );
 
@@ -1715,6 +2283,10 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
         thumbnail_instances,
         edge_instances,
         dash_instances,
+        dash_runs: Vec::new(),
+        dash_runs_stale: true,
+        recolored: true,
+        glowing: None,
         atlas: Some(thumbnails::load()),
         sheet: None,
         cells: worlds.iter().map(world::World::cell).collect(),
@@ -1871,7 +2443,12 @@ impl App {
     }
 
     /// One frame: takes in whatever arrived, moves the camera, steps the layout, and draws it.
-    fn draw(&mut self) {
+    /// Answers whether the frame got as far as rebuilding the layout's geometry, which is what
+    /// [`FrameStats`] counts.
+    fn draw(&mut self) -> bool {
+        // Until the end of the frame says otherwise. The loading frame below returns through
+        // here, and it animates.
+        self.wanted = Wanted::Now;
         // Whether or not there is a graph yet: a run that resumed a session is reading an account
         // while the dump is still on its way, and the answer has to be in hand before the graph is
         // built out of it.
@@ -1915,7 +2492,7 @@ impl App {
             }
             if self.data.is_none() {
                 self.draw_loading();
-                return;
+                return false;
             }
         }
         let ctx = self.ctx.wctx.as_ref().unwrap();
@@ -1932,6 +2509,8 @@ impl App {
         let fading = (self.veil > 0.0).then(|| (self.said.clone(), self.veil));
         let data = self.data.as_mut().unwrap();
         self.statics.camera.set_viewport(frame_input.viewport);
+        #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+        self.statics.pan_aside();
         let account = &mut self.yno;
         // The whole game, which is the yardstick the settings tab measures one person's share
         // against: the graph beside it may be only the frontier.
@@ -1983,6 +2562,7 @@ impl App {
             .statics
             .walk
             .travel((frame_input.elapsed_time as f32 * 1e-3).min(0.05));
+        let walking = across != 0.0 || into != 0.0;
         let panned = self
             .statics
             .pan(&mut frame_input.events, frame_input.device_pixel_ratio)
@@ -2040,22 +2620,41 @@ impl App {
         let arriving = data
             .arrivals
             .tick((frame_input.elapsed_time as f32 * 1e-3).min(0.05));
-        if stepped || turned || arriving {
+        // Everything below reads the node quads, the camera, or the instance colors, so this is
+        // what says any of it has to be worked out again.
+        let recolored = std::mem::take(&mut data.recolored);
+        let moved = stepped || turned || arriving || recolored || self.pacing.eager();
+        if moved {
             data.rebuild_instances(&self.statics.camera);
         }
+        // Not `turned`: a dash is a solid in the scene rather than a quad held square to the
+        // camera, so only the layout dates the runs it marches along.
+        data.dash_runs_stale |= stepped || arriving || self.pacing.eager();
         // Whether or not anything else moved: see [`AppEntities::march_dashes`].
         data.march_dashes((frame_input.elapsed_time as f32 * 1e-3).min(0.05));
-        // After the instances, whose colors the full pictures borrow, and every frame rather than
-        // only the moved ones: coming in on a node changes nothing in the layout and everything
-        // about how much of the atlas the screen asks for.
-        let magnified = data.magnified(&self.statics.camera, frame_input.viewport);
-        data.detail.track(ctx, &magnified);
-        // On the same terms: what it copies is the node quads rebuilt just above, and the camera
-        // it is lifted against is the one that turned them.
-        data.place_unvisited(ctx, &self.statics.camera);
-        // Every frame too, and after the instances it stands on: a turn of the camera moves
-        // the quad it is copied from without moving the layout.
-        data.aim_glow(&self.statics.camera);
+        // Both of these are also where a picture that has arrived is taken out of its fetch, and a
+        // picture can arrive on a frame that moved nothing at all -- so a frame with one still on
+        // its way does them whether or not anything moved. Skipping that would strand the fetch:
+        // nothing else reads it, so it would stay pending for good.
+        let reading = data.detail.pending();
+        // After the instances, whose colors the full pictures borrow. Coming in on a node changes
+        // nothing in the layout and everything about how much of the atlas the screen asks for,
+        // but coming in on one is a camera move and so is already a frame that moved.
+        if moved || reading {
+            let magnified = data.magnified(&self.statics.camera, frame_input.viewport);
+            data.detail.track(ctx, &magnified);
+        }
+        if moved || reading {
+            // What it copies is the node quads rebuilt just above, and the camera it is lifted
+            // against is the one that turned them.
+            data.place_unvisited(ctx, &self.statics.camera);
+        }
+        // Also on a frame that only moved the pointer from one list row to another, which moves
+        // the glow without moving anything it is copied from.
+        if moved || data.glowing != data.pointed {
+            data.glowing = data.pointed;
+            data.aim_glow(&self.statics.camera);
+        }
 
         if let Some(texture) = data.backdrop.texture.as_mut() {
             texture.transformation = panorama_transform(
@@ -2064,42 +2663,139 @@ impl App {
                 self.statics.camera.view_direction(),
             );
         }
-        frame_input
-            .screen()
-            .clear(ClearState::color_and_depth(
-                BACKGROUND_COLOR[0],
-                BACKGROUND_COLOR[1],
-                BACKGROUND_COLOR[2],
-                1.0,
-                1.0,
-            ))
-            .write::<std::convert::Infallible>(|| {
-                apply_screen_material(ctx, &data.backdrop, &self.statics.camera, &[]);
-                Ok(())
-            })
-            .unwrap()
-            .render(
-                &self.statics.camera,
-                data.edges
+        let screen = frame_input.screen();
+        // Depth only: the backdrop written straight after covers every pixel of the target,
+        // with the depth test off and no blending, so the color is written twice otherwise.
+        //
+        // Which way this goes depends on the renderer, and only one of the two has been
+        // measured. An immediate-mode desktop card saves the write. A tile-based one may
+        // instead have to read the previous frame's color back into each tile, because a
+        // clear is what tells it the tile can start empty -- and phones are all tile-based,
+        // as are most of the machines the page runs on. Measure there before shipping it.
+        screen.clear(ClearState::depth(1.0));
+        // Split only to fix the order: one call would sort these by each mesh's centre, which says
+        // nothing about which covers which. Pictures before lines, so the depth they write drops
+        // the lines behind them unshaded. All opaque bar the glow, so only the skipping changes.
+        let camera = &self.statics.camera;
+        self.stats.timed("backdrop", ctx, || {
+            screen
+                .write::<std::convert::Infallible>(|| {
+                    apply_screen_material(ctx, &data.backdrop, camera, &[]);
+                    Ok(())
+                })
+                .unwrap();
+        });
+        self.stats.timed("pictures", ctx, || {
+            screen.render(
+                camera,
+                data.drawn_thumbnails()
                     .into_iter()
-                    .chain(&data.dashes)
-                    .chain(data.drawn_thumbnails())
-                    .chain(data.detail.drawn())
-                    // Last of the three, because it brightens whichever of the other two drew the
-                    // world it is over.
-                    .chain(data.drawn_glow()),
+                    .chain(data.detail.drawn()),
                 &[],
-            )
-            // Over the scene, into the same target, which is what makes it an overlay.
-            .write::<std::convert::Infallible>(|| {
-                self.overlay.as_mut().unwrap().gui.paint(window);
-                Ok(())
-            })
-            .unwrap();
+            );
+        });
+        self.stats.timed("lines", ctx, || {
+            screen.render(camera, data.edges.into_iter().chain(&data.dashes), &[]);
+        });
+        // Last of the scene, because it brightens whichever pass above drew the world it is over.
+        self.stats.timed("glow", ctx, || {
+            screen.render(camera, data.drawn_glow(), &[]);
+        });
+        // Over the scene, into the same target, which is what makes it an overlay.
+        let overlay = self.overlay.as_mut().unwrap();
+        self.stats.timed("panel", ctx, || {
+            screen
+                .write::<std::convert::Infallible>(|| {
+                    overlay.gui.paint(window);
+                    Ok(())
+                })
+                .unwrap();
+        });
+
+        // Last, so that everything able to start something moving has had its turn.
+        let data = self.data.as_ref().unwrap();
+        // `moved` is what the geometry was rebuilt for, which covers the layout stepping, the
+        // camera turning and a selection repainting; the rest is movement that leaves the frame
+        // it started in looking the same -- a pan or a dolly, which turn nothing, and the reveal.
+        let moving = moved
+            || panned
+            || orbited
+            || walking
+            || self.veil > 0.0
+            || data.framing
+            || data.gesture.is_some()
+            || !data.graph.is_settled();
+        self.still = match moving {
+            true => 0.0,
+            false => self.still + frame_input.elapsed_time as f32 * 1e-3,
+        };
+        self.wanted = if self.pacing.eager() {
+            Wanted::Now
+        } else {
+            [
+                // Moving, or not long enough ago to start pacing the view by anything but the
+                // display. See [`IDLE_AFTER_SECONDS`].
+                (self.still < IDLE_AFTER_SECONDS).then_some(Wanted::Now),
+                // A fade in the panel, a blinking caret, a tooltip about to show itself.
+                Some(Wanted::after(
+                    self.overlay.as_ref().unwrap().gui.repaint_after(),
+                )),
+                // The one thing that goes on moving over a settled layout, and so the only reason
+                // a graph nothing else is happening to is drawn at all. See [`AppStatics::focused`].
+                (!data.dash_instances.transformations.is_empty()
+                    && (self.statics.focused || cfg!(target_family = "wasm")))
+                .then(|| Wanted::after_hz(IDLE_REDRAW_HZ)),
+                // Nothing is moving; a frame is drawn only because reading what has arrived is
+                // something only a frame does. See [`App::draw`].
+                (self.yno.asking() || data.atlas.is_some() || data.detail.pending())
+                    .then(|| Wanted::after_hz(POLL_REDRAW_HZ)),
+            ]
+            .into_iter()
+            .flatten()
+            .fold(Wanted::Never, Wanted::or_sooner)
+        };
+        moved
+    }
+
+    /// Turns what the frame just drawn asked for into how the loop waits. See [`Wanted`].
+    fn pace(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        use winit::event_loop::ControlFlow;
+        let flow = match self.wanted {
+            // The redraw request below is what wakes the loop; the wait is what it falls back to
+            // once the frame has been drawn.
+            Wanted::Now | Wanted::Never => ControlFlow::Wait,
+            Wanted::After(delay) => ControlFlow::wait_duration(delay),
+        };
+        event_loop.set_control_flow(flow);
+        if self.wanted == Wanted::Now {
+            self.ask_for_a_frame();
+        }
+    }
+
+    /// Asks for a frame, unless one has already been asked for and not yet drawn.
+    ///
+    /// The guard is not tidiness. On the page a request is an animation frame, and winit serves a
+    /// second one by cancelling the first: a stream of input -- a wheel being turned, a pointer
+    /// being dragged -- arrives faster than the display refreshes, so asking on every event
+    /// cancels the frame that was about to be drawn, over and over, and the view is left running
+    /// at whatever survives that rather than at the display's rate.
+    fn ask_for_a_frame(&mut self) {
+        if self.asked {
+            return;
+        }
+        if let Some(window) = self.ctx.window.as_ref() {
+            self.asked = true;
+            window.request_redraw();
+        }
     }
 }
 
 impl Overlay {
+    /// Carries what the last frame took into the rate the panel reads.
+    fn timed(&mut self, elapsed: f32) {
+        self.counted.frame(elapsed);
+    }
+
     fn new(
         event_loop: &winit::event_loop::ActiveEventLoop,
         window: &Window,
@@ -2108,9 +2804,10 @@ impl Overlay {
         let gui = gui::Gui::new(event_loop, window, context);
         egui_material_icons::initialize(gui.context());
         let scale = remembered_scale();
+        let remembered = antialias_remembered();
         Self {
             gui,
-            fps: 0.0,
+            counted: Counted::default(),
             sidebar: Sidebar::default(),
             keyboard: false,
             guide: guide::Guide::new(),
@@ -2120,6 +2817,8 @@ impl Overlay {
             ui_scale: scale,
             ui_scale_stored: scale,
             layout: Layout::remembered(),
+            antialias: remembered,
+            antialias_running: remembered,
         }
     }
 
@@ -2142,7 +2841,7 @@ impl Overlay {
         // graph behind it at the window's ratio alone.
         self.gui.context().set_zoom_factor(self.ui_scale);
         let ratio = frame_input.device_pixel_ratio * self.ui_scale;
-        let read = PanelData::new(data, self.fps, &self.sidebar, frame_input, ratio);
+        let read = PanelData::new(data, self.counted.rate(), &self.sidebar, frame_input, ratio);
         let parameters = data.graph.parameters();
         // Read here and written back after the panel: `parameters_mut` wakes the layout, so
         // touching it every frame would keep the graph from ever settling.
@@ -2152,6 +2851,8 @@ impl Overlay {
             link_reach: data.link_reach,
             ui_scale: self.ui_scale,
             layered: parameters.dag_level_distance.is_some(),
+            antialias: self.antialias,
+            antialias_running: self.antialias_running,
             chosen: None,
             pointed: None,
             lit: None,
@@ -2239,9 +2940,8 @@ impl Overlay {
         dump: Option<&world::Dump>,
         fading: Option<(String, f32)>,
     ) -> bool {
-        // Guards the very first frame, which reports no elapsed time at all.
-        let elapsed = (frame_input.elapsed_time as f32).max(1e-3);
-        self.fps += (1000.0 / elapsed - self.fps) * (elapsed / FPS_WINDOW_MS).min(1.0);
+        // The frame before this one, the panel being drawn inside the frame it reports.
+        self.timed(frame_input.elapsed_time as f32);
 
         let panel = self.panel(window, frame_input, data, account, dump, fading);
         if let Some(language) = panel.language {
@@ -2294,6 +2994,10 @@ impl Overlay {
             }
         }
 
+        if panel.antialias != self.antialias {
+            self.antialias = panel.antialias;
+            antialias_remember(self.antialias);
+        }
         // Followed live, so the panel resizes under the hand, but written through only once the
         // hand is off it: a store is not something to write every frame of a drag.
         self.ui_scale = panel.ui_scale;
@@ -2358,6 +3062,7 @@ impl<'a> PanelData<'a> {
         Self {
             data,
             fps,
+            surface: (frame_input.viewport.width, frame_input.viewport.height),
             route: data.route(),
             notable: data.notable(),
             listed: match data.selected {
@@ -2460,7 +3165,14 @@ impl Panel {
 
     fn graph(&mut self, ui: &mut egui::Ui, read: &PanelData, search: &mut String) {
         let data = read.data;
-        ui.label(t!("fps", fps = format!("{:.0}", read.fps)));
+        let (width, height) = read.surface;
+        ui.label(t!("fps", fps = format!("{:.0}", read.fps)))
+            .on_hover_text(t!(
+                "fps-hint",
+                width = width,
+                height = height,
+                pixels = format!("{:.1}", width as f32 * height as f32 / 1e6)
+            ));
         ui.label(t!(
             "graph-size",
             worlds = data.titles.len(),
@@ -2705,6 +3417,7 @@ impl Panel {
             .on_hover_text(t!("link-reach-hint"));
         ui.add(egui::Slider::new(&mut self.ui_scale, UI_SCALE_RANGE).text(t!("ui-scale")))
             .on_hover_text(t!("ui-scale-hint"));
+        self.antialiasing(ui);
         // The way back to a panel that was dismissed for good, so ticking that box is not a door
         // that locks behind the person who ticked it.
         self.guide |= ui.button(t!("show-controls")).clicked();
@@ -2906,6 +3619,16 @@ impl Panel {
     /// Nothing to draw: see the native [`Self::clear_cache`] above.
     #[cfg(target_family = "wasm")]
     fn clear_cache(_: &mut egui::Ui) {}
+
+    /// The one setting whose cost is worth more than its look, so the choice is the person's:
+    /// see [`MULTISAMPLES`].
+    fn antialiasing(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.antialias, t!("antialias"))
+            .on_hover_text(t!("antialias-hint"));
+        if self.antialias != self.antialias_running {
+            ui.label(t!("antialias-restart"));
+        }
+    }
 
     /// Every language names itself, so someone who cannot read the one the app opened in can still
     /// find theirs in the list. The choice is left on the panel rather than taken here, so a frame
@@ -3288,6 +4011,36 @@ impl AppStatics {
     /// Turns the camera square to the `z = 0` plane, keeping where it looks and how far off it
     /// stands. The one turn two-dimensional mode makes on its own, because it is also the one the
     /// person can no longer make: see [`lock_rotation`].
+    /// Holds the pose a run opens on and then pans away from it, a reporting window a step.
+    /// `YUMEZU_FRAMES=dolly` asks for it.
+    ///
+    /// A pan rather than a dolly because it changes what is in the frame and nothing else -- the
+    /// distance and the orientation stay, so two reports differ only by what they were drawing.
+    #[cfg(all(feature = "gpu-profile", not(target_family = "wasm")))]
+    fn pan_aside(&mut self) {
+        if !asked("dolly") {
+            return;
+        }
+        static SINCE: std::sync::OnceLock<web_time::Instant> = std::sync::OnceLock::new();
+        static OPENED: std::sync::OnceLock<(Vec3, Vec3)> = std::sync::OnceLock::new();
+        let camera = &mut self.camera;
+        let (eye, at) = *OPENED.get_or_init(|| (camera.position(), camera.target()));
+        // Held off while the layout is still blowing out from its seed, which is not a view
+        // anybody looks at and not one worth timing.
+        let waited = SINCE
+            .get_or_init(web_time::Instant::now)
+            .elapsed()
+            .as_secs_f64()
+            - PAN_ASIDE_SETTLES_SECONDS;
+        let step = (waited / FRAME_STATS_SECONDS).max(0.0) as u32;
+        let aside = camera.right_direction().normalize() * PAN_ASIDE_STEP * step as f32;
+        if step > 0 {
+            log::info!("{:.0} units aside", PAN_ASIDE_STEP * step as f32);
+        }
+        let up = camera.up();
+        camera.set_view(eye + aside, at + aside, up);
+    }
+
     fn face_plane(&mut self) {
         let target = self.control.target;
         let distance = target.distance(self.camera.position());
@@ -3520,6 +4273,7 @@ impl AppEntities {
     fn pick(&self, camera: &Camera, cursor: PhysicalPoint) -> Option<Grab> {
         let origin = camera.position_at_pixel(cursor);
         let direction = camera.view_direction_at_pixel(cursor);
+        let across = camera.right_direction().normalize();
         let mut nearest: Option<Grab> = None;
         self.graph.visit_nodes(|node| {
             let position = world_pos(node.position());
@@ -3529,8 +4283,15 @@ impl AppEntities {
                 return;
             }
             let pixel = camera.pixel_at_position(position);
-            let tolerance = GRAB_TOLERANCE_PIXELS
-                .max(0.5 * drawn_width(camera, self.node_radii[node.index().index()], position));
+            let tolerance = GRAB_TOLERANCE_PIXELS.max(
+                0.5 * drawn_width(
+                    camera,
+                    across,
+                    self.node_radii[node.index().index()],
+                    position,
+                    pixel,
+                ),
+            );
             if (pixel.x - cursor.x).hypot(pixel.y - cursor.y) < tolerance {
                 nearest = Some(Grab {
                     node: node.index(),
@@ -3780,6 +4541,7 @@ impl AppEntities {
     /// Uploads on its own rather than waiting for [`Self::rebuild_instances`], which a settled
     /// graph never reaches.
     fn repaint(&mut self) {
+        self.recolored = true;
         let mut on_route = vec![false; self.titles.len()];
         for node in self.highlighted() {
             on_route[node] = true;
@@ -3939,16 +4701,14 @@ impl AppEntities {
 
     /// Every frame, unlike the rest of the geometry: the marching is the whole point of the
     /// dashes, and a settled layout is exactly when it has to carry on regardless.
-    fn march_dashes(&mut self, dt: f32) {
-        // Kept inside a single slot: past the end of one, every dash stands where the dash ahead
-        // of it stood, so the phase can simply start over.
-        self.dash_phase = (self.dash_phase + dt * EDGE_DASH_SPEED).fract();
-        let phase = self.dash_phase;
+    /// Works out where each connection's dashes run, which is everything about them except how
+    /// far along they have marched. See [`DashRun`].
+    fn lay_dash_runs(&mut self) {
         let radius = self.edge_radius() * EDGE_DASH_WIDTH;
         let radii = &self.node_radii;
         let arrivals = &self.arrivals;
-        let dashes = &mut self.dash_instances.transformations;
-        dashes.clear();
+        let runs = &mut self.dash_runs;
+        runs.clear();
         self.graph.visit_edges(|a, b, data| {
             if !data.user_data {
                 return;
@@ -3973,7 +4733,11 @@ impl AppEntities {
             // Collapsed rather than skipped: the count of dashes is fixed when the graph is built
             // and the colors are written against it.
             if span <= 0.0 {
-                dashes.extend(std::iter::repeat_n(Mat4::from_scale(0.0), EDGE_DASHES));
+                runs.push(DashRun {
+                    origin: vec3(0.0, 0.0, 0.0),
+                    travel: vec3(0.0, 0.0, 0.0),
+                    basis: Mat4::from_scale(0.0),
+                });
                 return;
             }
             // Each dash fills the front of its own slot, the gap behind it being what makes the
@@ -3983,15 +4747,40 @@ impl AppEntities {
             let run = span / (1.0 + EDGE_DASH_FILL / EDGE_DASHES as f32);
             let length = run * EDGE_DASH_FILL / EDGE_DASHES as f32;
             let unit = dir / dir.magnitude();
-            for dash in 0..EDGE_DASHES {
-                let at = ((dash as f32 + phase) / EDGE_DASHES as f32).fract();
-                dashes.push(
-                    Mat4::from_translation(from + unit * (start + run * at))
-                        * along
-                        * Mat4::from_nonuniform_scale(length, radius, radius),
-                );
-            }
+            runs.push(DashRun {
+                origin: from + unit * start,
+                travel: unit * run,
+                basis: along * Mat4::from_nonuniform_scale(length, radius, radius),
+            });
         });
+        self.dash_runs_stale = false;
+    }
+
+    fn march_dashes(&mut self, dt: f32) {
+        // Kept inside a single slot: past the end of one, every dash stands where the dash ahead
+        // of it stood, so the phase can simply start over.
+        self.dash_phase = (self.dash_phase + dt * EDGE_DASH_SPEED).fract();
+        if self.dash_instances.transformations.is_empty() {
+            return;
+        }
+        if self.dash_runs_stale {
+            self.lay_dash_runs();
+        }
+        let phase = self.dash_phase;
+        let (slots, _) = self
+            .dash_instances
+            .transformations
+            .as_chunks_mut::<EDGE_DASHES>();
+        for (run, dashes) in self.dash_runs.iter().zip(slots) {
+            for (dash, out) in dashes.iter_mut().enumerate() {
+                let at = ((dash as f32 + phase) / EDGE_DASHES as f32).fract();
+                let at = run.origin + run.travel * at;
+                // Composing the translation by hand: `basis` carries no translation of its own, so
+                // the product is exactly `basis` with the position written into the last column.
+                *out = run.basis;
+                out.w = at.extend(1.0);
+            }
+        }
         self.dashes.set_instances(&self.dash_instances);
     }
 
@@ -4076,6 +4865,7 @@ impl AppEntities {
         let billboard = billboard(camera);
         let forward = camera.view_direction();
         let colors = self.thumbnail_instances.colors.as_ref();
+        let across = camera.right_direction().normalize();
         let mut magnified = Vec::new();
         self.graph.visit_nodes(|node| {
             let world = node.index().index();
@@ -4096,38 +4886,42 @@ impl AppEntities {
             let full = self.node_radii[world];
             let grown = self.arrivals.grown(world);
             // Ranked and admitted at the size it is settling at, drawn at the size it is now.
-            let width = drawn_width(camera, full, position);
+            let width = drawn_width(camera, across, full, position, center);
             if width < detail::SWITCH_PIXELS {
                 return;
             }
             let radius = full * grown;
-            magnified.push((
+            magnified.push(detail::Magnified {
+                world,
                 width,
-                detail::Magnified {
-                    world,
-                    transformation: Mat4::from_translation(
-                        position - forward * (radius * detail::LIFT),
-                    ) * billboard
-                        * Mat4::from_nonuniform_scale(radius * thumbnails::ASPECT, radius, 1.0),
-                    color: colors.map_or(Srgba::WHITE, |colors| colors[world]),
-                },
-            ));
+                transformation: Mat4::from_translation(
+                    position - forward * (radius * detail::LIFT),
+                ) * billboard
+                    * Mat4::from_nonuniform_scale(radius * thumbnails::ASPECT, radius, 1.0),
+                color: colors.map_or(Srgba::WHITE, |colors| colors[world]),
+            });
         });
-        magnified.sort_by(|a, b| b.0.total_cmp(&a.0));
-        magnified.into_iter().map(|(_, it)| it).collect()
+        magnified.sort_by(|a, b| b.width.total_cmp(&a.width));
+        magnified
     }
 }
 
 /// How wide a node comes out on screen, in physical pixels: across the quad through its own
 /// centre, so it is the node as drawn rather than a sphere around it, which is what says whether
 /// the atlas still holds as much detail as the screen is asking of it.
-fn drawn_width(camera: &Camera, radius: f32, position: Vec3) -> f32 {
-    let across = camera.right_direction().normalize() * radius * thumbnails::ASPECT;
-    let (left, right) = (
-        camera.pixel_at_position(position - across),
-        camera.pixel_at_position(position + across),
-    );
-    (right.x - left.x).hypot(right.y - left.y)
+fn drawn_width(
+    camera: &Camera,
+    across: Vec3,
+    radius: f32,
+    position: Vec3,
+    center: PhysicalPoint,
+) -> f32 {
+    // Half the quad, doubled, rather than both edges projected: `across` is square to the view
+    // direction, so the two edges are the same distance from the camera and the projection is
+    // linear between them. `center` is already in hand from the test that the node is on screen
+    // at all, which leaves one projection per node here instead of three.
+    let edge = camera.pixel_at_position(position + across * (radius * thumbnails::ASPECT));
+    2.0 * (edge.x - center.x).hypot(edge.y - center.y)
 }
 
 /// The names `needle` matches, best first, or the whole list where nothing is asked for.
@@ -4818,6 +5612,7 @@ fn edge_colors(
 #[cfg(test)]
 mod tests {
     use super::world;
+    use three_d::renderer::*;
 
     /// A graph the person was already looking at, with `unvisited` of its worlds wearing the
     /// placeholder.
@@ -4834,6 +5629,17 @@ mod tests {
 
     // The frontier is built outward along walkable steps, so counting a passage the player could
     // only come back through would offer a world an exit it has not got.
+    #[test]
+    fn writing_a_dash_position_is_composing_a_translation() {
+        let along =
+            rotation_matrix_from_dir_to_dir(vec3(1.0, 0.0, 0.0), vec3(0.3, -0.7, 0.5).normalize());
+        let basis = along * Mat4::from_nonuniform_scale(0.4, 0.08, 0.08);
+        let at = vec3(3.0, -2.0, 11.0);
+        let mut written = basis;
+        written.w = at.extend(1.0);
+        assert_eq!(Mat4::from_translation(at) * basis, written);
+    }
+
     #[test]
     fn only_ways_out_a_player_could_walk_are_counted_as_untaken() {
         let step = |world, out: bool| world::Step {

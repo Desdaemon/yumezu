@@ -65,6 +65,9 @@ struct Unvisited {
 
 pub struct Magnified {
     pub world: usize,
+    /// How wide the node comes out on screen, in physical pixels. Both what admitted it --
+    /// see [`SWITCH_PIXELS`] -- and what the caller ranks by before handing the list over.
+    pub width: f32,
     /// Taken from the world's own atlas quad, so the switch changes the detail and nothing else.
     pub transformation: Mat4,
     /// The atlas quad's tint, so a picture dims along with the graph around it.
@@ -89,6 +92,16 @@ impl Detail {
     /// Stands the placeholder on the quads it was handed -- the nodes of every world the player
     /// has not been to. Every frame, because the layout moves the nodes, the camera turns them,
     /// and a selection dims them.
+    /// Whether a picture is still on its way, and so whether [`Detail::track`] has anything left
+    /// to find. What keeps the window drawing while a world sharpens.
+    pub fn pending(&self) -> bool {
+        self.unvisited.loading.is_some()
+            || self
+                .held
+                .values()
+                .any(|held| matches!(held, Held::Loading(_)))
+    }
+
     pub fn place_unvisited(&mut self, context: &Context, quads: &Instances) {
         if let Some(loading) = &self.unvisited.loading
             && let Some(loaded) = loading.take()

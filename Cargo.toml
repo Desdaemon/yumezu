@@ -19,6 +19,10 @@ path = "src/main.rs"
 
 [features]
 production = []
+# Times each pass of a frame on the card separately, and adds a scripted pan to compare views
+# against each other. Native only, and off by default: the queries stall nothing, but the frame
+# is measured pass by pass rather than whole. See `FrameStats::timed`.
+gpu-profile = []
 
 [profile.min]
 inherits = "release"
@@ -50,6 +54,8 @@ three-d = { version = "0.20.0", git = "https://github.com/asny/three-d" }
 three-d-asset = { version = "0.10", features = ["jpeg", "png", "http-rustls"] }
 reqwest = { version = "0.13.4" }
 winit = "0.30"
+# `std::time::Instant` panics on the page; this is the same type everywhere else.
+web-time = "1"
 egui_material_icons = "0.7.0"
 fluent-bundle = "0.16"
 unic-langid = "0.9"
