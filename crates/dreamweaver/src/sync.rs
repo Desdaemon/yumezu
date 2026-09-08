@@ -1,6 +1,6 @@
 //! Building a dump out of what the wiki knows.
 //!
-//! Four fetches describe four parts of the same thing -- worlds, the passages between them, the
+//! Four fetches describe four parts of the same thing -- worlds, the connections between them, the
 //! people credited for them, the releases they arrived in -- and none knows about the others. This
 //! is where they are joined into one graph, measured, and written out for the reader.
 //!
@@ -30,9 +30,9 @@ use crate::versions;
 pub struct Fetched {
     authors: Vec<smw::Author>,
     releases: Vec<smw::Version>,
-    /// Keyed by the first character of the world the passage leaves. See
+    /// Keyed by the first character of the world the connection leaves. See
     /// [`crate::smw::connections`].
-    passages: BTreeMap<char, Vec<smw::Connection>>,
+    connections: BTreeMap<char, Vec<smw::Connection>>,
 }
 
 /// How much of the wiki a sync re-reads.
@@ -40,8 +40,8 @@ pub enum Refresh {
     /// Whatever the wiki says about itself: a sync with no dump to ask about, or one the wiki no
     /// longer remembers that far back.
     Everything,
-    /// Spelled without the namespace. An empty list never reaches here: the caller stands the sync
-    /// down instead.
+    /// Titles without the `Yume 2kki:` namespace prefix. An empty list never reaches here: the
+    /// caller stands the sync down instead.
     Pages(Vec<String>),
 }
 
@@ -62,8 +62,8 @@ impl Refresh {
         }
     }
 
-    /// A passage is written up on the page of the world it leaves, so an edited page can only have
-    /// changed the piece its own title falls in.
+    /// A connection is written up on the page of the world it leaves, so an edited page can only
+    /// have changed the piece its own title falls in.
     fn shards(&self, all: &BTreeSet<char>) -> BTreeSet<char> {
         match self {
             Refresh::Everything => all.clone(),
@@ -104,7 +104,7 @@ pub async fn run(
     fetched: &mut Fetched,
     progress: &Progress,
 ) -> smw::Result<Dump> {
-    // First and alone: what the worlds are decides which pieces of the passage query to ask for.
+    // First and alone: what the worlds are decides which pieces of the connection query to ask for.
     progress.at(progress::WORLDS);
     let locations = smw::locations(http).await?;
     let initials: BTreeSet<char> = locations
@@ -113,7 +113,7 @@ pub async fn run(
         .collect();
     // An empty cache is a run that has just come up, so everything is asked for however little the
     // wiki says has changed.
-    let cold = fetched.passages.is_empty();
+    let cold = fetched.connections.is_empty();
     let want_authors = cold || refresh.touches(AUTHORS);
     let want_releases = cold || refresh.touches_under(VERSION_HISTORY);
     let shards = match cold {
@@ -122,9 +122,9 @@ pub async fn run(
     };
 
     let shards_count = shards.len();
-    // One stage for the three: they are awaited together, and the passages are the long half.
-    progress.at(progress::PASSAGES);
-    let (authors, releases, passages) = tokio::try_join!(
+    // One stage for the three: they are awaited together, and the connections are the long half.
+    progress.at(progress::CONNECTIONS);
+    let (authors, releases, connections) = tokio::try_join!(
         optional(want_authors, smw::authors(http)),
         optional(want_releases, smw::versions(http)),
         smw::connections(http, shards),
@@ -137,10 +137,10 @@ pub async fn run(
     if let Some(releases) = releases {
         fetched.releases = releases;
     }
-    fetched.passages.extend(passages);
+    fetched.connections.extend(connections);
     // Holding a piece with no worlds left would keep a deleted world reachable.
     fetched
-        .passages
+        .connections
         .retain(|initial, _| initials.contains(initial));
 
     /// Which parts were asked for this time, so a log line reads as what this sync cost rather
@@ -152,7 +152,7 @@ pub async fn run(
         }
     }
     tracing::info!(
-        "read {} worlds and {shards_count} of {} passage groups; {} authors {}, {} releases {}",
+        "read {} worlds and {shards_count} of {} connection groups; {} authors {}, {} releases {}",
         locations.len(),
         initials.len(),
         fetched.authors.len(),
@@ -162,7 +162,7 @@ pub async fn run(
     );
     Ok(assemble(
         locations,
-        fetched.passages.values().flatten(),
+        fetched.connections.values().flatten(),
         &fetched.authors,
         &fetched.releases,
         previous,
@@ -197,13 +197,13 @@ fn assemble<'a>(
         .map(|(at, location)| (location.title.as_str(), at))
         .collect();
 
-    // One entry per pair of worlds rather than per row. The wiki writes a passage up once per
+    // One entry per pair of worlds rather than per row. The wiki writes a connection up once per
     // direction, and occasionally twice where there is more than one way through; either way it is
-    // one passage carrying everything the wiki said about it.
-    let mut passages: HashMap<(usize, usize), Passage> = HashMap::new();
+    // one connection carrying everything the wiki said about it.
+    let mut merged: HashMap<(usize, usize), Attributes> = HashMap::new();
     let mut leaving: Vec<Vec<usize>> = vec![Vec::new(); locations.len()];
     for connection in connections {
-        // A passage the wiki marks as gone would otherwise make removed worlds look reachable.
+        // A connection the wiki marks as gone would otherwise make removed worlds look reachable.
         if connection.is_removed {
             continue;
         }
@@ -211,21 +211,21 @@ fn assemble<'a>(
             at.get(connection.origin.as_str()),
             at.get(connection.destination.as_str()),
         ) else {
-            // An unknown end is a passage to a page that is not a location: a hole in the wiki.
+            // An unknown end is a connection to a page that is not a location: a hole in the wiki.
             continue;
         };
-        let passage = passages.entry((from, to)).or_insert_with(|| {
+        let merged = merged.entry((from, to)).or_insert_with(|| {
             leaving[from].push(to);
-            Passage::default()
+            Attributes::default()
         });
         for attribute in &connection.attributes {
             let Some((flag, wording)) = ConnType::of(attribute, connection) else {
-                tracing::debug!("unknown passage attribute {attribute:?}");
+                tracing::debug!("unknown connection attribute {attribute:?}");
                 continue;
             };
-            passage.flags |= flag;
+            merged.flags |= flag;
             if let Some((params, params_jp)) = wording.published() {
-                passage
+                merged
                     .wording
                     .insert(flag.bits(), TypeParams { params, params_jp });
             }
@@ -251,14 +251,14 @@ fn assemble<'a>(
                 removed: removed[at],
                 out: leaving[at]
                     .iter()
-                    .map(|&to| (to, passages[&(at, to)].flags))
+                    .map(|&to| (to, merged[&(at, to)].flags))
                     .collect(),
             })
             .collect::<Vec<_>>(),
     );
 
     // A world the game no longer has is measured -- a live world can sit behind one -- but not
-    // published, so every passage has to be renumbered into the published index.
+    // published, so every connection has to be renumbered into the published index.
     let published: Vec<Option<usize>> = {
         let mut next = 0;
         removed
@@ -280,11 +280,11 @@ fn assemble<'a>(
             let connections: Vec<Connection> = leaving[at]
                 .iter()
                 .filter_map(|&to| {
-                    let passage = &passages[&(at, to)];
+                    let attributes = &merged[&(at, to)];
                     Some(Connection {
                         target_id: published[to]?,
-                        flags: passage.flags.bits(),
-                        type_params: passage.wording.clone(),
+                        flags: attributes.flags.bits(),
+                        type_params: attributes.wording.clone(),
                     })
                 })
                 .collect();
@@ -353,9 +353,9 @@ fn assemble<'a>(
     }
 }
 
-/// Gathered from however many rows describe one passage.
+/// Gathered from however many rows describe one connection.
 #[derive(Default)]
-struct Passage {
+struct Attributes {
     flags: ConnType,
     /// Keyed by the flag imposing the condition.
     wording: std::collections::BTreeMap<i16, TypeParams>,
@@ -491,7 +491,7 @@ fn stamp() -> String {
 
 /// Also what a release is dated with: two conventions would be two things for one reader to know.
 pub fn iso(now: time::OffsetDateTime) -> String {
-    // Written out rather than formatted with a description: the shape is fixed and the
+    // Written out rather than formatted with a description: the format never varies and the
     // milliseconds are always zero.
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",

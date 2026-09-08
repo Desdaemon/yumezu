@@ -37,7 +37,7 @@ pub fn load() -> fetch::Pending<Option<CpuTexture>> {
 }
 
 /// Its own file as well as its own cell of the atlas, because the graph draws it at every size and
-/// the atlas is a jpeg -- the worst thing to put a hard white shape on black through. The catalog
+/// the atlas is a jpeg -- the worst thing to put hard white edges on black through. The catalog
 /// draws the cell, at about the size it is packed at.
 ///
 /// `None` is not fatal: an unvisited world keeps its bare node.

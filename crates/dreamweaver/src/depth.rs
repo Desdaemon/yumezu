@@ -1,11 +1,12 @@
 //! How far each world is from the one the game starts in.
 //!
-//! Two numbers differing only in which passages they will walk. `depth` counts steps along
-//! passages a player can simply take; `minDepth` takes any passage that exists at all, so it says
-//! how deep the world sits at best. The reader draws the graph by the first and ranks by the second.
+//! Two numbers differing only in which connections they will walk. `depth` counts steps along
+//! connections a player can take unconditionally; `minDepth` takes any connection at all, so it
+//! says how deep the world sits at best. The reader draws the graph by the first and ranks by the
+//! second.
 //!
 //! Neither is a plain shortest path, because the graph is not connected under either rule: whole
-//! branches hang off passages locked from both ends. A run that leaves worlds unreached gives up
+//! branches hang off connections locked from both ends. A run that leaves worlds unreached gives up
 //! one condition at a time, weakest first, and tries again from what it already knows.
 
 use crate::model::ConnType;
@@ -18,12 +19,12 @@ pub struct Node {
     /// A world the game no longer has. A route may walk into one but never back out, so a removed
     /// world cannot shorten a live world's distance.
     pub removed: bool,
-    /// `(index of the world it leads to, what the passage is like)`.
+    /// `(index of the world it leads to, what the connection is like)`.
     pub out: Vec<(usize, ConnType)>,
 }
 
-/// The conditions `depth` refuses: a passage that asks for any of them is not a step a player can
-/// simply take.
+/// The conditions `depth` refuses: a connection that asks for any of them is not a step a player
+/// can take unconditionally.
 fn walkable() -> ConnType {
     ConnType::NO_ENTRY
         | ConnType::LOCKED
@@ -33,7 +34,7 @@ fn walkable() -> ConnType {
         | ConnType::EXIT_POINT
 }
 
-/// Only the conditions meaning the passage does not lead where it is written: a way back rather
+/// Only the conditions meaning the connection does not lead where it is written: a way back rather
 /// than a way there, or a way into a pocket of the destination that connects to nothing else.
 fn reachable() -> ConnType {
     ConnType::NO_ENTRY | ConnType::DEAD_END | ConnType::ISOLATED
@@ -87,7 +88,8 @@ fn distances(worlds: &[Node], refused: ConnType) -> Vec<i32> {
 /// The next condition to stop refusing, weakest first.
 ///
 /// The reference implementation's order, and one of confidence rather than difficulty: a
-/// conditional passage is the most likely to be walkable in practice, a no-entry passage the least,
+/// conditional connection is the most likely to be walkable in practice, a no-entry connection the
+/// least,
 /// since walking one means going the way the wiki says you cannot.
 fn give_up(refused: ConnType) -> Option<ConnType> {
     for condition in [
@@ -141,7 +143,7 @@ fn relax(
             }
             let into_removed = worlds[to].removed;
             // Once a route is in the removed part of the graph it stays there, and one that is
-            // not may not cross a removed passage to reach a world that still exists.
+            // not may not cross a removed connection to reach a world that still exists.
             if removed_route && !into_removed {
                 continue;
             }

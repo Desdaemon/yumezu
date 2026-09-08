@@ -5,15 +5,15 @@
 //!
 //! The stage names are the reference implementation's own, so a reader written against its
 //! `/pollUpdate` reads these unchanged. They are coarser than its worker gives: this program
-//! fetches the authors, the releases and the passages as one concurrent question.
+//! fetches the authors, the releases and the connections as one concurrent question.
 
 use std::sync::RwLock;
 
 /// Asking the wiki what it has changed, where a soft sync starts and often ends.
 pub const CHANGES: &str = "init";
 pub const WORLDS: &str = "fetchWorldData";
-/// Reading the passages, and with them the authors and the release history.
-pub const PASSAGES: &str = "fetchConnData";
+/// Reading the connections, and with them the authors and the release history.
+pub const CONNECTIONS: &str = "fetchConnData";
 
 /// The stage a sync has reached, or `None` for none running -- which is `done` to a client.
 #[derive(Default)]

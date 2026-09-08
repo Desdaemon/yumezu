@@ -2,12 +2,12 @@
 
 Builds and serves `data.json`, the world dump yumezu draws.
 
-It reimplements the data half of [Yume-2kki-Explorer]'s `app.js`: the same document, in the same
-shape, for the same reader. What it does not reimplement is how that program gets there. `app.js`
-keeps a MySQL database, scrapes a dozen wiki pages for the parts of the dump that live in prose,
-and runs a worker thread to reconcile the two. dreamweaver asks yume.wiki's Semantic MediaWiki
-store for the structured data it holds -- which is nearly all of it -- and keeps the result in one
-JSON file, which is both what it serves and what it reads back when it restarts.
+It reimplements the data half of [Yume-2kki-Explorer]'s `app.js`: the same document, field for
+field, for the same reader. What it does not reimplement is how that program gets there. `app.js`
+keeps a MySQL database, scrapes a dozen wiki pages for the parts of the dump that live in prose, and
+runs a worker thread to reconcile the two. dreamweaver asks yume.wiki's Semantic MediaWiki store for
+the structured data it holds -- which is nearly all of it -- and keeps the result in one JSON file,
+which is both what it serves and what it reads back when it restarts.
 
 ```
 dreamweaver [--listen 127.0.0.1:5000] [--data data.json] [--sync-every 6]
@@ -45,21 +45,21 @@ The 503 is also why a dump is never served while it is being rebuilt, and why an
 never served at all: an empty document is indistinguishable from a wiki with no worlds in it, and
 the reader on the other end would draw the second.
 
-`/pollUpdate` is how the reader says what the wait is for -- it is the reference implementation's own route, answered in the reference's own shape,
-with the stage named by one of its task names. This program fetches the authors, the releases and
-the passages as one concurrent question, so it names four stages where the reference names two
-dozen. See `src/progress.rs`.
+`/pollUpdate` is how the reader says what the wait is for -- it is the reference implementation's
+own route, answered in the reference's own JSON, with the stage named by one of its task names. This
+program fetches the authors, the releases and the connections as one concurrent question, so it
+four stages where the reference names two dozen. See `src/progress.rs`.
 
 ## Where the data comes from
 
 All of it is the wiki's own store, asked directly through `api.php` -- see `src/smw.rs`. A world's
-infobox, the passages out of it, the people credited for it and the releases it lived through are
+infobox, the connections out of it, the people credited for it and the releases it lived through are
 all properties and subobjects, so these are queries for structured data and nothing here reads wiki
 prose. Nothing is asked of [ynoproject/wikiwrapper] any more.
 
 The one thing the wrapper answered that the store cannot is the **galleries** -- the pictures on a
 world's page are page content rather than properties -- and they are no longer published. They were
-the whole of what a second host and a second shape of answer were for, and nothing reads them.
+the whole of what a second host and a second response format were for, and nothing reads them.
 
 Two of the queries exist because the wrapper could not answer them at all, and they are worth
 knowing about:
@@ -70,7 +70,8 @@ knowing about:
 - The **connections** have an endpoint, and it cannot reach the end of them. The store refuses to
   look more than about five and a half thousand rows into a result set, and instead of saying so it
   answers with the first page again while the offset carries on counting -- which is what the
-  wrapper's `continueKey` passes on when it appears to wrap. Yume 2kki has more passages than that,
+  wrapper's `continueKey` passes on when it appears to wrap. Yume 2kki has more connections than
+  that,
   so every one past the cap was invisible: alphabetically the last sixty-odd worlds' exits, missing
   from every dump built that way. Asking the store directly does not lift the cap; it allows the
   question to be split into one query per first letter of a world's title, each a few hundred rows.
@@ -91,13 +92,13 @@ the pass costs one small request and stops.
 
 When the answer is not none, the list of pages is also a list of which answers are now stale, and
 only those are asked for again. The author list is one page. The version history is a handful. A
-passage belongs to the page of the world it leaves, so an
-edited world can only have changed the letter its own title falls under. The worlds themselves are
-re-read every time -- that is one query for all sixteen hundred, and a cache of them would be
-something to reconcile rather than something to skip.
+connection belongs to the page of the world it leaves, so an edited world can only have changed the
+letter its own title falls under. The worlds themselves are re-read every time -- that is one query
+for all sixteen hundred, and a cache of them would be something to reconcile rather than something
+to skip.
 
 What that saves is requests rather than minutes: the store answers quickly, with the worlds taking
-about twenty seconds and all twenty-seven passage groups together about thirty.
+about twenty seconds and all twenty-seven connection groups together about thirty.
 
 Two corrections are made to "everything since the dump was built", both because taking the wiki
 literally would lose edits:
@@ -129,8 +130,8 @@ The wiki's edge answers a plain request with a challenge page, so every request 
 `effectData`, `menuThemeData`, `wallpaperData` and `bgmTrackData` are published as empty lists.
 None of them says anything about how the worlds join up, which is the whole of what this dump is
 read for, and none of them is in the store: effects and menu themes live in prose and a table on
-their pages, and reading those would make this the second program scraping them. The fields stay in
-the shape so a reader written against the reference dump keeps working.
+their pages, and reading those would make this the second program scraping them. The fields stay as
+empty lists so a reader written against the reference dump keeps working.
 
 Per-world `images` is left out as well: it is the gallery on a world's page, which the store does
 not hold at all.
@@ -184,8 +185,8 @@ forward by title.
 A secret is published and marked rather than dropped. Dropping it would forget the mark -- the last
 dump is where the marks are read from, so a world left out of one sync is unmarked by the next --
 and hiding is a question about a reader rather than about the game. So a secret keeps its id, stays
-in the graph the depths are measured on, and stays an end of the passages that reach it. The client
-is what leaves it out: `yumezu` drops secret worlds as it reads the dump and renumbers the
+in the graph the depths are measured on, and stays an end of the connections that reach it. The
+client is what leaves it out: `yumezu` drops secret worlds as it reads the dump and renumbers the
 connections behind them, and `tools/atlas` drops the same worlds so the thumbnail cells still line
 up.
 

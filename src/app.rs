@@ -909,9 +909,6 @@ struct PanelData<'a> {
     data: &'a AppEntities,
     /// See [`Counted::rate`].
     fps: f32,
-    /// The drawing surface, in the pixels actually filled rather than the ones laid out: what the
-    /// rate beside it has to be read against. See [`Overlay::graph`].
-    surface: (u32, u32),
     /// The route home from what is lit, origin last.
     route: Vec<usize>,
     /// The worlds worth naming among the descendants of what is lit.
@@ -1526,7 +1523,7 @@ impl App {
         self.ctx.wctx = None;
         self.ctx.window = None;
     }
-    /// Says where the camera was left, in the shape of the literal in [`App::new`]: the view a run
+    /// Says where the camera was left, in the syntax of the literal in [`App::new`]: the view a run
     /// opens on is picked by flying to one worth opening on and copying this line out of the log.
     /// The layout is the same every run -- see `scatter` -- so the numbers mean the same thing
     /// next time, but only within the dimensions they were read in.
@@ -1779,7 +1776,7 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
     let rng = Rng(0x5eed_1337);
 
     let worlds = &dump.worlds;
-    // One reading of depth for both the colors and, in layered mode, the layer each world is
+    // Depth computed once for both the colors and, in layered mode, the layer each world is
     // pinned to, so the two agree.
     let routes = world::canonical_routes(worlds);
     let deepest = routes.depth.iter().flatten().copied().max().unwrap_or(0);
@@ -1961,7 +1958,7 @@ fn entities(dump: &world::Dump, before: Option<&Before>, ctx: &WindowedContext) 
         InstancedMesh::new(ctx, &edge_instances, &CpuMesh::cylinder(EDGE_SIDES)),
         ColorMaterial::default(),
     );
-    // The same shape as a solid line, placed the same way, only shorter.
+    // The same cylinder as a solid line, placed the same way, only shorter.
     let dashes = Gm::new(
         InstancedMesh::new(ctx, &dash_instances, &CpuMesh::cylinder(EDGE_SIDES)),
         ColorMaterial::default(),
@@ -2817,7 +2814,6 @@ impl<'a> PanelData<'a> {
         Self {
             data,
             fps,
-            surface: (frame_input.viewport.width, frame_input.viewport.height),
             route: data.route(),
             notable: data.notable(),
             listed: match data.selected {
@@ -2920,14 +2916,7 @@ impl Panel {
 
     fn graph(&mut self, ui: &mut egui::Ui, read: &PanelData, search: &mut String) {
         let data = read.data;
-        let (width, height) = read.surface;
-        ui.label(t!("fps", fps = format!("{:.0}", read.fps)))
-            .on_hover_text(t!(
-                "fps-hint",
-                width = width,
-                height = height,
-                pixels = format!("{:.1}", width as f32 * height as f32 / 1e6)
-            ));
+        ui.label(t!("fps", fps = format!("{:.0}", read.fps)));
         ui.label(t!(
             "graph-size",
             worlds = data.titles.len(),
@@ -3406,7 +3395,7 @@ impl Panel {
 
     /// Every list of worlds in the panel is drawn through here, so all of them point alike. The
     /// exception is the ways on from a world -- see [`Self::forward_connections`], whose rows are
-    /// connections and which lights the passage rather than either end of it.
+    /// connections and which lights the connection rather than either end of it.
     ///
     /// [`Self::pointed`] is written rather than merged: egui hovers at most one row at a time.
     fn world_row(
@@ -5254,7 +5243,7 @@ fn scaled(color: Srgba, brightness: f32) -> Srgba {
 /// The worlds a player still has somewhere to go from.
 ///
 /// A way out counts only where the player could actually take it: the far end has to be somewhere
-/// they have not been, and the passage walkable in that direction -- the same reading
+/// they have not been, and the connection walkable in that direction -- the same reading
 /// `world::Dump::showing` builds the frontier by, so the list cannot disagree with the graph.
 ///
 /// Ranked most first, ties by world so the list is the same every time it is built, and cut to
@@ -5353,7 +5342,7 @@ mod tests {
         }
     }
 
-    // The frontier is built outward along walkable steps, so counting a passage the player could
+    // The frontier is built outward along walkable steps, so counting a connection the player could
     // only come back through would offer a world an exit it has not got.
     #[test]
     fn writing_a_dash_position_is_composing_a_translation() {

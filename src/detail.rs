@@ -173,8 +173,8 @@ impl Detail {
 }
 
 /// Cropping is what makes the switch invisible: `tools/atlas` centre-crops every picture to
-/// [`thumbnails::ASPECT`] before packing it, and the node's quad is that shape, so a full picture
-/// shown whole would jump to a different framing of the same screenshot.
+/// [`thumbnails::ASPECT`] before packing it, and the node's quad has that aspect ratio, so a full
+/// picture shown whole would jump to a different framing of the same screenshot.
 fn quad(context: &Context, picture: &CpuTexture) -> Gm<Mesh, ColorMaterial> {
     Gm::new(
         Mesh::new(context, &CpuMesh::square()),

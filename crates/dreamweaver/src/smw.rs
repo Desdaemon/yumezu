@@ -1,7 +1,7 @@
 //! Asking yume.wiki's Semantic MediaWiki store for itself, rather than through [the wrapper].
 //!
-//! The store keeps the structured half of what the wiki knows: a world's infobox, the passages out
-//! of it, the people credited for it and the releases it lived through are properties and
+//! The store keeps the structured half of what the wiki knows: a world's infobox, the connections
+//! out of it, the people credited for it and the releases it lived through are properties and
 //! subobjects, not prose. The wrapper reads them and hands them back as JSON, which is why the dump
 //! was built out of it to begin with. For most of the dump it is now a detour:
 //!
@@ -9,7 +9,7 @@
 //! - The **connections** it publishes only the first few thousand of. The store refuses to look
 //!   further than [`MAX_OFFSET`] rows into a result set, and rather than saying so it answers with
 //!   the first page again -- which is what the wrapper's `continueKey` passes on when it appears to
-//!   wrap. Yume 2kki has more passages than that, so alphabetically the last sixty-odd worlds'
+//!   wrap. Yume 2kki has more connections than that, so alphabetically the last sixty-odd worlds'
 //!   exits were silently missing from every dump. Asking directly does not lift the cap; it lets
 //!   the question be cut into pieces that fit under it. See [`connections`].
 //! - The **worlds** and the **authors** it answers correctly, and this asks the store anyway so
@@ -19,7 +19,7 @@
 //!   rejoins.
 //!
 //! A world's gallery is page content rather than properties, and is not published: reading it meant
-//! a second host and a second shape of answer for pictures nothing shows.
+//! a second host and a second response format for pictures nothing shows.
 //!
 //! [the wrapper]: https://github.com/ynoproject/wikiwrapper
 
@@ -77,14 +77,15 @@ pub async fn versions(http: &reqwest::Client) -> Result<Vec<Version>> {
         .collect())
 }
 
-/// Every passage leaving a world whose title begins with one of `initials`, kept in those pieces.
+/// Every connection leaving a world whose title begins with one of `initials`, kept in those
+/// pieces.
 ///
 /// The question is cut up because the whole of it does not fit under [`MAX_OFFSET`]. A piece is
-/// every passage out of a world whose page begins with one character, so the pieces cannot overlap
-/// and together cover every passage there is; the largest is a few hundred rows.
+/// every connection out of a world whose page begins with one character, so the pieces cannot
+/// overlap and together cover every connection there is; the largest is a few hundred rows.
 ///
-/// The pieces are kept apart because a passage belongs to the page that writes it up, so a piece is
-/// exactly what one edited world can invalidate: a soft sync re-asks only the moved pieces.
+/// The pieces are kept apart because a connection belongs to the page that writes it up, so a piece
+/// is exactly what one edited world can invalidate: a soft sync re-asks only the moved pieces.
 pub async fn connections(
     http: &reqwest::Client,
     initials: BTreeSet<char>,
@@ -103,7 +104,7 @@ pub async fn connections(
         shards.insert(
             initial,
             rows.into_iter()
-                .filter_map(|(_, row)| row.passage())
+                .filter_map(|(_, row)| row.connection())
                 .collect(),
         );
     }
@@ -253,8 +254,8 @@ pub struct LocationMap {
     pub caption: String,
 }
 
-/// A property in an answer is a list of values under a name of the wiki's choosing, so the shape
-/// off the wire is not the shape anything wants to read.
+/// A property in an answer is a list of values under a name of the wiki's choosing, so what
+/// arrives is one list per field rather than one record per connection.
 pub struct Connection {
     /// Title of the world it leads out of.
     pub origin: String,
@@ -262,15 +263,15 @@ pub struct Connection {
     pub destination: String,
     /// The wiki's own vocabulary: `No Return`, `Locked`, `Chance` and so on.
     pub attributes: Vec<String>,
-    /// The sentence a `Conditional` passage is gated behind.
+    /// The sentence a `Conditional` connection is gated behind.
     pub unlock_condition: Option<String>,
-    /// The effects a `Needs Effect` passage wants the player to be wearing.
+    /// The effects a `Needs Effect` connection wants the player to be wearing.
     pub effects_needed: Vec<String>,
-    /// The wiki writes one value per season, so a passage open in three has three.
+    /// The wiki writes one value per season, so a connection open in three has three.
     pub seasons_available: Vec<String>,
-    /// The odds a `Chance` passage opens at, as the wiki writes them.
+    /// The odds a `Chance` connection opens at, as the wiki writes them.
     pub chance_percentage: Option<String>,
-    /// A passage that used to exist and no longer does.
+    /// A connection that used to exist and no longer does.
     pub is_removed: bool,
 }
 
@@ -452,8 +453,8 @@ where
     Ok(Cell::<T>::deserialize(property)?.item)
 }
 
-/// An author's own spelling of their name. Only the text is read; the language is always the one
-/// the name is written in.
+/// A monolingual text value -- the name plus its language. Only the text is read; the language is
+/// always the one the name is written in.
 #[derive(Deserialize)]
 struct Monolingual {
     #[serde(rename = "Text", default, deserialize_with = "first_in_cell")]
@@ -467,8 +468,8 @@ struct Date {
 }
 
 impl Date {
-    /// In the shape the dump writes its own stamps in. `None` for an unparseable timestamp, which
-    /// is a release the reader shows undated rather than a sync worth failing.
+    /// In the same ISO-8601 form the dump writes its own stamps in. `None` for an unparseable
+    /// timestamp, which is a release the reader shows undated rather than a sync worth failing.
     fn released(&self) -> Option<String> {
         let seconds = self.timestamp.parse().ok()?;
         Some(crate::sync::iso(
@@ -625,7 +626,7 @@ struct ConnectionRow {
 
 impl ConnectionRow {
     /// `None` for a row missing an end.
-    fn passage(self) -> Option<Connection> {
+    fn connection(self) -> Option<Connection> {
         Some(Connection {
             origin: self.origin?.title(),
             destination: self.destination?.title(),
@@ -642,7 +643,7 @@ impl ConnectionRow {
 
 #[cfg(test)]
 mod tests {
-    /// A shape misread here is a passage silently missing from the dump rather than a sync that
+    /// A misread field here is a connection silently missing from the dump rather than a sync that
     /// fails, so it is pinned to the wiki's own bytes.
     #[test]
     fn a_passage_is_read_out_of_the_store_as_the_store_writes_it() {
@@ -659,23 +660,26 @@ mod tests {
         let answer: super::Answer<super::ConnectionRow> =
             serde_json::from_str(answer).expect("the store's own answer");
         assert_eq!(answer.next, Some(500));
-        let passage = answer
+        let connection = answer
             .query
             .results
             .into_iter()
             .flat_map(|subject| subject.into_values())
             .map(|found| found.printouts)
             .next()
-            .and_then(super::ConnectionRow::passage)
-            .expect("the one passage");
-        assert_eq!(passage.origin, "Snow Village");
-        assert_eq!(passage.destination, "Ice Cave");
-        assert_eq!(passage.attributes, ["Seasonal", "Chance"]);
+            .and_then(super::ConnectionRow::connection)
+            .expect("the one connection");
+        assert_eq!(connection.origin, "Snow Village");
+        assert_eq!(connection.destination, "Ice Cave");
+        assert_eq!(connection.attributes, ["Seasonal", "Chance"]);
         // Every season the wiki wrote is kept: which one the dump publishes is `crate::model`'s
         // decision, not this reader's to make by dropping values.
-        assert_eq!(passage.seasons_available, ["Fall", "Summer", "Winter"]);
-        assert_eq!(passage.chance_percentage.as_deref(), Some("10%"));
-        assert!(!passage.is_removed, "the store writes its own truth values");
+        assert_eq!(connection.seasons_available, ["Fall", "Summer", "Winter"]);
+        assert_eq!(connection.chance_percentage.as_deref(), Some("10%"));
+        assert!(
+            !connection.is_removed,
+            "the store writes its own truth values"
+        );
     }
 
     /// A field read as one value is a claim about the wiki, and a debug build holds it to that so

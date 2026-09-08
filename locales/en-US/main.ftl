@@ -23,7 +23,7 @@ dump-failed = The world dump could not be loaded.
 # see `world::building`, which is what maps the one onto the other.
 dump-task-changes = Querying for wiki updates...
 dump-task-worlds = Loading worlds...
-dump-task-passages = Loading connections...
+dump-task-connections = Loading connections...
 dump-task-assembling = Finalizing the graph...
 
 ## The sidebar and its tabs.
@@ -37,11 +37,6 @@ show-sidebar = Show the sidebar
 ## The graph tab: what is on screen, and how it is laid out.
 
 fps = { $fps } fps
-fps-hint = The rate frames are drawn at. A view with nothing moving in it is drawn slowly on
-    purpose, so a low number here is usually the pacing rather than the cost of a frame. Where
-    something is moving and this still falls short of the display, what is left is filling
-    { $width }x{ $height } pixels ({ $pixels } million of them) rather than working out what goes
-    in them.
 graph-size = { $worlds } worlds, { $connections } connections
 dimensions-2d = 2D
 dimensions-3d = 3D

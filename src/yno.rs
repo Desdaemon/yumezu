@@ -134,8 +134,7 @@ impl Account {
         self.restated |= self.frontier && changed;
     }
 
-    /// Reads what the account has seen in the same go: the session is only ever wanted for the
-    /// reading.
+    /// Reads what the account has seen in the same go: nothing else needs the session.
     pub fn sign_in(&mut self, user: String, password: String) {
         self.failed = None;
         self.asking = Some(fetch::spawn(sign_in(user, password)));

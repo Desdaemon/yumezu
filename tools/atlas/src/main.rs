@@ -21,7 +21,7 @@ const ORIGIN: &str = "https://explorer.yume.wiki";
 /// The picture drawn for a world the player has not been to, which is YNOproject's own client's.
 ///
 /// Packed into the last cell of the grid rather than one counted off the worlds, so the app finds it
-/// from the atlas's shape alone.
+/// from the grid dimensions alone.
 const UNKNOWN: &str = "https://ynoproject.net/2kki/images/unknown_location.png";
 /// High enough that the pixel art keeps its edges at the size it is drawn, low enough that the
 /// whole atlas is a download rather than a wait.
@@ -125,8 +125,9 @@ fn main() {
     );
 }
 
-/// Cropped to the cell's shape about its centre, then scaled. Cropping rather than letterboxing: a
-/// thumbnail this small has no room to spend on bars, and the subject is in the middle.
+/// Cropped to the cell's aspect ratio about its centre, then scaled. Cropping rather than
+/// letterboxing: a thumbnail this small has no room to spend on bars, and the subject is in the
+/// middle.
 fn thumbnail(bytes: &[u8]) -> Option<image::RgbImage> {
     let image = image::load_from_memory(bytes).ok()?.to_rgb8();
     let (width, height) = (image.width(), image.height());

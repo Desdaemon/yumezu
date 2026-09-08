@@ -60,8 +60,8 @@ impl Store {
     /// Written into a neighbouring file and renamed over the real one, so a run dying mid-write
     /// leaves the previous dump intact rather than half a document.
     ///
-    /// A failed write is reported and nothing more: the new dump is still better than the old one
-    /// for everyone being served now, and the next sync tries the file again.
+    /// A failed write is reported and nothing more: the new dump is still the one served from
+    /// memory, and the next sync tries the file again.
     pub fn publish(&self, dump: Dump) -> Arc<Snapshot> {
         let snapshot = Arc::new(snapshot(dump));
         if let Err(error) = write(&self.path, &snapshot.json) {

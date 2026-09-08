@@ -34,6 +34,9 @@ dreamweaver-release:
     strip target/x86_64-unknown-linux-gnu/release/dreamweaver
     @ls -lh target/x86_64-unknown-linux-gnu/release/dreamweaver
 
+test: && test-wasm test-arm
+    cargo nextest run --workspace
+
 # Runs the force-graph behaviour tests compiled to wasm with SIMD on,
 test-wasm:
     cargo test -p force_graph_3d --lib --target wasm32-wasip2

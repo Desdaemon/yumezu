@@ -52,7 +52,7 @@ async fn face() -> Option<(Vec<u8>, u32)> {
 }
 
 /// Added at the lowest priority, so it is reached only for the glyphs nothing already installed
-/// carries: the Latin in a Japanese sentence keeps the shape the rest of the panel is drawn in.
+/// carries: the Latin in a Japanese sentence still comes from the font the panel is drawn in.
 /// `None` leaves the panel exactly as it was.
 fn install(ctx: &egui::Context, face: Option<(Vec<u8>, u32)>) {
     let Some((face, index)) = face else {

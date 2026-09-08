@@ -18,7 +18,7 @@ dump-failed = 世界のデータを読み込めませんでした。
 # 世界のデータを組み立てているサーバーが、いま何をしているか。`world::building` を参照。
 dump-task-changes = ウィキの更新を確認しています…
 dump-task-worlds = 世界を読み込んでいます…
-dump-task-passages = 世界のつながりを読み込んでいます…
+dump-task-connections = 世界のつながりを読み込んでいます…
 dump-task-assembling = グラフを組み立てています…
 
 ## The sidebar and its tabs.
@@ -32,9 +32,6 @@ show-sidebar = サイドバーを表示
 ## The graph tab.
 
 fps = { $fps } fps
-fps-hint = 実際の描画レート。動きのない画面は意図的に低いレートで描くため、この値が低いのは通常
-    描画コストではなくペース調整による。動きがあるのにリフレッシュレートに届かない場合、残るのは
-    { $width }x{ $height }（{ $pixels } 百万）ピクセルの塗りつぶし。
 graph-size = { $worlds } マップ、{ $connections } 接続
 layered = 階層表示
 layered-hint = マップを深さごとの層に分ける

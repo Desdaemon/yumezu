@@ -395,7 +395,7 @@ async fn data(State(server): State<Server>) -> axum::response::Response {
         .into_response()
 }
 
-/// `GET /pollUpdate` -- what the sync is doing, in the reference implementation's own shape.
+/// `GET /pollUpdate` -- what the sync is doing, in the reference implementation's own JSON.
 ///
 /// `done` means no sync is running, not that there is a dump: a server between syncs answers
 /// `{"task": null, "done": true}` whether or not it has ever built one.

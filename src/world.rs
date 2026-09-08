@@ -432,7 +432,7 @@ impl Gate {
     }
 
     /// Empty for a condition that asks nothing: a row with nothing after the title is a way a
-    /// player can simply walk.
+    /// player can walk unconditionally.
     fn asks(self) -> String {
         match self {
             Gate::Free => String::new(),
@@ -576,7 +576,7 @@ fn url() -> String {
 ///
 /// A server rebuilding the dump says so rather than serving one it is about to replace, so the wait
 /// can be a minute. `GET /pollUpdate` is the reference implementation's route for asking, and
-/// `dreamweaver` answers in the same shape.
+/// `dreamweaver` answers with the same JSON.
 ///
 /// `None` for anything that is not a stage this app has words for -- a server between syncs, a host
 /// with no such route, the finer stages only the reference server names -- all of which mean the
@@ -610,7 +610,7 @@ fn stage(task: &str) -> Option<&'static str> {
 const STAGES: [(&str, &str); 4] = [
     ("init", "dump-task-changes"),
     ("fetchWorldData", "dump-task-worlds"),
-    ("fetchConnData", "dump-task-passages"),
+    ("fetchConnData", "dump-task-connections"),
     ("prepareWorldData", "dump-task-assembling"),
 ];
 
@@ -730,8 +730,8 @@ fn retain(worlds: &mut Vec<World>, keep: &[bool]) {
     });
     for world in worlds.iter_mut() {
         world.connections.retain_mut(|connection| {
-            // `flatten` covers a passage into a dropped world and one out of the dump altogether,
-            // which would be a dump disagreeing with itself.
+            // `flatten` covers a connection into a dropped world and one out of the dump
+            // altogether, which would be a dump disagreeing with itself.
             match at.get(connection.target_id).copied().flatten() {
                 Some(target) => {
                     connection.target_id = target;
@@ -765,7 +765,8 @@ impl Dump {
     /// `visited` is titles as the wiki writes them, which is how YNOproject names the places it
     /// records a player having been; the name is the only thing the two lists share.
     ///
-    /// The worlds a step beyond are a step the player could actually take, so a passage that cannot
+    /// The worlds a step beyond are a step the player could actually take, so a connection that
+    /// cannot
     /// be walked that way leads nowhere. They are kept as places rather than worlds, so the graph
     /// says there is something there without saying what. See [`World::unknown`].
     ///
@@ -778,7 +779,7 @@ impl Dump {
             .iter()
             .map(|world| visited.contains(&world.title))
             .collect();
-        // Outward only: a passage the player could only come back through is not a way onward.
+        // Outward only: a connection the player could only come back through is not a way onward.
         let mut shown = been.clone();
         for (from, onward) in walkable_steps(&self.worlds).into_iter().enumerate() {
             if !been[from] {
@@ -954,8 +955,8 @@ const YUME2KKI_T: &str = "https://wikiwiki.jp/yume2kki-t/";
 const YNOLOCATIONS: &str =
     "https://raw.githubusercontent.com/ynoproject/ynolocations/refs/heads/master/2kki/ja.json";
 
-/// The few dozen worlds, out of fifteen hundred, whose Japanese page is not simply named after
-/// them: an area written up inside another world's page, or a name filed under a longer path.
+/// The few dozen worlds, out of fifteen hundred, whose Japanese page is not named after them: an
+/// area written up inside another world's page, or a name filed under a longer path.
 type Pages = std::collections::HashMap<String, String>;
 
 /// Empty until [`load_pages`] has answered.
@@ -1293,8 +1294,8 @@ mod tests {
                 .iter()
                 .map(|world| (world.title.as_str(), far(world)))
                 .collect::<Vec<_>>(),
-            // Sofa Room has moved down to 1, and the passage each wrote to the debug room is gone
-            // rather than pointing at whoever took its place.
+            // Sofa Room has moved down to 1, and the connection each wrote to the debug room is
+            // gone rather than pointing at whoever took its place.
             [("Nexus", vec![1]), ("Sofa Room", vec![0])]
         );
     }
@@ -1438,7 +1439,7 @@ mod tests {
         );
     }
 
-    // A shape change in the dump would otherwise break the visualization silently.
+    // A field renamed or retyped in the dump would otherwise break the visualization silently.
     #[test]
     fn dump_parses() {
         let Some(worlds) = load().map(|dump| dump.worlds) else {
@@ -1568,9 +1569,10 @@ mod tests {
         assert!(deeper > worlds.len() / 4, "only {deeper} worlds moved");
     }
 
-    // Anything unreached that the wiki documents a passage to is a misread flag closing a passage
-    // that is open. The one world that really did document a way out and no way in was `Gallery of
-    // Me`, which the dump marks secret and `hide` takes out with the passages into it.
+    // Anything unreached that the wiki documents a connection to is a misread flag closing a
+    // connection that is open. The one world that really did document a way out and no way in was
+    // `Gallery of Me`, which the dump marks secret and `hide` takes out with the connections into
+    // it.
     #[test]
     fn a_world_is_unreached_only_where_the_wiki_leaves_no_way_in() {
         let Some(worlds) = load().map(|dump| dump.worlds) else {
@@ -1696,9 +1698,9 @@ mod tests {
 
     #[test]
     fn a_japanese_title_addresses_the_page_the_wiki_files_it_under() {
-        // A slice of the list in each shape it writes a place in: a bare name, a name and the page
-        // it is written up on, a map leading to several places, and one leading somewhere different
-        // per map it came from.
+        // A slice of the list carrying each of the four ways it writes a place: a bare name, a
+        // name and the page it is written up on, a map leading to several places, and one leading
+        // somewhere different per map it came from.
         let pages = super::parse_pages(
             r#"{
                 "urlRoot": "https://wikiwiki.jp/yume2kki-t/",
@@ -1725,8 +1727,8 @@ mod tests {
             super::page_url(&pages, "製作者の部屋"),
             "https://wikiwiki.jp/yume2kki-t/%E3%81%86%E3%82%8D%E3%81%A4%E3%81%8D%E9%82%B8#map0230"
         );
-        // A place written up on a bigger page, and one filed under a path -- the one shape the
-        // list keeps outside its maps. The slash stays a slash.
+        // A place written up on a bigger page, and one filed under a path -- the latter is the only
+        // kind the list keeps outside `mapLocations`. The slash stays a slash.
         assert_eq!(
             super::page_url(&pages, "昭和路地：バスツアー"),
             "https://wikiwiki.jp/yume2kki-t/%E6%98%AD%E5%92%8C%E8%B7%AF%E5%9C%B0"

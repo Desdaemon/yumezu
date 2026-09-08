@@ -10,16 +10,16 @@ use crate::smw;
 use serde::{Deserialize, Serialize};
 
 bitflags::bitflags! {
-    /// Independent flags rather than a kind: a passage can be locked behind a condition *and*
-    /// seasonal *and* one-way. The numbering is the wiki explorer's own and is load-bearing --
-    /// it is what the dump publishes and what the app reads back.
+    /// Independent flags rather than a kind: a connection can be locked behind a condition *and*
+    /// seasonal *and* one-way. The numbering is the wiki explorer's own and cannot be renumbered
+    /// -- it is what the dump publishes and what the app reads back.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
     pub struct ConnType: i16 {
         /// Walkable from the world that lists it, never back.
         const ONE_WAY = 1 << 0;
         /// Walkable only back to the world that lists it, never from it.
         const NO_ENTRY = 1 << 1;
-        /// This side opens a passage the far side reports as [`ConnType::LOCKED`].
+        /// This side opens a connection the far side reports as [`ConnType::LOCKED`].
         const UNLOCK = 1 << 2;
         const LOCKED = 1 << 3;
         /// Leads to a part of the destination with no way onward.
@@ -43,8 +43,8 @@ bitflags::bitflags! {
 }
 
 impl ConnType {
-    /// `None` for a word this does not know: an unrecognised attribute leaves the passage exactly
-    /// as walkable as it was, so the wiki growing its vocabulary is not fatal.
+    /// `None` for a word this does not know: an unrecognised attribute leaves the connection
+    /// exactly as walkable as it was, so the wiki growing its vocabulary is not fatal.
     pub fn of(attribute: &str, connection: &smw::Connection) -> Option<(Self, Wording)> {
         let plain = |flag| Some((flag, Wording::None));
         match attribute {
@@ -98,7 +98,7 @@ fn condition(sentence: &str) -> String {
     }
 }
 
-/// What the wiki says about one of a passage's conditions, if it says anything.
+/// What the wiki says about one of a connection's conditions, if it says anything.
 pub enum Wording {
     /// The flag is the whole of what there is to say.
     None,
@@ -131,7 +131,7 @@ impl Wording {
 /// Exactly as the reference implementation's `/data` answers it.
 ///
 /// The empty lists are not oversights: effects, menu themes, wallpapers and soundtrack entries are
-/// written as prose and tables rather than held in the wiki's store. They stay in the shape so a
+/// written as prose and tables rather than held in the wiki's store. They stay as empty lists so a
 /// reader written against the reference dump keeps working.
 #[derive(Serialize, Deserialize, Default)]
 pub struct Dump {
@@ -192,9 +192,10 @@ pub struct World {
     pub title_jp: Option<String>,
     /// Empty rather than absent for a world the wiki credits to nobody: the reader groups by it.
     pub author: String,
-    /// Steps from the starting room along passages a player can simply walk. See `depth`.
+    /// Steps from the starting room along connections a player can walk unconditionally. See
+    /// `depth`.
     pub depth: i32,
-    /// Steps along any passage at all, however conditional.
+    /// Steps along any connection at all, however conditional.
     #[serde(rename = "minDepth")]
     pub min_depth: i32,
     /// Empty, never absent: the reader takes this as a string and would refuse a null.

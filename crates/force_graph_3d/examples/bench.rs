@@ -1,8 +1,8 @@
 //! Times `ForceGraph::update` on the machine the kernel is meant for.
 //!
 //! `bench <nodes> <theta> <steps>`, printing nanoseconds per step. `theta` of zero sums every pair
-//! and is the shape the lane loop dominates; the default angle adds the octree walk around it and
-//! is what the application runs.
+//! and is the workload the lane loop dominates; the default angle adds the octree walk around it
+//! and is what the application runs.
 //!
 //! `tools/bench-arm.sh` runs this on an Android device over adb.
 

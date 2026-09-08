@@ -235,8 +235,8 @@ impl Octree {
             let encloses_query = start <= query_start && query_start < start + count;
             if !encloses_query && width * width < theta_sqrd * distance_sqrd {
                 // The aggregate replaces `count` pairs the exact pass would each have clamped to
-                // `force_max`, so it carries that many pairs' worth of headroom. Clamping it as
-                // one pair is what makes an aggregate under-report a crowded cell.
+                // `force_max`, so its own limit is `count` times that. Clamping it as one pair is
+                // what makes an aggregate under-report a crowded cell.
                 out.push(
                     com[0],
                     com[1],
