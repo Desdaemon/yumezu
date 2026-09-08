@@ -1,10 +1,9 @@
 //! Guards the shape of the code LLVM emits for the repulsion kernel.
 //!
-//! The kernel is ordinary safe Rust that happens to be spelled the way the auto-vectorizer wants
-//! it. Nothing in the language enforces that, so a refactor, a profile change or a new compiler
-//! can quietly drop it back to one lane at a time; the layout still looks right and the tests
-//! still pass, only slower. Each check below builds the crate the way something really ships it
-//! and asserts on the LLVM IR that comes out. See `IMPL_DETAILS.md`.
+//! The kernel is safe Rust spelled the way the auto-vectorizer wants it. Nothing in the language
+//! enforces that, so a refactor, a profile change or a new compiler can quietly drop it back to
+//! one lane at a time -- the layout still looks right and the tests still pass, only slower. Each
+//! check builds the crate the way something really ships it and asserts on the LLVM IR.
 //!
 //! Every failure here is about speed, not correctness, and the fix may well be to delete the
 //! workaround the check is guarding once the compiler no longer needs it.
@@ -19,8 +18,8 @@ use std::process::Command;
 /// The kernel compiled for one target and set of flags, as LLVM IR.
 ///
 /// The crate reaches the kernel only through a generic type, so an `rlib` on its own instantiates
-/// nothing. This builds a throwaway consumer that steps a graph, the way the application does,
-/// and takes the IR of whichever compilation unit the definition landed in.
+/// nothing: this builds a throwaway consumer that steps a graph and takes the IR of whichever
+/// compilation unit the definition landed in.
 fn kernel_ir(target: Option<&str>, rustflags: &str) -> Option<String> {
     let dir = scratch().join(match target {
         Some(target) => format!("codegen-{target}"),
@@ -42,11 +41,9 @@ edition = "2024"
 crate-type = ["rlib"]
 [dependencies]
 force_graph_3d = {{ path = "{force_graph}" }}
-# Deliberately not the shipping profile's `lto = true`. Under fat LTO the per-crate IR is
-# pre-link bitcode that the vectorizers have not run on yet, whatever the optimization level, so
-# there would be nothing here to look at. What these checks are for is the way the kernel is
-# written, which is the same either way; that the shipping profile still lets the vectorizers
-# run is the separate check below.
+# Deliberately not the shipping profile's `lto = true`: under fat LTO the per-crate IR is pre-link
+# bitcode the vectorizers have not run on, so there would be nothing here to look at. These checks
+# are about how the kernel is written, which is the same either way.
 [profile.release]
 opt-level = 3
 lto = false
@@ -140,7 +137,6 @@ fn walk(root: &Path) -> Box<dyn Iterator<Item = PathBuf>> {
     }))
 }
 
-/// The body of the one `define` whose mangled name contains `name`.
 fn function(ir: &str, name: &str) -> Option<String> {
     let start = ir
         .lines()
@@ -153,8 +149,7 @@ fn function(ir: &str, name: &str) -> Option<String> {
     Some(body.join("\n"))
 }
 
-/// The lane loop has to come out as vector instructions, with no bounds check left in the middle
-/// of it for `as_chunks` to have been pointless.
+/// A bounds check left in the middle of the loop would make `as_chunks` pointless.
 #[track_caller]
 fn assert_vectorized(ir: &str, width: usize) {
     let vector = format!("<{width} x float>");
@@ -168,15 +163,13 @@ fn assert_vectorized(ir: &str, width: usize) {
     );
 }
 
-/// `clamp_symmetric` has one body per architecture and they are not interchangeable: each is the
-/// one that lowers to bare instructions there and the other is the one that needs correcting
-/// after. A `cfg` reaching the wrong target is silent and costs about a tenth of the loop, so
-/// which body arrived is checked rather than assumed.
+/// `clamp_symmetric`'s two bodies are not interchangeable: each lowers to bare instructions on its
+/// own architecture and needs correcting after on the other. A `cfg` reaching the wrong target is
+/// silent and costs about a tenth of the loop.
 #[track_caller]
 fn assert_clamp_is_ieee(ir: &str, expected: bool) {
     // `maximumnum`/`minimumnum` are what `f32::max`/`f32::min` lower to; the older `maxnum` and
-    // `minnum` spellings mean the same thing and would be just as wrong on the targets that do
-    // not want them.
+    // `minnum` mean the same thing and are just as wrong on the targets that do not want them.
     let ieee = ["maximumnum", "minimumnum", "maxnum", "minnum"]
         .iter()
         .any(|name| ir.contains(name));
@@ -193,8 +186,8 @@ fn assert_clamp_is_ieee(ir: &str, expected: bool) {
     );
 }
 
-/// The browser build, which is the one that has to hold a frame rate on the weakest hardware the
-/// application runs on. `simd128` is off by default and set in `.cargo/config.toml`.
+/// The browser build, which holds a frame rate on the weakest hardware the application runs on.
+/// `simd128` is off by default and set in `.cargo/config.toml`.
 #[test]
 fn the_lane_loop_vectorizes_on_wasm() {
     let Some(ir) = kernel_ir(
@@ -208,9 +201,8 @@ fn the_lane_loop_vectorizes_on_wasm() {
     assert_clamp_is_ieee(&ir, false);
 }
 
-/// The Android build. `android/build.sh` ships this triple, and NEON is baseline for it, so there
-/// is no target feature to set. Only the IR is read, so this needs the target installed but not
-/// the NDK: the probe crate is an rlib and never reaches a linker.
+/// The Android build. NEON is baseline for this triple, so there is no target feature to set, and
+/// the probe crate is an rlib that never reaches a linker, so the NDK is not needed.
 #[test]
 fn the_lane_loop_vectorizes_on_arm() {
     let Some(ir) = kernel_ir(Some("aarch64-linux-android"), "") else {
@@ -237,13 +229,11 @@ fn the_lane_loop_vectorizes_on_the_host() {
     assert_clamp_is_ieee(&ir, cfg!(target_arch = "aarch64"));
 }
 
-/// The other half of what makes the browser build fast, and the half that is invisible from
-/// inside this crate. Vectorizing the lane loop needs the unroller to widen it to `LANES` first,
-/// and both size-optimizing levels turn the unroller off, so something in the workspace manifest
-/// has to compile this crate for speed. There are two arrangements that do, and this accepts
-/// either: a speed level for the whole `min` profile, or one for this package alone, which only
-/// takes effect with LTO off because both LTO modes run the vectorizers after linking at the
-/// top-level setting.
+/// Vectorizing the lane loop needs the unroller to widen it to `LANES` first, and both
+/// size-optimizing levels turn the unroller off, so the workspace manifest has to compile this
+/// crate for speed. Either arrangement does: a speed level for the whole `min` profile, or one for
+/// this package alone, which takes effect only with LTO off because both LTO modes run the
+/// vectorizers after linking at the top-level setting.
 #[test]
 fn the_shipping_profile_builds_this_crate_for_speed() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");

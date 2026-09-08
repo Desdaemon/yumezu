@@ -1,18 +1,17 @@
 //! The page's input method, which is a hidden text element parked under the caret.
 //!
 //! winit's web backend has `set_ime_allowed` as an empty function and never sends
-//! [`winit::event::WindowEvent::Ime`], so a page has no input method at all unless one is built
-//! out of the browser's own. A browser reports a word being built up only against an element that
-//! can be typed into, and a `<canvas>` is not one. So an `<input>` is put on the page, made
-//! invisible, moved under wherever egui says the caret is, and given the focus while something is
-//! typed. The canvas is then sent no keys, so those are read off the element here too.
+//! [`winit::event::WindowEvent::Ime`], so a page has no input method unless one is built out of the
+//! browser's own. A browser reports a word being built up only against an element that can be typed
+//! into, and a `<canvas>` is not one. So an `<input>` is put on the page, made invisible, moved
+//! under wherever egui says the caret is, and given the focus while something is typed. The canvas
+//! is then sent no keys, so those are read off the element here too.
 //!
 //! # Where this comes from
 //!
-//! Carried from `eframe`, the one piece of it that cannot be depended on instead: the rest of
-//! what `eframe` does for an input method is `egui-winit`'s, which [`super::gui`] uses directly,
-//! and `eframe` itself wants the window, the context and the event loop that belong to the 3D
-//! renderer.
+//! Carried from `eframe`, the one piece of it that cannot be depended on instead: the rest of what
+//! `eframe` does for an input method is `egui-winit`'s, which [`super::gui`] uses directly, and
+//! `eframe` itself wants the window, context and event loop that belong to the 3D renderer.
 //!
 //! - Upstream: `crates/eframe/src/web/text_agent.rs` at tag `0.36.0`, plus `on_keydown` and
 //!   `on_keyup` from `crates/eframe/src/web/events.rs`, the focus half of
@@ -33,11 +32,10 @@
 //! Two are forced by the app being a version behind upstream, and both come back with the egui
 //! bump:
 //!
-//! - Upstream answers a phone keyboard's corrections -- Gboard offering `Texas` for `tex` -- by
-//!   diffing the element against what egui was last told and sending
-//!   `ImeEvent::DeleteSurrounding` for the difference. That variant is new in egui 0.36, so what
-//!   is kept here is 0.35's own answer: the focus bounce in [`Agent::typed`] that stops the
-//!   suggestion strip appearing at all. Held to plain typing, and can go when the diff arrives.
+//! - Upstream answers a phone keyboard's corrections -- Gboard offering `Texas` for `tex` -- with
+//!   `ImeEvent::DeleteSurrounding`, new in egui 0.36. What is kept here is 0.35's own answer: the
+//!   focus bounce in [`Agent::typed`] that stops the suggestion strip appearing at all. Held to
+//!   plain typing, and can go when the diff arrives.
 //! - Upstream reads `IMEOutput::purpose` to keep a password out of the browser's own
 //!   autocompletion. egui 0.35 has no such field, and this app has no password.
 //!
@@ -50,11 +48,11 @@
 //!   [`TextAgent::follow`], because there is one caller and one place it can be made from.
 //! - Nothing asks for a repaint: this app is a render loop around a 3D scene, so the next frame
 //!   is already coming, where upstream is drawn on demand.
-//! - The keys are translated inline. Upstream's `should_prevent_default_for_key` and its
-//!   `should_stop_propagation` option are dropped: this page has nothing else on it to defend a
-//!   key from, so only `Tab` is held back, and only because it would take the focus away.
-//!   Upstream's `KeydownSpecialCase` goes with them -- it exists to route iOS and Android's
-//!   editing keys into the `DeleteSurrounding` path that is not here yet.
+//! - The keys are translated inline. Upstream's `should_prevent_default_for_key` and
+//!   `should_stop_propagation` are dropped: this page has nothing else on it to defend a key from,
+//!   so only `Tab` is held back, and only because it would take the focus away. Upstream's
+//!   `KeydownSpecialCase` goes with them -- it routes iOS and Android's editing keys into the
+//!   `DeleteSurrounding` path that is not here yet.
 //! - Upstream's `has_focus` walks to the shadow root the canvas may be inside. This one is on the
 //!   page itself, put there by `index.html`.
 
@@ -69,8 +67,8 @@ struct Agent {
     input: web_sys::HtmlInputElement,
     events: RefCell<Vec<egui::Event>>,
     modifiers: Cell<egui::Modifiers>,
-    /// The text egui already has: the element's own less whatever is still being composed. The
-    /// browser only ever reports the whole line, so this is what says which part of it is new.
+    /// The element's text less whatever is still being composed. The browser only ever reports the
+    /// whole line, so this is what says which part of it is new.
     told: RefCell<String>,
 }
 
@@ -93,8 +91,8 @@ impl Agent {
 
         // Only an insertion says anything egui can act on; the element is emptied for the rest of
         // the `inputType` list so the next line starts clean. `insertCompositionText` outside a
-        // composition is the one that matters: it is how the tail of a finished word arrives after
-        // `compositionend` has already committed it, so taking it would type the word twice.
+        // composition is how the tail of a finished word arrives after `compositionend` has already
+        // committed it, so taking it would type the word twice.
         let kind = event.input_type();
         let insertion = kind == "insertText" || kind == "insertReplacementText";
         if !composing && !insertion {
@@ -131,9 +129,8 @@ impl Agent {
     /// Which run of the unfinished word the input method has under consideration, counted in
     /// characters from the start of that word, which is what egui draws apart from the rest.
     ///
-    /// The element measures its selection in UTF-16 and egui counts characters, hence the
-    /// conversion. `None` where the browser cannot be believed -- Android Chrome reports a
-    /// selection past the end of the value.
+    /// The element measures its selection in UTF-16 and egui counts characters. `None` where the
+    /// browser cannot be believed -- Android Chrome reports a selection past the end of the value.
     fn active_range(&self, text: &str, kept: usize) -> Option<std::ops::Range<usize>> {
         let start = self.input.selection_start().ok()?? as usize;
         let end = self.input.selection_end().ok()?? as usize;
@@ -148,7 +145,7 @@ impl Agent {
         Some(start..start + inside)
     }
 
-    /// The finished word, which is whatever the element gained while it was being composed.
+    /// Whatever the element gained while the word was being composed.
     fn composed(&self) {
         let text = self.input.value();
         let mut told = self.told.borrow_mut();
@@ -185,8 +182,7 @@ impl Agent {
         let Some(key) = egui::Key::from_name(&name) else {
             return;
         };
-        // Otherwise the browser takes the focus off the element and hands it to whatever it
-        // thinks is next on the page.
+        // Otherwise the browser hands the focus to whatever it thinks is next on the page.
         if key == egui::Key::Tab {
             event.prevent_default();
         }
@@ -203,7 +199,7 @@ impl Agent {
 pub(crate) struct TextAgent {
     agent: Rc<Agent>,
     canvas: web_sys::HtmlCanvasElement,
-    /// Where the caret was last put, so the element is only moved when it has actually moved.
+    /// So the element is only moved when the caret has actually moved.
     placed: Cell<Option<egui::output::IMEOutput>>,
     /// Kept only to be kept alive: a listener stops working the moment its closure is dropped.
     _listeners: Vec<Closure<dyn FnMut(web_sys::Event)>>,
@@ -222,13 +218,13 @@ impl TextAgent {
             .create_element("input")?
             .dyn_into::<web_sys::HtmlInputElement>()?;
         input.set_type("text");
-        // A phone would otherwise capitalise the first letter of a world's name for the person.
+        // A phone would otherwise capitalise the first letter of a world's name.
         input.set_attribute("autocapitalize", "off")?;
         input.set_attribute("aria-hidden", "true")?;
 
-        // Invisible rather than hidden or off-screen: an element the page will not draw is one
-        // the browser will not let an input method open against either. Starts over the canvas'
-        // top left so focusing it before anything is typed cannot scroll the page elsewhere.
+        // Invisible rather than hidden or off-screen: an element the page will not draw is one the
+        // browser will not let an input method open against either. Starts over the canvas' top
+        // left so focusing it before anything is typed cannot scroll the page elsewhere.
         let style = input.style();
         style.set_property("position", "absolute")?;
         style.set_property("top", &format!("{}px", canvas.offset_top()))?;
@@ -243,8 +239,7 @@ impl TextAgent {
         style.set_property("font-size", "16px")?;
 
         // Next to the canvas rather than at the end of the body, so `position: absolute` resolves
-        // against whatever the canvas' own offsets are measured from and the two stay together
-        // however the page is scrolled or the canvas embedded.
+        // against whatever the canvas' own offsets are measured from and the two stay together.
         if let Some(parent) = canvas.parent_node() {
             parent.insert_before(&input, canvas.next_sibling().as_ref())?;
         } else {
@@ -260,8 +255,7 @@ impl TextAgent {
         let mut listeners = Vec::new();
 
         // Every way text arrives, composed or not. Deliberately no `compositionupdate` listener:
-        // the element's selection -- what says which part of the word the input method is working
-        // on -- has not been updated yet when that fires, so the word so far is read here instead.
+        // the element's selection has not been updated yet when that fires.
         listen(&input, "input", &mut listeners, {
             let agent = Rc::clone(&agent);
             move |event: web_sys::InputEvent| agent.typed(&event)
@@ -290,8 +284,7 @@ impl TextAgent {
     }
 
     /// Hands the frame everything the element heard since the last one, and the focus with it:
-    /// winit truthfully reports the canvas losing it, but it went to this element and the app
-    /// still has it.
+    /// winit truthfully reports the canvas losing it, but it went to this element.
     pub(crate) fn lend_focus(&self, state: &mut egui_winit::State) {
         let input = state.egui_input_mut();
         let mut events = self.agent.events.borrow_mut();
@@ -304,13 +297,12 @@ impl TextAgent {
         }
     }
 
-    /// Follows the caret: takes the focus while there is a field to type into, gives it back to
-    /// the canvas when there is not, and stands where the candidate window should open.
+    /// Takes the focus while there is a field to type into, gives it back to the canvas when there
+    /// is not, and stands where the candidate window should open.
     pub(crate) fn follow(&self, ctx: &egui::Context, ime: Option<egui::output::IMEOutput>) {
         match ime {
             Some(ime) => {
-                // egui dropped the word being built -- the field lost the focus, or its text was
-                // replaced from elsewhere -- so what the element holds is owed to nobody.
+                // egui dropped the word being built, so what the element holds is owed to nobody.
                 if ime.should_interrupt_composition {
                     self.agent.clear();
                 }
@@ -333,11 +325,10 @@ impl TextAgent {
         self.placed.set(ime);
         let Some(ime) = ime else { return };
 
-        // egui measures in points and the page places in CSS pixels, and the zoom factor is the
-        // whole of the difference -- both sides already agree on the device's pixel ratio.
-        // Offsets rather than a bounding rect, to measure from the same corner the element's
-        // `position: absolute` does. Clamped inside the canvas so a caret scrolled out of sight
-        // cannot scroll the page to it.
+        // egui measures in points and the page places in CSS pixels; the zoom factor is the whole
+        // of the difference, both sides already agreeing on the device's pixel ratio. Offsets
+        // rather than a bounding rect, to measure from the same corner `position: absolute` does.
+        // Clamped inside the canvas so a caret scrolled out of sight cannot scroll the page to it.
         let zoom = ctx.zoom_factor();
         let ratio = pixel_ratio();
         let caret = ime.cursor_rect.center();
@@ -368,7 +359,7 @@ fn common_prefix(a: &str, b: &str) -> usize {
         .count()
 }
 
-/// Without scrolling it into view, which on a page the app is embedded in would scroll the page.
+/// Without scrolling it into view, which on an embedded page would scroll the page.
 fn focus(element: &web_sys::HtmlElement) {
     let options = web_sys::FocusOptions::new();
     options.set_prevent_scroll(true);

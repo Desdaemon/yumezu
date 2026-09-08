@@ -1,9 +1,8 @@
 //! Full-size world pictures, for the few worlds the view has come close enough to.
 //!
 //! Past [`SWITCH_PIXELS`] the screen asks for more texels than the atlas cell has, so the wiki's
-//! own copy is fetched and drawn over the world's atlas quad. Only [`HELD`] at once, because each
-//! is a texture and a draw call of its own where the atlas is one of each for the whole graph.
-//! Which handful is the view's to say, frame by frame.
+//! own copy is fetched and drawn over the world's atlas quad. Only [`HELD`] at once, each being a
+//! texture and a draw call of its own where the atlas is one of each for the whole graph.
 
 use std::collections::HashMap;
 
@@ -14,18 +13,17 @@ use super::{fetch, thumbnails};
 /// Node width on screen, in physical pixels, at which the full picture becomes worth fetching.
 ///
 /// Well past the [`super::thumbnails::CELL`] width where magnification begins: a thumbnail
-/// stretched a little is not visibly soft, and switching at the first magnified texel would spend
-/// a download on a node nobody is looking at yet.
+/// stretched a little is not visibly soft, and switching at the first magnified texel would spend a
+/// download on a node nobody is looking at yet.
 pub const SWITCH_PIXELS: f32 = 160.0;
 /// A ceiling on cost, not on the view: the widest nodes are served first, so coming in on a crowd
 /// sharpens the ones nearest the camera and leaves the rest on the atlas.
 const HELD: usize = 8;
-/// The wiki's edge answers a request with no `Origin` at all with a challenge page rather than the
-/// picture. Only the native build sets it -- on the page the browser sets its own and refuses to
-/// let it be overridden.
+/// The wiki's edge answers a request with no `Origin` with a challenge page rather than the
+/// picture. Only the native build sets it: the browser sets its own and will not be overridden.
 const ORIGIN: &str = "https://explorer.yume.wiki";
 /// How far in front of its own atlas quad a full picture is drawn, as a fraction of the node's
-/// radius. The two are otherwise coplanar and the depth test would pick between them per pixel.
+/// radius: the two are otherwise coplanar and the depth test would pick between them per pixel.
 /// Small enough that the picture neither grows visibly nor pulls out of a crowded node.
 pub const LIFT: f32 = 0.02;
 
@@ -39,34 +37,32 @@ enum Held {
 
 pub struct Detail {
     /// Per world, where the wiki serves its picture from. Empty for a world the player has not
-    /// been to, which has no picture of its own to fetch: see [`Unvisited`].
+    /// been to, which has no picture of its own to fetch.
     images: Vec<String>,
     held: HashMap<usize, Held>,
-    /// The worlds [`Detail::track`] was last asked for, widest first, which is the order they are
-    /// drawn in and the order the budget is spent in.
+    /// Widest first, which is the order they are drawn in and the budget is spent in.
     wanted: Vec<usize>,
     unvisited: Unvisited,
 }
 
-/// The picture every world the player has not been to is drawn as. One picture however many
-/// worlds wear it, so it is held once and drawn as a single instanced mesh -- a frontier can put
-/// hundreds on screen at once.
+/// The picture every world the player has not been to is drawn as. One picture however many worlds
+/// wear it, so it is held once and drawn as a single instanced mesh -- a frontier can put hundreds
+/// on screen at once.
 ///
 /// Not a level of detail, unlike everything else here: it is the world's only picture, so it is
-/// drawn at every size rather than past [`SWITCH_PIXELS`] and spends none of the [`HELD`] budget.
-/// The atlas carries a cell of it too, for the catalog, which this stands in front of.
+/// drawn at every size and spends none of the [`HELD`] budget.
 #[derive(Default)]
 struct Unvisited {
     loading: Option<fetch::Pending<Option<CpuTexture>>>,
-    /// `None` until the picture arrives, and forever if it cannot be had, which leaves these
-    /// worlds their bare nodes.
+    /// `None` until the picture arrives, and forever if it cannot be had, which leaves these worlds
+    /// their bare nodes.
     quads: Option<Gm<InstancedMesh, ColorMaterial>>,
 }
 
 pub struct Magnified {
     pub world: usize,
-    /// How wide the node comes out on screen, in physical pixels. Both what admitted it --
-    /// see [`SWITCH_PIXELS`] -- and what the caller ranks by before handing the list over.
+    /// How wide the node comes out on screen, in physical pixels: both what admitted it and what
+    /// the caller ranks by.
     pub width: f32,
     /// Taken from the world's own atlas quad, so the switch changes the detail and nothing else.
     pub transformation: Mat4,
@@ -75,8 +71,7 @@ pub struct Magnified {
 }
 
 impl Detail {
-    /// `unvisited` is whether any world here is one the player has not been to, and so whether
-    /// the placeholder is worth fetching at all.
+    /// `unvisited` is whether the placeholder is worth fetching at all.
     pub fn new(images: Vec<String>, unvisited: bool) -> Self {
         Self {
             images,
@@ -89,11 +84,9 @@ impl Detail {
         }
     }
 
-    /// Stands the placeholder on the quads it was handed -- the nodes of every world the player
-    /// has not been to. Every frame, because the layout moves the nodes, the camera turns them,
-    /// and a selection dims them.
-    /// Whether a picture is still on its way, and so whether [`Detail::track`] has anything left
-    /// to find. What keeps the window drawing while a world sharpens.
+    /// Stands the placeholder on the quads it was handed. Every frame, because the layout moves the
+    /// nodes, the camera turns them, and a selection dims them.
+    /// What keeps the window drawing while a world sharpens.
     pub fn pending(&self) -> bool {
         self.unvisited.loading.is_some()
             || self
@@ -121,11 +114,10 @@ impl Detail {
     }
 
     /// `magnified` is every world drawn wider than [`SWITCH_PIXELS`], widest first. Anything past
-    /// [`HELD`] of it is left on the atlas, and anything held but no longer asked for is dropped:
-    /// what the view is not looking at costs nothing to fetch again if it looks back.
+    /// [`HELD`] is left on the atlas, and anything held but no longer asked for is dropped.
     pub fn track(&mut self, context: &Context, magnified: &[Magnified]) {
-        // Filtered before the budget is counted, not after: a world with no picture of its own
-        // already has the placeholder, and a slot spent on it would push out a world that has one.
+        // Filtered before the budget is counted: a world with no picture of its own already has
+        // the placeholder, and a slot spent on it would push out a world that has one.
         let magnified: Vec<&Magnified> = magnified
             .iter()
             .filter(|it| !self.images[it.world].is_empty())
@@ -138,8 +130,8 @@ impl Detail {
         self.wanted = wanted;
 
         for it in magnified {
-            // Removed rather than borrowed, so whatever it turns into goes back in its place
-            // without a second borrow.
+            // Removed rather than borrowed, so whatever it turns into goes back without a second
+            // borrow.
             let mut held = match self.held.remove(&it.world) {
                 None => Held::Loading(load(self.images[it.world].clone())),
                 Some(Held::Loading(pending)) => match pending.take() {
@@ -161,10 +153,10 @@ impl Detail {
 
     /// Widest first, the order [`Detail::track`] left them in.
     pub fn drawn(&self) -> impl Iterator<Item = &dyn Object> {
-        // Placeholders first: one draw call for however many worlds wear them. A world turning
-        // over wears both for a moment, and the placeholder wins because [`LIFT`] lifts it
-        // against the node's whole radius while the picture is lifted against the shrinking
-        // radius it is drawn at.
+        // Placeholders first: one draw call for however many worlds wear them. A world turning over
+        // wears both for a moment, and the placeholder wins because [`LIFT`] lifts it against the
+        // node's whole radius while the picture is lifted against the shrinking radius it is drawn
+        // at.
         self.unvisited
             .quads
             .iter()
@@ -203,8 +195,8 @@ fn quad_material(context: &Context, picture: &CpuTexture) -> ColorMaterial {
     let mut texture = Texture2DRef::from_cpu_texture(
         context,
         &CpuTexture {
-            // The switch happens where the atlas runs out, not where this picture reaches its own
-            // size, so it is minified onto the node at every size below that.
+            // The switch happens where the atlas runs out rather than where this picture reaches
+            // its own size, so it is minified onto the node at every size below that.
             mipmap: Some(Mipmap::default()),
             wrap_s: Wrapping::ClampToEdge,
             wrap_t: Wrapping::ClampToEdge,
@@ -219,9 +211,9 @@ fn quad_material(context: &Context, picture: &CpuTexture) -> ColorMaterial {
     }
 }
 
-/// `None` for anything that cannot be had or read, which is not fatal anywhere this is called
-/// from: a world keeps its slightly soft atlas cell, and a map says it has no picture. [`ORIGIN`]
-/// and the decoder are what separate a picture from a challenge page.
+/// `None` for anything that cannot be had or read, which is fatal nowhere this is called from: a
+/// world keeps its slightly soft atlas cell, and a map says it has no picture. [`ORIGIN`] and the
+/// decoder are what separate a picture from a challenge page.
 pub fn load(url: String) -> fetch::Pending<Option<CpuTexture>> {
     fetch::spawn(async move {
         let bytes = match download(&url).await {
@@ -247,7 +239,7 @@ pub fn load(url: String) -> fetch::Pending<Option<CpuTexture>> {
 async fn download(url: &str) -> Result<Vec<u8>, fetch::Error> {
     Ok(fetch::client()
         .get(url)
-        // Dropped by the browser, which sets its own. See [`ORIGIN`].
+        // Dropped by the browser, which sets its own.
         .header("origin", ORIGIN)
         .send()
         .await?

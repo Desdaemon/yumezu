@@ -1,7 +1,7 @@
 //! The bar offering the Android apk, which draws the same graph faster than the page does.
 //!
-//! Shown only on the page and only on Android: a desktop has nothing to install, an iPhone
-//! cannot install this, and the apk itself is already what is being offered.
+//! Shown only on the page and only on Android: a desktop has nothing to install, an iPhone cannot
+//! install this, and the apk itself is already what is being offered.
 
 use egui_material_icons::icons::{ICON_ANDROID, ICON_CLOSE};
 
@@ -23,8 +23,8 @@ impl Offer {
         }
     }
 
-    /// `insets` is what the system's own furniture covers: the bar stands off the bottom of the
-    /// safe area, not of the window, which on a phone sits behind the navigation bar.
+    /// The bar stands off the bottom of the safe area, not of the window, which on a phone sits
+    /// behind the navigation bar.
     pub(super) fn show(&mut self, ctx: &egui::Context, insets: egui::Margin) {
         if !self.open {
             return;
@@ -67,8 +67,8 @@ impl Offer {
     }
 }
 
-/// The user agent is all a page is told about the device, and anything can claim anything in it.
-/// Nothing rests on it: a browser that lies is offered a download it can ignore.
+/// Nothing rests on it: a browser that lies about its user agent is offered a download it can
+/// ignore.
 fn on_android_browser() -> bool {
     #[cfg(target_family = "wasm")]
     {

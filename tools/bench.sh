@@ -2,13 +2,13 @@
 # Times the kernel's spellings against each other, on this machine and on a phone if one is
 # attached. `IMPL_DETAILS.md` carries the results.
 #
-# `llvm-mca` costs a loop from a scheduling model. This runs the simulation instead, which is the
-# only way to see the memory system, the octree walk around the kernel, and the several shipping
-# cores the model has nothing for. `tools/variant.py` writes each variant to a scratch copy of the
-# crate, so nothing here touches the working tree.
+# Runs the whole simulation rather than costing a loop from a scheduling model, which is the only way
+# to see the memory system, the octree walk around the kernel, and the shipping cores `llvm-mca` has
+# no model for. `tools/variant.py` writes each variant to a scratch copy of the crate, so nothing
+# here touches the working tree.
 #
-# Args are the benchmark's: `<nodes> <theta> <steps>`. Wants ANDROID_HOME and a device on adb for
-# the phone half, and skips it without them.
+# Args are the benchmark's: `<nodes> <theta> <steps>`. Wants ANDROID_HOME and a device on adb for the
+# phone half, and skips it without them.
 set -euo pipefail
 
 readonly TRIPLE=aarch64-linux-android
@@ -20,8 +20,8 @@ cd "$(dirname "$0")/.."
 readonly ROOT=$PWD
 readonly SCRATCH=${TMPDIR:-/tmp}/force_graph_3d-bench
 
-# The desktop build sets no `target-cpu`, so SSE2 is the floor it actually ships; this machine's
-# own is whatever it has, and the gap between the two columns is what the wider vectors are worth.
+# The desktop build sets no `target-cpu`, so SSE2 is the floor it ships; the gap between the two
+# columns is what the wider vectors are worth.
 readonly HOST_CPUS=(x86-64 native)
 
 for variant in "${VARIANTS[@]}"; do
@@ -56,8 +56,8 @@ for variant in "${VARIANTS[@]}"; do
     cd "$ROOT"
 done
 
-# One core from each cluster, read off the device rather than assumed, because a phone's cores are
-# not alike and the scheduler will move a short run between them.
+# One core from each cluster, read off the device: a phone's cores are not alike and the scheduler
+# will move a short run between them.
 mapfile -t freqs < <(adb shell 'cat /sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq' | tr -d '\r')
 slow=0 fast=0
 for i in "${!freqs[@]}"; do
@@ -69,8 +69,7 @@ echo "device: $(adb shell getprop ro.product.model | tr -d '\r')"
 for core in $slow $fast; do
     echo "  cpu$core, ${freqs[core]} kHz"
     for variant in "${VARIANTS[@]}"; do
-        # Best of three: a phone throttles, and the fastest run is the one least contaminated by
-        # whatever else the device decided to do.
+        # Best of three: a phone throttles, and the fastest run is the least contaminated.
         best=$(for _ in 1 2 3; do
             adb shell "taskset $(printf '%x' $((1 << core))) $REMOTE/bench-$variant $*" | tr -d '\r'
         done | sort -t' ' -k5 -n | head -1)

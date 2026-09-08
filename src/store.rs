@@ -1,11 +1,10 @@
 //! The few choices that outlive the run that made them: one string per key, a localStorage entry
 //! on the page and a file of that name everywhere else.
 //!
-//! Every failure here is dropped rather than reported -- nothing but a setting's next reading
-//! depends on it -- so a page with no storage simply has no memory.
+//! Every failure here is dropped rather than reported, so a page with no storage has no memory.
 
-/// The empty string is a value like any other: a key whose presence is the whole answer is
-/// written with one.
+/// The empty string is a value like any other: a key whose presence is the whole answer is written
+/// with one.
 pub(super) fn read(key: &str) -> Option<String> {
     #[cfg(target_family = "wasm")]
     {
@@ -68,9 +67,9 @@ fn file(key: &str) -> Option<std::path::PathBuf> {
     Some(directory.join(key))
 }
 
-/// Deliberately not [`file`]'s directory, which holds what a person chose and must survive.
-/// Android may empty this one when the device is short of room and a desktop `cache` may be swept
-/// by a cleaner, which is why [`super::fetch`] is allowed to grow here.
+/// Deliberately not [`file`]'s directory, which holds what a person chose and must survive. Android
+/// may empty this one when the device is short of room and a desktop `cache` may be swept by a
+/// cleaner, which is why [`super::fetch`] is allowed to grow here.
 #[cfg(not(target_family = "wasm"))]
 pub(super) fn cache_directory() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "android")]

@@ -11,9 +11,8 @@ body {
   height: 100% !important;
 }
 
-// What stands in for the app's loading frame until there is an app: see `index.html`. Centred
-// and coloured to match what replaces it, so the first frame is a handover rather than a change
-// of screen. `pointer-events: none` because it is a picture of an interface, not one.
+// Stands in for the app's loading frame until there is an app: see `index.html`. Coloured to match
+// what replaces it, so the first frame is a handover rather than a change of screen.
 #loading {
   position: fixed;
   inset: 0;

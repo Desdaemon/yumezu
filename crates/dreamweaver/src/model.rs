@@ -1,8 +1,7 @@
 //! What a world is, as the dump publishes it.
 //!
-//! The shapes here are not this program's: `data.json` is an interface with a reader on the other
-//! side, so the field names and the nesting are the reference implementation's, and the serde
-//! renames are what keep them that way.
+//! `data.json` is an interface with a reader on the other side, so the field names and the nesting
+//! are the reference implementation's and the serde renames are what keep them that way.
 
 use std::collections::BTreeMap;
 
@@ -11,10 +10,9 @@ use crate::smw;
 use serde::{Deserialize, Serialize};
 
 bitflags::bitflags! {
-    /// Independent flags rather than a kind, because a passage really can be several of these at
-    /// once -- locked behind a condition *and* seasonal *and* one-way -- and the reader decides
-    /// which it cares about. The numbering is the wiki explorer's own and is load-bearing: it is
-    /// what the dump publishes and what the app reads back.
+    /// Independent flags rather than a kind: a passage can be locked behind a condition *and*
+    /// seasonal *and* one-way. The numbering is the wiki explorer's own and is load-bearing --
+    /// it is what the dump publishes and what the app reads back.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
     pub struct ConnType: i16 {
         /// Walkable from the world that lists it, never back.
@@ -45,8 +43,8 @@ bitflags::bitflags! {
 }
 
 impl ConnType {
-    /// `None` for a word this does not know, which is how a vocabulary the wiki grows stays
-    /// non-fatal: an unrecognised attribute leaves the passage exactly as walkable as it was.
+    /// `None` for a word this does not know: an unrecognised attribute leaves the passage exactly
+    /// as walkable as it was, so the wiki growing its vocabulary is not fatal.
     pub fn of(attribute: &str, connection: &smw::Connection) -> Option<(Self, Wording)> {
         let plain = |flag| Some((flag, Wording::None));
         match attribute {
@@ -64,9 +62,8 @@ impl ConnType {
             )),
             "Needs Effect" => Some((
                 Self::EFFECT,
-                // Comma separated as the wiki lists them and joined no further: it does not say
-                // whether one effect is enough or all are needed, so an "and" would settle it
-                // here.
+                // Comma separated and joined no further: the wiki does not say whether one effect
+                // is enough or all are needed, so an "and" would settle it here.
                 Wording::Words(connection.effects_needed.join(",")),
             )),
             "Chance" => Some((
@@ -74,9 +71,8 @@ impl ConnType {
                 Wording::Words(connection.chance_percentage.clone()?),
             )),
             "Seasonal" => {
-                // The first season of however many the wiki lists: the reader has one word to put
-                // a route and four it knows how to translate, and the reference wrapper narrowed
-                // these the same way.
+                // The reader has one word to put a route and four it knows how to translate; the
+                // reference wrapper narrowed these the same way.
                 let season = connection.seasons_available.first()?;
                 Some((Self::SEASONAL, Wording::Translated(season.to_owned())))
             }
@@ -85,8 +81,8 @@ impl ConnType {
     }
 }
 
-/// The wiki writes these as instructions to a reader -- "Requires to have seen the first four
-/// endings." -- and the dump publishes them as the bare condition a reader shows beside a route.
+/// The wiki writes these as instructions -- "Requires to have seen the first four endings." -- and
+/// the dump publishes the bare condition a reader shows beside a route.
 fn condition(sentence: &str) -> String {
     let trimmed = sentence
         .strip_prefix("Requires ")
@@ -132,12 +128,11 @@ impl Wording {
     }
 }
 
-/// The whole published dump, exactly as the reference implementation's `/data` answers it.
+/// Exactly as the reference implementation's `/data` answers it.
 ///
 /// The empty lists are not oversights: effects, menu themes, wallpapers and soundtrack entries are
-/// written as prose and tables on their wiki pages rather than held in the wiki's store, and none
-/// says anything about how the worlds join up. They stay in the shape so a reader written against
-/// the reference dump keeps working.
+/// written as prose and tables rather than held in the wiki's store. They stay in the shape so a
+/// reader written against the reference dump keeps working.
 #[derive(Serialize, Deserialize, Default)]
 pub struct Dump {
     #[serde(rename = "worldData")]
@@ -153,8 +148,7 @@ pub struct Dump {
     /// A table on the wiki's Menu Themes page, so published empty.
     #[serde(rename = "menuThemeData")]
     pub menu_themes: Vec<serde_json::Value>,
-    /// The store holds these as collectibles but without the pictures, which are on the page, so
-    /// published empty.
+    /// The store holds these as collectibles but without the pictures, so published empty.
     #[serde(rename = "wallpaperData")]
     pub wallpapers: Vec<serde_json::Value>,
     /// Templates on the wiki's Soundtrack pages, so published empty.
@@ -164,7 +158,7 @@ pub struct Dump {
     #[serde(rename = "lastUpdate")]
     pub last_update: Option<String>,
     /// When the whole wiki was last read without first asking what had changed. A soft sync
-    /// carries this over rather than moving it -- see `sync::stamps`.
+    /// carries this over rather than moving it.
     #[serde(rename = "lastFullUpdate")]
     pub last_full_update: Option<String>,
     /// Always false: the reference implementation lets an operator edit the wiki through the
@@ -188,33 +182,29 @@ pub struct Author {
     pub name_jp: Option<String>,
 }
 
-/// [`World::id`] is the world's place in the published list rather than its database key: the
-/// reader indexes straight into the array with a [`Connection::target_id`], so the two have to be
-/// the same number.
+/// [`World::id`] is the world's place in the published list rather than a database key: the reader
+/// indexes straight into the array with a [`Connection::target_id`].
 #[derive(Serialize, Deserialize)]
 pub struct World {
     pub id: usize,
     pub title: String,
     #[serde(rename = "titleJP")]
     pub title_jp: Option<String>,
-    /// Empty rather than absent for a world the wiki credits to nobody, which is what the reader
-    /// groups by.
+    /// Empty rather than absent for a world the wiki credits to nobody: the reader groups by it.
     pub author: String,
     /// Steps from the starting room along passages a player can simply walk. See `depth`.
     pub depth: i32,
     /// Steps along any passage at all, however conditional.
     #[serde(rename = "minDepth")]
     pub min_depth: i32,
-    /// Empty, never absent, for a world the wiki shows no picture of: the reader takes this field
-    /// as a string and would refuse a dump that gave it null.
+    /// Empty, never absent: the reader takes this as a string and would refuse a null.
     pub filename: String,
     /// The world's maps, both as `|`-separated lists read in step with each other.
     #[serde(rename = "mapUrl")]
     pub map_url: Option<String>,
     #[serde(rename = "mapLabel")]
     pub map_label: Option<String>,
-    /// The world's music, as two more `|`-separated lists read in step: the files, and
-    /// `<title>^<where it plays>` for each.
+    /// Two more `|`-separated lists read in step: the files, and `<title>^<where it plays>`.
     #[serde(rename = "bgmUrl")]
     pub bgm_url: Option<String>,
     #[serde(rename = "bgmLabel")]
@@ -229,16 +219,15 @@ pub struct World {
     pub ver_gaps: Option<Vec<VerGap>>,
     /// The RPG Maker maps the world is built out of, by the number the game gives each.
     ///
-    /// Not a field the reference dump carries: it keeps these in its database and publishes only
-    /// `size`, the area they add up to. The store holds which maps a world is but not how big any
-    /// of them is, so `size` cannot be had from here and this is what there is instead. Absent
-    /// rather than empty for the three pages whose infobox names no map at all.
+    /// Not a field the reference dump carries: it publishes only `size`, the area they add up to,
+    /// which cannot be had from a store that holds which maps a world is but not how big any of
+    /// them is. Absent rather than empty for the three pages whose infobox names no map at all.
     #[serde(rename = "mapIds", default, skip_serializing_if = "Vec::is_empty")]
     pub map_ids: Vec<u32>,
     pub removed: bool,
     /// Set for the debug room and whatever else an operator has marked as a spoiler. Published
-    /// rather than acted on here: the world stays in the dump, in the graph and in the numbering,
-    /// and the client is what leaves it out.
+    /// rather than acted on: the world stays in the dump, in the graph and in the numbering, and
+    /// the client is what leaves it out.
     pub secret: bool,
     pub connections: Vec<Connection>,
 }
@@ -267,8 +256,8 @@ pub struct Connection {
     pub target_id: usize,
     #[serde(rename = "type")]
     pub flags: i16,
-    /// The wiki's words for whichever conditions it writes words for, keyed by the flag that
-    /// imposes them. Ordered, so two dumps of the same database compare equal as text.
+    /// Keyed by the flag imposing the condition. Ordered, so two dumps of the same database
+    /// compare equal as text.
     #[serde(rename = "typeParams")]
     pub type_params: BTreeMap<i16, TypeParams>,
 }

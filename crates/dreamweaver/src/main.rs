@@ -1,29 +1,25 @@
 //! Serves yumezu its world dump.
 //!
 //! The wiki explorer this replaces keeps a MySQL database, a scraper for a dozen wiki pages and a
-//! background worker to run them; this keeps one JSON document. It is smaller because it asks the
-//! wiki's Semantic MediaWiki store for structured data instead of reading the wiki's HTML -- see
-//! [`smw`] -- and because a dump rebuilt from scratch every time has nothing to reconcile.
+//! background worker; this keeps one JSON document. It asks the wiki's Semantic MediaWiki store for
+//! structured data instead of reading HTML -- see [`smw`] -- and a dump rebuilt from scratch every
+//! time has nothing to reconcile.
 //!
 //! Effects, menu themes, wallpapers and the soundtrack are written in wiki prose, so their fields
 //! are published empty. Nothing here parses HTML, and nothing here should: none of those four says
-//! anything about how the worlds join up, which is the whole of what this dump is read for.
+//! anything about how the worlds join up.
 //!
-//! There is nothing to run but the server, and nothing to tell it to do. It keeps the dump current
-//! out of the requests for it: a `GET /data` arriving more than `--sync-every` hours after the
-//! wiki was last asked starts a sync and answers `503 needs update` instead of the dump, and the
-//! client waits that sync out on `GET /pollUpdate` before asking again. See [`Due`] and [`data`].
-//!
-//! A sync asks the wiki what has been edited since the dump was built and re-reads only the parts
-//! of the wiki those pages belong to. A run with no dump to compare against reads all of it.
+//! The dump is kept current out of the requests for it: a `GET /data` arriving more than
+//! `--sync-every` hours after the wiki was last asked starts a sync and answers `503 needs update`
+//! instead, and the client waits that sync out on `GET /pollUpdate`. A sync re-reads only the parts
+//! of the wiki whose pages have been edited; a run with no dump to compare against reads all of it.
 //!
 //! ```text
 //! dreamweaver [--listen ADDR|PATH] [--data PATH] [--sync-every HOURS]
 //! ```
 //!
-//! Besides the dump it answers four routes that are not about the dump at all: what YNOproject
-//! knows about the player reading the page, put through to YNOproject because the page may not ask
-//! it directly. See [`relay`].
+//! Besides the dump it answers four routes carrying what YNOproject knows about the player reading
+//! the page, put through because the page may not ask YNOproject directly. See [`relay`].
 //!
 //! `--listen` takes either a `host:port` or, so that nginx can reach it the other way its
 //! `proxy_pass` knows, the path of a Unix socket -- see [`Listen`].
@@ -55,14 +51,13 @@ const DATA: &str = "data.json";
 const LISTEN: &str = "127.0.0.1:5000";
 
 /// A world appears every few days at most, so this is not a race. Six hours is the reference
-/// implementation's own interval, and most passes cost one small request and stop. It is also the
-/// window the wiki is asked about, so a shorter interval means more passes each covering less,
-/// not more of the wiki read.
+/// implementation's own interval. It is also the window the wiki is asked about, so a shorter
+/// interval means more passes each covering less, not more of the wiki read.
 const SYNC_EVERY: u64 = 6;
 
 /// The lock around the last refresh's fetches is also what keeps two refreshes from running at
-/// once, which matters more than the cache does: a scheduled sync and a `GET /update` arriving
-/// together would otherwise both build a dump, and the slower would publish over the newer.
+/// once: a scheduled sync and a `GET /update` arriving together would otherwise both build a dump,
+/// and the slower would publish over the newer.
 #[derive(Clone)]
 struct Server {
     store: Arc<store::Store>,
@@ -90,8 +85,8 @@ async fn main() -> std::process::ExitCode {
     }
 
     let store = Arc::new(store::Store::open(&options.data));
-    // A run that read a dump off disk is as up to date as that dump says, so it is not due a sync
-    // the moment it comes up. One that read nothing is.
+    // A run that read a dump off disk is as up to date as that dump says. One that read nothing
+    // is due immediately.
     let due = Arc::new(Due::new(options.sync_every, &store.snapshot().dump));
     let server = Server {
         store,
@@ -126,8 +121,8 @@ impl Default for Options {
 }
 
 impl Options {
-    /// Hand-rolled because there are three switches, and a parser crate would be more
-    /// configuration than the thing it configures.
+    /// Hand-rolled: three switches would take more configuring through a parser crate than they
+    /// configure.
     fn read(&mut self, args: impl Iterator<Item = String>) -> Result<(), String> {
         let mut args = args;
         while let Some(switch) = args.next() {
@@ -136,8 +131,8 @@ impl Options {
                 "--listen" => self.listen = value()?,
                 "--data" => self.data = value()?,
                 "--sync-every" => {
-                    // Refused rather than clamped: zero hours is a sync due again the moment it
-                    // ends, and a server whose dump is always due never serves it at all.
+                    // Zero hours is a sync due again the moment it ends, and a server whose dump
+                    // is always due never serves it at all.
                     self.sync_every = match value()?.parse() {
                         Ok(hours) if hours > 0 => hours,
                         _ => {
@@ -157,8 +152,8 @@ impl Options {
 /// with the dump or with `needs update`.
 ///
 /// The mark is when a sync last *ran*, not when the dump last changed: most syncs find the wiki
-/// unmoved and publish nothing, so dating this from the dump's own stamp would leave every one of
-/// those due again immediately and a busy server would ask the wiki about every request it got.
+/// unmoved and publish nothing, so dating this from the dump's stamp would leave every one of those
+/// due again immediately.
 ///
 /// A run coming up with a dump on disk inherits that dump's stamp, so restarting the server is not
 /// a way to make it re-read the wiki.
@@ -185,20 +180,18 @@ impl Due {
         }
     }
 
-    /// A failed sync counts: the wiki being unreachable is not something a tighter loop fixes, and
-    /// a server retrying every request would answer `needs update` to all of them while hammering
-    /// a host already having a bad day.
+    /// A failed sync counts: a server retrying every request would answer `needs update` to all of
+    /// them while hammering a host already having a bad day.
     fn met(&self) {
         *self.asked.lock().unwrap() = Some(time::OffsetDateTime::now_utc());
     }
 }
 
 /// The lock the sync holds is taken here, so "is one running" and "what keeps two from running"
-/// are one fact rather than two that can disagree. A caller that does not get it has nothing to
-/// do: the sync already running is the one it wanted started.
+/// are one fact rather than two that can disagree. A caller that does not get it has nothing to do.
 ///
-/// `Ok(None)` from [`build`] means the wiki had nothing to say, which is not a failure and not a
-/// dump: the one already published is still the right one, down to the byte.
+/// `Ok(None)` from [`build`] means the wiki had nothing to say: the dump already published is still
+/// the right one, down to the byte.
 fn start(server: &Server) {
     let Ok(mut fetched) = server.fetched.clone().try_lock_owned() else {
         return;
@@ -212,16 +205,15 @@ fn start(server: &Server) {
         match built {
             Ok(Some(worlds)) => tracing::info!("published {worlds} worlds"),
             Ok(None) => tracing::info!("the wiki has not changed; the dump stands"),
-            // Debug rather than Display: `reqwest` names the request either way, but only Debug
-            // says which field of the answer it could not read, which on a failed sync is the
-            // whole of what there is to go on.
+            // Debug rather than Display: only Debug says which field of the answer it could not
+            // read, which on a failed sync is the whole of what there is to go on.
             Err(error) => tracing::error!("sync failed: {error:?}"),
         }
     });
 }
 
-/// The work [`start`] reports on. Split out so every way out of it -- a sync with nothing to do, a
-/// failed fetch, a published dump -- passes back through the same clearing up.
+/// Split out so every way out -- nothing to do, a failed fetch, a published dump -- passes back
+/// through the same clearing up.
 async fn build(server: &Server, fetched: &mut sync::Fetched) -> smw::Result<Option<usize>> {
     let previous = server.store.snapshot();
     let plan = match plan(server, &previous.dump).await {
@@ -241,11 +233,9 @@ async fn build(server: &Server, fetched: &mut sync::Fetched) -> smw::Result<Opti
 
 /// How much of the wiki this refresh should read, or `None` for one that need not run at all.
 ///
-/// A sync with a dump to compare against is the only one with a choice to make. It asks which
-/// pages have moved since that dump was built -- a little before that, in fact, the store being
-/// indexed after the fact and the question worth overlapping. Three answers stand the sync down or
-/// widen it: nothing has changed; the dump is old enough that the wiki no longer remembers that
-/// far back, so all of it is read; and the wiki cannot be asked at all, which reads all of it too.
+/// Only a sync with a dump to compare against has a choice to make. Three answers stand it down or
+/// widen it: nothing has changed; the dump is older than the wiki remembers, so all of it is read;
+/// and the wiki cannot be asked at all, which reads all of it too.
 async fn plan(server: &Server, previous: &model::Dump) -> Option<sync::Refresh> {
     server.progress.at(progress::CHANGES);
     // Nothing to compare against is a first sync, and a first sync reads all of it.
@@ -265,9 +255,8 @@ async fn plan(server: &Server, previous: &model::Dump) -> Option<sync::Refresh> 
             tracing::info!("{} pages edited since {since}", pages.len());
             Some(sync::Refresh::Pages(pages))
         }
-        // A gate that cannot be read is no reason to keep serving an old dump: rebuilding one
-        // that did not need it costs a minute of asking, where the other mistake is a dump that
-        // quietly stops following the wiki.
+        // Rebuilding a dump that did not need it costs a minute of asking; the other mistake is a
+        // dump that quietly stops following the wiki.
         Err(error) => {
             tracing::warn!("cannot tell what the wiki has changed: {error}");
             Some(sync::Refresh::Everything)
@@ -276,9 +265,9 @@ async fn plan(server: &Server, previous: &model::Dump) -> Option<sync::Refresh> 
 }
 
 /// nginx reaches an upstream by `proxy_pass http://127.0.0.1:5000` or by
-/// `proxy_pass http://unix:/run/dreamweaver.sock:`, and which a host wants is its own business: a
-/// socket in a directory only nginx and this program can enter needs no loopback port left open,
-/// which for a server whose `/update` is unguarded is the safer half.
+/// `proxy_pass http://unix:/run/dreamweaver.sock:`. A socket in a directory only nginx and this
+/// program can enter needs no loopback port left open, which for a server whose `/update` is
+/// unguarded is the safer half.
 ///
 /// The two are told apart by the `/`, no `host:port` having one -- not even an IPv6 literal, which
 /// brackets its colons instead.
@@ -299,15 +288,13 @@ impl<'a> Listen<'a> {
 /// Runs until asked to stop.
 async fn serve(server: Server, options: Options) {
     let app = axum::Router::new()
-        // `/data` is what the reference implementation serves it as, and `/data.json` is what a
-        // build script would rather save.
+        // `/data` is what the reference implementation serves it as; `/data.json` is what a build
+        // script would rather save.
         .route("/data", get(data))
         .route("/data.json", get(data))
         .route("/pollUpdate", get(poll_update))
-        // The page's own account on YNOproject, which it may not ask about directly. Kept here
-        // rather than left to whatever serves the page, because the sign-in's cookie has to be
-        // handed back for this origin to be keepable at all, and a rewrite nobody wrote down is a
-        // rewrite a deployment forgets.
+        // Kept here rather than left to whatever serves the page: the sign-in's cookie has to be
+        // handed back for this origin to be keepable at all.
         .merge(relay::routes())
         .with_state(server);
 
@@ -334,8 +321,8 @@ async fn serve(server: Server, options: Options) {
             tracing::info!("listening on unix:{}", path.display());
             run(listener, app).await;
             // A socket outlives the process that bound it, and the one left behind is both a door
-            // that answers nothing and the file the next run has to clear before it can bind.
-            // Unlinking here covers the graceful stop; `bind` covers every other ending.
+            // that answers nothing and the file the next run must clear. This covers the graceful
+            // stop; `bind` covers every other ending.
             if let Err(error) = std::fs::remove_file(path) {
                 tracing::warn!("cannot remove {}: {error}", path.display());
             }
@@ -346,13 +333,12 @@ async fn serve(server: Server, options: Options) {
 /// Opens the socket `--listen` named, clearing a stale one out of the way.
 ///
 /// Made world-reachable: the default umask would let nothing but this program's own user connect,
-/// which is not what a host putting nginx in front of it is asking for, and nginx's user is not
-/// something this program can guess. What decides who may connect is the directory the socket sits
-/// in, which is the usual arrangement and the one the host makes when it chooses the path.
+/// and nginx's user is not something this program can guess. What decides who may connect is the
+/// directory the socket sits in, which the host chooses along with the path.
 fn bind(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
     // Only a socket, and only one nothing is listening on: `bind` fails with "address in use"
-    // against a live one, which is the right answer for a second copy started by mistake, and
-    // refusing to unlink anything else keeps a mistyped `--listen` from eating a real file.
+    // against a live one, and refusing to unlink anything else keeps a mistyped `--listen` from
+    // eating a real file.
     if std::os::unix::net::UnixStream::connect(path).is_err()
         && std::fs::symlink_metadata(path).is_ok_and(|file| file.file_type().is_socket())
     {
@@ -383,17 +369,16 @@ where
 ///
 /// That `503` is what makes the server keep up at all: there is no clock in here, only requests,
 /// and a request arriving after the last sync has gone stale is what starts the next one. The
-/// client is told to wait rather than handed the old dump so it has one story for both waits it
-/// can meet -- the first sync of a server with nothing to serve, and a routine refresh.
+/// client is told to wait rather than handed the old dump so it has one story for both waits --
+/// the first sync of a server with nothing to serve, and a routine refresh.
 ///
 /// An empty dump is never served: a client cannot tell it from a wiki with no worlds in it and
-/// would draw the second, so a server that has never built one answers `needs update` however
-/// recently it last tried.
+/// would draw the second.
 async fn data(State(server): State<Server>) -> axum::response::Response {
     let snapshot = server.store.snapshot();
     if server.due.now() || snapshot.dump.worlds.is_empty() {
-        // Nothing is awaited: the sync outlives this request, which is the whole point of
-        // answering rather than holding the connection open for the minute it takes.
+        // Nothing is awaited: the sync outlives this request, rather than holding the connection
+        // open for the minute it takes.
         start(&server);
         return (
             StatusCode::SERVICE_UNAVAILABLE,

@@ -1,9 +1,8 @@
-//! Times `ForceGraph::update` so that a change to the kernel can be measured on the machine it is
-//! meant for rather than estimated from a scheduling model.
+//! Times `ForceGraph::update` on the machine the kernel is meant for.
 //!
 //! `bench <nodes> <theta> <steps>`, printing nanoseconds per step. `theta` of zero sums every pair
-//! and is the shape the kernel's lane loop dominates; the default angle adds the octree walk
-//! around it and is what the application actually runs.
+//! and is the shape the lane loop dominates; the default angle adds the octree walk around it and
+//! is what the application runs.
 //!
 //! `tools/bench-arm.sh` runs this on an Android device over adb.
 
@@ -27,8 +26,8 @@ fn main() {
         ..Default::default()
     });
 
-    // A deterministic scatter, so two runs of this measure the same arrangement of work. Positions
-    // decide how much of the octree a step walks, which is most of what varies between graphs.
+    // Deterministic, so two runs measure the same arrangement of work: positions decide how much
+    // of the octree a step walks, which is most of what varies between graphs.
     let mut seed = 0x2545_F491_4F6C_DD1Du64;
     let mut next = || {
         seed ^= seed << 13;

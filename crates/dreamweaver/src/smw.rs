@@ -1,32 +1,25 @@
 //! Asking yume.wiki's Semantic MediaWiki store for itself, rather than through [the wrapper].
 //!
-//! The store is where the wiki keeps the structured half of what it knows: a world's infobox, the
-//! passages out of it, the people credited for it and the releases it lived through are all
-//! properties and subobjects, not prose. The wrapper reads them and hands them back as JSON, which
-//! is why the dump was built out of it to begin with. For most of the dump it is now a detour:
+//! The store keeps the structured half of what the wiki knows: a world's infobox, the passages out
+//! of it, the people credited for it and the releases it lived through are properties and
+//! subobjects, not prose. The wrapper reads them and hands them back as JSON, which is why the dump
+//! was built out of it to begin with. For most of the dump it is now a detour:
 //!
-//! - The **version history** it does not publish at all, so `versionInfoData` went out empty for
-//!   want of an endpoint. See [`versions`].
+//! - The **version history** it does not publish at all. See [`versions`].
 //! - The **connections** it publishes only the first few thousand of. The store refuses to look
 //!   further than [`MAX_OFFSET`] rows into a result set, and rather than saying so it answers with
-//!   the first page again -- which is what the wrapper's `continueKey` passes on when it appears
-//!   to wrap. Yume 2kki has more passages than that, so alphabetically the last sixty-odd worlds'
+//!   the first page again -- which is what the wrapper's `continueKey` passes on when it appears to
+//!   wrap. Yume 2kki has more passages than that, so alphabetically the last sixty-odd worlds'
 //!   exits were silently missing from every dump. Asking directly does not lift the cap; it lets
 //!   the question be cut into pieces that fit under it. See [`connections`].
-//! - The **worlds** and the **authors** it answers correctly, and this asks the store anyway, so
-//!   that every fetch can be steered by the same account of what has changed -- see
-//!   [`changed_since`]. Both queries were checked against the wrapper's answers field by field
-//!   before the switch: identical worlds, pictures, maps, music and versions, and an author list
-//!   identical down to its order. The one difference is that the store writes a world's several
-//!   primary authors as several values where the wrapper writes them as one comma-separated string,
-//!   which [`LocationRow::location`] does too.
+//! - The **worlds** and the **authors** it answers correctly, and this asks the store anyway so
+//!   every fetch can be steered by the same account of what has changed -- see [`changed_since`].
+//!   The one difference from the wrapper is that the store writes a world's several primary authors
+//!   as several values rather than one comma-separated string, which [`LocationRow::location`]
+//!   rejoins.
 //!
-//! The one thing the wrapper answered that the store cannot -- a world's gallery, which is page
-//! content rather than properties -- is not published: reading it meant a second host and a second
-//! shape of answer for pictures nothing shows.
-//!
-//! Nothing here reads wiki markup. A subobject is structured data that happens to live on a wiki
-//! page, and this module asks for the same properties the wrapper would.
+//! A world's gallery is page content rather than properties, and is not published: reading it meant
+//! a second host and a second shape of answer for pictures nothing shows.
 //!
 //! [the wrapper]: https://github.com/ynoproject/wikiwrapper
 
@@ -36,22 +29,17 @@ use std::marker::PhantomData;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-/// Where the store answers its queries, and what [`changed_since`] asks about the wiki itself.
-/// Behind an edge that answers a plain request with a challenge page, which is what [`ORIGIN`] is
-/// for.
+/// Behind an edge that answers a plain request with a challenge page, which [`ORIGIN`] is for.
 const WIKI: &str = "https://yume.wiki/api.php";
 
 /// What the wiki's edge wants to see before it answers an API request rather than serving a
-/// challenge page: the explorer this program stands in for, which is what a request from here is
-/// on behalf of.
+/// challenge page: the explorer this program stands in for.
 const ORIGIN: &str = "https://explorer.yume.wiki";
 
-/// Yume 2kki's namespace on a wiki housing a dozen games under one installation. Every page a dump
-/// is built out of is in it, and nothing a dump cares about is outside it.
+/// Yume 2kki's namespace on a wiki housing a dozen games under one installation.
 const NAMESPACE: &str = "3002";
 
-/// Everything that can go wrong here is an HTTP request or the JSON it came back as, both of
-/// which `reqwest` already names.
+/// Everything that can go wrong here is an HTTP request or the JSON it came back as.
 pub type Error = reqwest::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -63,15 +51,12 @@ const LIMIT: u32 = 500;
 
 /// How far into a result set the store will look before it stops telling the truth: a request past
 /// this comes back with the first page and an offset that carries on counting, so there is nothing
-/// to trust and nothing to notice it by.
-///
-/// Every query here is shaped to stay under it, and one that does not is cut short with a
-/// complaint rather than quietly wrapped.
+/// to notice it by. Every query here is shaped to stay under it, and one that does not is cut short
+/// with a complaint rather than quietly wrapped.
 const MAX_OFFSET: u32 = 5000;
 
-/// Every release the wiki dates, newest first, patches included: a world's infobox names whichever
-/// release added it and half of those are patches, so a history with only the round numbers in it
-/// would fail to date them.
+/// Newest first, patches included: a world's infobox names whichever release added it and half of
+/// those are patches.
 pub async fn versions(http: &reqwest::Client) -> Result<Vec<Version>> {
     let rows = askargs::<VersionRow>(
         http,
@@ -95,13 +80,11 @@ pub async fn versions(http: &reqwest::Client) -> Result<Vec<Version>> {
 /// Every passage leaving a world whose title begins with one of `initials`, kept in those pieces.
 ///
 /// The question is cut up because the whole of it does not fit under [`MAX_OFFSET`]. A piece is
-/// every passage out of a world whose page begins with one character -- the store matches a page
-/// name with a wildcard -- so the pieces cannot overlap, and together the first characters of
-/// every world are every passage there is. The largest piece is a few hundred rows.
+/// every passage out of a world whose page begins with one character, so the pieces cannot overlap
+/// and together cover every passage there is; the largest is a few hundred rows.
 ///
-/// The pieces are kept apart because a passage belongs to the page that writes it up, so a piece
-/// is exactly what one edited world can invalidate: a soft sync re-asks the pieces the wiki says
-/// have moved and keeps the rest of the last answer.
+/// The pieces are kept apart because a passage belongs to the page that writes it up, so a piece is
+/// exactly what one edited world can invalidate: a soft sync re-asks only the moved pieces.
 pub async fn connections(
     http: &reqwest::Client,
     initials: BTreeSet<char>,
@@ -146,8 +129,7 @@ pub async fn locations(http: &reqwest::Client) -> Result<Vec<Location>> {
         .collect())
 }
 
-/// Sorted by the store rather than here, that being the order the dump has always published them
-/// in and an author list being something a reader shows as it comes.
+/// Sorted by the store rather than here, that being the order the dump has always published.
 pub async fn authors(http: &reqwest::Client) -> Result<Vec<Author>> {
     let rows: Vec<(String, AuthorRow)> = askargs(
         http,
@@ -171,19 +153,15 @@ pub async fn authors(http: &reqwest::Client) -> Result<Vec<Author>> {
         .collect())
 }
 
-/// Every page in Yume 2kki's namespace touched since `when`, an ISO 8601 instant.
+/// Every page in Yume 2kki's namespace touched since `when`, an ISO 8601 instant. What a soft sync
+/// steers by.
 ///
-/// What a soft sync steers by: rebuilding a dump means asking for sixteen hundred worlds and every
-/// passage between them, and on most days none of it has moved.
+/// Edits, new pages and log entries all count, so a world deleted or renamed reads as a change.
+/// Only Yume 2kki's namespace is looked at, which is the hole in it: a template or file the worlds
+/// are built out of lives elsewhere, and an edit to one changes what the store answers without any
+/// page here being touched. A full sync on start-up is the backstop.
 ///
-/// Edits, new pages and log entries all count, so a world deleted or renamed reads as a change the
-/// same as one written. Only Yume 2kki's namespace is looked at, the wiki being busy with a dozen
-/// other games -- which is also the hole in it: a template or a file the worlds are built out of
-/// lives elsewhere, and an edit to one changes what the store answers without any page here being
-/// touched. A full sync is the backstop, which is why a run does one when it comes up.
-///
-/// Titles come back without the namespace on the front, spelled as the rest of the program spells
-/// a world, and each once however many times it was edited.
+/// Titles come back without the namespace, each once however many times it was edited.
 pub async fn changed_since(http: &reqwest::Client, when: &str) -> Result<Vec<String>> {
     let mut titles = std::collections::BTreeSet::new();
     let mut carry: Option<String> = None;
@@ -227,7 +205,7 @@ pub struct Version {
     pub name: String,
     /// Everyone credited for it, in the store's own order.
     pub authors: Vec<String>,
-    /// The day it came out, ISO 8601. `None` for a release the store dates unreadably.
+    /// ISO 8601. `None` for a release the store dates unreadably.
     pub released: Option<String>,
 }
 
@@ -236,7 +214,7 @@ pub struct Version {
 pub struct Location {
     /// The English page title, which is the identity everything else refers to it by.
     pub title: String,
-    /// Where the wiki serves the world's headline picture from. Empty for a world with none.
+    /// Empty for a world the wiki has no headline picture for.
     pub location_image: String,
     /// As the game itself names it. Absent for the worlds the wiki has not recorded one for.
     pub original_name: Option<String>,
@@ -248,8 +226,7 @@ pub struct Location {
     /// The RPG Maker maps the world is built out of, by the number the game gives each. Empty for
     /// the three pages in the category whose infobox names none.
     pub map_ids: Vec<u32>,
-    /// The release the world first appeared in, as the version history names it. Empty for a page
-    /// in the Locations category that carries no infobox at all.
+    /// As the version history names it. Empty for a page in the category with no infobox at all.
     pub version_added: String,
     /// Every release that changed it, each optionally suffixed with what kind of change it was.
     pub versions_updated: Vec<String>,
@@ -263,7 +240,7 @@ pub struct Location {
 pub struct Bgm {
     /// Where the wiki serves the file from. Empty for a track it holds no file of.
     pub path: String,
-    /// The track's own name, which is usually its filename in the game.
+    /// Usually its filename in the game.
     pub title: Option<String>,
     /// Where in the world it plays.
     pub label: Option<String>,
@@ -276,9 +253,8 @@ pub struct LocationMap {
     pub caption: String,
 }
 
-/// Built by hand out of the store's rows, like everything else here: a property in an answer is a
-/// list of values under a name of the wiki's choosing, so the shape off the wire is not the shape
-/// anything wants to read.
+/// A property in an answer is a list of values under a name of the wiki's choosing, so the shape
+/// off the wire is not the shape anything wants to read.
 pub struct Connection {
     /// Title of the world it leads out of.
     pub origin: String,
@@ -290,8 +266,7 @@ pub struct Connection {
     pub unlock_condition: Option<String>,
     /// The effects a `Needs Effect` passage wants the player to be wearing.
     pub effects_needed: Vec<String>,
-    /// Every season a `Seasonal` passage is open in. The wiki writes one value per season, so a
-    /// passage open in three has three.
+    /// The wiki writes one value per season, so a passage open in three has three.
     pub seasons_available: Vec<String>,
     /// The odds a `Chance` passage opens at, as the wiki writes them.
     pub chance_percentage: Option<String>,
@@ -307,7 +282,6 @@ pub struct Author {
     pub original_name: Vec<String>,
 }
 
-/// One page of the wiki's answer to [`changed_since`].
 #[derive(Deserialize)]
 struct RecentChanges {
     query: Changes,
@@ -327,7 +301,6 @@ struct Changes {
     recentchanges: Vec<Change>,
 }
 
-/// Only the page a change happened to is read.
 #[derive(Deserialize)]
 struct Change {
     title: String,
@@ -335,13 +308,12 @@ struct Change {
 
 /// One request, and the ones after it the answer says are still to come.
 ///
-/// The store pages by row offset rather than by cursor, so walking one is counting. It stops at
-/// the last page, and short of [`MAX_OFFSET`] with a complaint: past that the answers are the
-/// first page over again, and taking them would be worse than missing them.
+/// The store pages by row offset rather than by cursor. This stops at the last page, and short of
+/// [`MAX_OFFSET`] with a complaint: past that the answers are the first page over again, and taking
+/// them would be worse than missing them.
 ///
-/// Each row comes back with the subject it was found on -- for a page query the page's title, for
-/// a subobject query a name of the store's own devising. Only [`locations`] has any use for it;
-/// the rest throw it away, a subobject saying what it belongs to in its own properties.
+/// Each row comes back with the subject it was found on -- a page title, or a subobject name of the
+/// store's own devising. Only [`locations`] has any use for it.
 async fn askargs<R: DeserializeOwned>(
     http: &reqwest::Client,
     conditions: &str,
@@ -377,8 +349,7 @@ async fn askargs<R: DeserializeOwned>(
                 .map(|(name, found)| (name, found.printouts))
         }));
         match answer.next {
-            // Only forwards: an offset that has stopped growing is the store having wrapped, and
-            // whatever it hands back next has already been read.
+            // Only forwards: an offset that has stopped growing is the store having wrapped.
             Some(next) if next > offset && next <= MAX_OFFSET => offset = next,
             Some(next) if next > MAX_OFFSET => {
                 tracing::warn!("{conditions} is too large to read past row {next}");
@@ -389,7 +360,6 @@ async fn askargs<R: DeserializeOwned>(
     }
 }
 
-/// The rows, and where the ones after them start.
 #[derive(Deserialize)]
 struct Answer<R> {
     query: Found<R>,
@@ -399,8 +369,7 @@ struct Answer<R> {
 
 #[derive(Deserialize)]
 struct Found<R> {
-    /// Keyed by the page or subobject a row was found on, which this program has no use for: every
-    /// row says what it belongs to in its own fields.
+    /// Keyed by the page or subobject a row was found on.
     results: Vec<HashMap<String, Subject<R>>>,
 }
 
@@ -409,27 +378,25 @@ struct Subject<R> {
     printouts: R,
 }
 
-/// Only the title of a page the store points at is read.
 #[derive(Deserialize)]
 struct Page {
     fulltext: String,
 }
 
 impl Page {
-    /// The title as the rest of the program spells it.
     fn title(&self) -> String {
         without_namespace(&self.fulltext)
     }
 }
 
-/// Without the namespace the store writes into every title, which is how every other part of this
-/// program spells a world.
+/// Without the namespace the store writes into every title, which is how the rest of this program
+/// spells a world.
 pub fn without_namespace(title: &str) -> String {
     title.strip_prefix(PREFIX).unwrap_or(title).to_owned()
 }
 
-/// Refuses a sequence with more than one element in debug builds only, to catch a property the
-/// wiki writes twice where the dump publishes one. See [`one`].
+/// Refuses a sequence of more than one element in debug builds only, to catch a property the wiki
+/// writes twice where the dump publishes one.
 fn first<'de, D, T>(property: D) -> std::result::Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -485,8 +452,8 @@ where
     Ok(Cell::<T>::deserialize(property)?.item)
 }
 
-/// How the store keeps an author's own spelling of their name. Only the text is read; the language
-/// is always the one the name is written in.
+/// An author's own spelling of their name. Only the text is read; the language is always the one
+/// the name is written in.
 #[derive(Deserialize)]
 struct Monolingual {
     #[serde(rename = "Text", default, deserialize_with = "first_in_cell")]
@@ -500,9 +467,8 @@ struct Date {
 }
 
 impl Date {
-    /// In the shape the dump writes its own stamps in. `None` for a timestamp that will not parse
-    /// or does not name a moment, which is a release the reader shows undated rather than a sync
-    /// worth failing.
+    /// In the shape the dump writes its own stamps in. `None` for an unparseable timestamp, which
+    /// is a release the reader shows undated rather than a sync worth failing.
     fn released(&self) -> Option<String> {
         let seconds = self.timestamp.parse().ok()?;
         Some(crate::sync::iso(
@@ -546,20 +512,19 @@ struct LocationRow {
 }
 
 impl LocationRow {
-    /// The world this row describes, under the title the subject was found at.
     fn location(self, title: String) -> Location {
         Location {
             title,
             location_image: self.image.unwrap_or_default(),
             original_name: self.japanese,
             // The dump publishes one author per world and a reader groups worlds by that string.
-            // Also exactly what the wrapper hands back for the five worlds credited to two people.
+            // Also what the wrapper hands back for the five worlds credited to two people.
             primary_author: (!self.authors.is_empty()).then(|| self.authors.join(", ")),
             bgms: self.bgms.into_iter().map(BgmRow::bgm).collect(),
             location_maps: self.maps.into_iter().map(MapRow::map).collect(),
             map_ids: self.map_ids.into_iter().filter_map(|row| row.id).collect(),
-            // Empty rather than absent for the handful of pages in the Locations category with no
-            // infobox at all: worlds the wiki has not written up, not worlds this failed to read.
+            // Empty rather than absent for the pages with no infobox at all: worlds the wiki has
+            // not written up, not worlds this failed to read.
             version_added: self.added.unwrap_or_default(),
             versions_updated: self.updated,
             version_removed: self.removed,
@@ -568,16 +533,14 @@ impl LocationRow {
     }
 }
 
-/// The store also writes an annotation beside the number -- `Main Area`, `Entrance` -- naming
-/// which part of the world that map is. Not read: the number is there to say which maps a world
-/// is, and nothing published names them one at a time.
+/// The store also writes an annotation beside the number naming which part of the world that map
+/// is. Not read: nothing published names maps one at a time.
 #[derive(Deserialize)]
 struct MapIdRow {
     #[serde(rename = "Has map ID", default, deserialize_with = "first_in_cell")]
     id: Option<u32>,
 }
 
-/// One track heard in a world, as a subobject of the world's page.
 #[derive(Deserialize)]
 struct BgmRow {
     #[serde(rename = "BGM/Title", default, deserialize_with = "first_in_cell")]
@@ -600,7 +563,6 @@ impl BgmRow {
     }
 }
 
-/// One map the wiki draws of a world, also a subobject of the world's page.
 #[derive(Deserialize)]
 struct MapRow {
     #[serde(
@@ -609,8 +571,8 @@ struct MapRow {
         deserialize_with = "first_in_cell"
     )]
     caption: Option<String>,
-    /// The store also names the `File:` page the picture lives on, which would need a request each
-    /// to resolve. This is the same thing already resolved.
+    /// The store also names the `File:` page, which would need a request each to resolve. This is
+    /// the same thing already resolved.
     #[serde(rename = "Has image path", default, deserialize_with = "first_in_cell")]
     path: Option<String>,
 }
@@ -624,7 +586,6 @@ impl MapRow {
     }
 }
 
-/// One credited person's subobject on the wiki's Authors page.
 #[derive(Deserialize)]
 struct AuthorRow {
     #[serde(rename = "Author/Name", default, deserialize_with = "first")]
@@ -633,7 +594,6 @@ struct AuthorRow {
     original: Vec<Monolingual>,
 }
 
-/// One passage's subobject, in the store's own property names.
 #[derive(Deserialize)]
 struct ConnectionRow {
     #[serde(rename = "Connection/Origin", default, deserialize_with = "first")]
@@ -650,7 +610,7 @@ struct ConnectionRow {
     unlock_condition: Option<String>,
     #[serde(rename = "Connection/Effects needed", default)]
     effects_needed: Vec<String>,
-    /// As of writing 3 connections may be accessed in more than one season.
+    /// As of writing, 3 connections may be accessed in more than one season.
     #[serde(rename = "Connection/Season available", default)]
     seasons_available: Vec<String>,
     #[serde(
@@ -664,7 +624,7 @@ struct ConnectionRow {
 }
 
 impl ConnectionRow {
-    /// The passage this row describes, or `None` for a row missing an end.
+    /// `None` for a row missing an end.
     fn passage(self) -> Option<Connection> {
         Some(Connection {
             origin: self.origin?.title(),
@@ -674,7 +634,7 @@ impl ConnectionRow {
             effects_needed: self.effects_needed,
             seasons_available: self.seasons_available,
             chance_percentage: self.chance_percentage,
-            // Written as the store's own truth value rather than as JSON's.
+            // The store's own truth value rather than JSON's.
             is_removed: self.is_removed.is_some_and(|flag| flag == "t"),
         })
     }
@@ -682,10 +642,8 @@ impl ConnectionRow {
 
 #[cfg(test)]
 mod tests {
-    /// The store's answer, as it actually writes one: a list of subjects keyed by the subobject
-    /// they were found on, every property a list however many values it holds, and pages written
-    /// with the namespace on the front. A shape misread here is a passage silently missing from
-    /// the dump rather than a sync that fails, so the shape is pinned to the wiki's own bytes.
+    /// A shape misread here is a passage silently missing from the dump rather than a sync that
+    /// fails, so it is pinned to the wiki's own bytes.
     #[test]
     fn a_passage_is_read_out_of_the_store_as_the_store_writes_it() {
         let answer = r#"{"query":{"results":[{"Yume 2kki:Snow Village#Connection-Ice Cave":{
@@ -714,16 +672,15 @@ mod tests {
         assert_eq!(passage.destination, "Ice Cave");
         assert_eq!(passage.attributes, ["Seasonal", "Chance"]);
         // Every season the wiki wrote is kept: which one the dump publishes is `crate::model`'s
-        // decision to make out loud, not this reader's to make by dropping values.
+        // decision, not this reader's to make by dropping values.
         assert_eq!(passage.seasons_available, ["Fall", "Summer", "Winter"]);
         assert_eq!(passage.chance_percentage.as_deref(), Some("10%"));
         assert!(!passage.is_removed, "the store writes its own truth values");
     }
 
-    /// A field read as one value is a claim about the wiki, and a debug build holds the wiki to
-    /// it: a property written twice where the dump publishes one is refused, so the model is
-    /// widened rather than the second value quietly lost. A release build takes the first and
-    /// carries on, which is why this is pinned only where the check is on.
+    /// A field read as one value is a claim about the wiki, and a debug build holds it to that so
+    /// the model is widened rather than the second value quietly lost. A release build takes the
+    /// first and carries on.
     #[test]
     fn a_property_the_dump_publishes_once_is_refused_when_the_wiki_writes_two() {
         let one_each = r#"{"query":{"results":[{"Yume 2kki:Authors# 56aa30":{"printouts":{
@@ -743,10 +700,9 @@ mod tests {
         );
     }
 
-    /// A world's picture, music and maps are not properties of its page but subobjects hanging
-    /// off it, and the store writes a subobject's fields differently from a page's: the values are
-    /// under `item`, beside a description of the property they belong to. Read that wrong and a
-    /// world silently loses its music. The store's own bytes, for one world with one of each.
+    /// A world's picture, music and maps are subobjects rather than properties, and the store
+    /// writes a subobject's fields under `item` beside a description of the property. Read that
+    /// wrong and a world silently loses its music.
     #[test]
     fn a_world_is_read_out_of_the_store_with_what_hangs_off_it() {
         let answer = r#"{"query":{"results":[{"Yume 2kki:3D Structures Path":{"printouts":{
@@ -790,20 +746,17 @@ mod tests {
         let bgm = world.bgms.first().expect("the one track");
         assert_eq!(bgm.title.as_deref(), Some("46202"));
         assert_eq!(bgm.label.as_deref(), Some("Aooh's Trap"));
-        // The wiki names far more tracks than it holds recordings of, and the dump publishes the
-        // address as a string: a track with no file is an empty one, not a missing field.
+        // The dump publishes the address as a string: a track with no file is an empty one.
         assert_eq!(bgm.path, "");
         let map = world.location_maps.first().expect("the one map");
         assert_eq!(map.caption, "Map of 3D Structures Path");
         assert!(map.path.ends_with("3D_Structures_Path_map.png"));
-        // A number rather than a string, in the order the wiki lists them, and the annotation
-        // beside it is read past rather than into: see [`MapIdRow`].
+        // A number rather than a string, in the order the wiki lists them.
         assert_eq!(world.map_ids, [1344, 884]);
     }
 
-    /// The store writes a world's several primary authors as several values; the dump publishes
-    /// one string, and a reader groups the worlds by it. The wrapper joined them with a comma, and
-    /// so does this -- five worlds' authorship depends on it.
+    /// The dump publishes one string and a reader groups the worlds by it. The wrapper joined them
+    /// with a comma, and so does this -- five worlds' authorship depends on it.
     #[test]
     fn a_world_credited_to_two_people_is_credited_to_both() {
         let row = |authors: &[&str]| super::LocationRow {
@@ -825,16 +778,14 @@ mod tests {
                 .as_deref(),
             Some("FUMO, Peperoncino III from Yamada Pref.")
         );
-        // A world the wiki credits to nobody has no author rather than an empty one, which is
-        // what keeps it out of a reader's list of authors.
+        // No author rather than an empty one, which keeps it out of a reader's author list.
         assert_eq!(
             row(&[]).location("FC Caverns".to_owned()).primary_author,
             None
         );
     }
 
-    /// An author's own spelling of their name is held as text in a particular language, which the
-    /// store writes as a little object rather than as a string.
+    /// The store writes a name-in-a-language as a little object rather than as a string.
     #[test]
     fn an_author_is_read_under_both_the_names_the_wiki_gives_them() {
         let answer = r#"{"query":{"results":[{"Yume 2kki:Authors# 56aa30":{"printouts":{
@@ -863,8 +814,8 @@ mod tests {
         );
     }
 
-    /// A release is dated in seconds and published in the same stamp the dump stamps itself with,
-    /// since a reader that takes the day off one has to be able to take it off the other.
+    /// The same stamp the dump stamps itself with: a reader that takes the day off one has to be
+    /// able to take it off the other.
     #[test]
     fn a_release_is_dated_the_way_the_dump_dates_itself() {
         let dated = |timestamp: &str| {
@@ -880,10 +831,8 @@ mod tests {
         assert_eq!(dated("").as_deref(), None, "an undated release is undated");
     }
 
-    /// What a soft sync reads and how far it reads: the pages come out of this list, and the
-    /// continuation is nested under `continue` rather than sitting beside the results, so a
-    /// misread there would stop the walk one page in and leave the rest of a week's editing
-    /// unnoticed. Both answers, as the wiki actually writes them.
+    /// The continuation is nested under `continue` rather than sitting beside the results, so a
+    /// misread would stop the walk one page in and leave the rest of a week's editing unnoticed.
     #[test]
     fn the_changed_pages_are_read_out_of_the_wiki_with_the_page_after_them() {
         let quiet = r#"{"batchcomplete":true,"query":{"recentchanges":[]}}"#;
@@ -909,8 +858,8 @@ mod tests {
             .iter()
             .map(|change| super::without_namespace(&change.title))
             .collect();
-        // Without the namespace, which is how the rest of the program spells a world -- and how a
-        // sync recognises the two pages that are not worlds at all.
+        // Without the namespace: how the rest of the program spells a world, and how a sync
+        // recognises the two pages that are not worlds at all.
         assert_eq!(titles, ["Snow Village", "Authors"]);
         assert!(busy.carry.and_then(|carry| carry.rccontinue).is_some());
     }

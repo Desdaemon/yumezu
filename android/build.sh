@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
-# Builds and signs an apk out of the crate, using only the Android SDK's own command line tools:
-# no Gradle, no Android Studio, and no Java source. That is possible because the app is entirely
-# native -- see `AndroidManifest.xml` -- so the apk is a zip of one shared library, the assets it
-# reads, and a compiled manifest, which `aapt2`, `zipalign` and `apksigner` are enough to make.
+# Builds and signs an apk using only the Android SDK's command line tools: no Gradle, no Android
+# Studio, no Java source. The app is entirely native -- see `AndroidManifest.xml` -- so the apk is a
+# zip of one shared library, the assets it reads, and a compiled manifest.
 #
-# Wants ANDROID_HOME (or ANDROID_SDK_ROOT) pointing at an SDK that has platforms, build-tools and
-# an ndk installed. Everything it writes goes under `target/android`.
+# Wants ANDROID_HOME (or ANDROID_SDK_ROOT) pointing at an SDK that has platforms, build-tools and an
+# ndk installed. Everything it writes goes under `target/android`.
 set -euo pipefail
 
 readonly ABI=arm64-v8a
 readonly TRIPLE=aarch64-linux-android
-# The oldest Android this runs on, and so the version of the platform library the code is linked
-# against. Also what the manifest declares, so the two cannot drift apart.
+# The oldest Android this runs on, and so the platform library the code is linked against. Also what
+# the manifest declares, so the two cannot drift apart.
 readonly MIN_SDK=24
 
 cd "$(dirname "$0")/.."
@@ -31,23 +30,21 @@ for dir in "$TOOLS" "$NDK" "$PLATFORM"; do
 done
 readonly BIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
 
-# The ndk's clang is both the compiler for the C that rustls' crypto is written in and the linker
-# for the whole library, and it has to be told the api level in its own name rather than a flag.
+# The ndk's clang is both the compiler for rustls' crypto and the linker for the whole library, and
+# it has to be told the api level in its own name rather than a flag.
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$BIN/$TRIPLE$MIN_SDK-clang
 export CC_aarch64_linux_android=$BIN/$TRIPLE$MIN_SDK-clang
 export AR_aarch64_linux_android=$BIN/llvm-ar
-# `production` for the same reason `just dist` builds with it: it is what points the app at the
-# published dump rather than at a `dreamweaver` on localhost, and there is no localhost on a
-# phone. See `world::DUMP`.
+# `production` points the app at the published dump rather than a `dreamweaver` on localhost, and
+# there is no localhost on a phone.
 cargo build --release --lib --features production --target "$TRIPLE"
 
-# The apk is assembled in a staging tree whose layout *is* the apk's: `lib/<abi>` is where the
-# framework looks for the library named in the manifest, and `assets` is what the AssetManager in
-# `src/thumbnails.rs` reads through.
+# The staging tree's layout *is* the apk's: `lib/<abi>` is where the framework looks for the library
+# named in the manifest, and `assets` is what the AssetManager in `src/thumbnails.rs` reads through.
 rm -rf "$OUT/staging"
 mkdir -p "$OUT/staging/lib/$ABI" "$OUT/staging/assets/static"
 # Stripped on the way in: the debug symbols are two thirds of the library and nothing on a phone
-# reads them. `target/` keeps the unstripped copy for anyone symbolising a crash out of logcat.
+# reads them. `target/` keeps the unstripped copy for symbolising a crash out of logcat.
 "$BIN/llvm-strip" -o "$OUT/staging/lib/$ABI/libyumezu.so" \
     "$ROOT/target/$TRIPLE/release/libyumezu.so"
 # Absent until `just thumbnails` has been run, and the app draws the graph without pictures then.
@@ -67,7 +64,7 @@ cp "$ROOT/static/unknown_location.png" "$OUT/staging/assets/static/" 2>/dev/null
     --target-sdk-version 34
 
 # Stored rather than deflated, because the manifest says `extractNativeLibs="false"`: the loader
-# maps the library straight out of the apk, which it can only do if it is uncompressed and aligned.
+# maps the library straight out of the apk, which needs it uncompressed and aligned.
 (cd "$OUT/staging" && zip -q -X -Z store "$OUT/unaligned.apk" "lib/$ABI/libyumezu.so")
 "$TOOLS/zipalign" -f -p 4 "$OUT/unaligned.apk" "$OUT/yumezu.apk"
 
@@ -77,14 +74,13 @@ cp "$ROOT/static/unknown_location.png" "$OUT/staging/assets/static/" 2>/dev/null
 #   keytool -genkeypair -v -keystore android/production.jks -alias yumezu \
 #       -keyalg RSA -keysize 4096 -validity 10000
 #
-# which asks for a password and for the name to put in the certificate. Keep both, and back the
-# file up outside this directory: an apk signed with a different key is a different app to
-# Android and to the Play Store, and cannot upgrade one already installed. The password comes
-# from YUMEZU_KEYSTORE_PASS if that is set, and otherwise apksigner asks for it at the terminal,
-# so the secret need not be written into a shell profile or the shell's history.
+# which asks for a password and for the name to put in the certificate. Keep both, and back the file
+# up outside this directory: an apk signed with a different key is a different app to Android and to
+# the Play Store, and cannot upgrade one already installed. The password comes from
+# YUMEZU_KEYSTORE_PASS, and otherwise apksigner asks for it at the terminal.
 #
-# Until that file exists the build falls back to the same throwaway key the SDK's own tooling
-# signs debug builds with: enough to install on your own device, not enough to publish.
+# Until that file exists the build falls back to the throwaway key the SDK signs debug builds with:
+# enough to install on your own device, not enough to publish.
 readonly RELEASE_KEY=${YUMEZU_KEYSTORE:-$ROOT/android/production.jks}
 if [[ -f $RELEASE_KEY ]]; then
     pass=()

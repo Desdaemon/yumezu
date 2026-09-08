@@ -1,8 +1,8 @@
-//! The Yume 2kki world graph, as published by yume.wiki and served to this app as `data.json`
-//! by `dreamweaver`. See [`load`].
+//! The Yume 2kki world graph, as published by yume.wiki and served to this app as `data.json` by
+//! `dreamweaver`. See [`load`].
 //!
-//! The dump carries far more per world than a layout needs -- images, BGM, version history -- so
-//! only the fields the visualization draws are deserialized.
+//! The dump carries far more per world than a layout needs, so only the fields the visualization
+//! draws are deserialized.
 
 use egui_material_icons::{
     MaterialIcon,
@@ -13,13 +13,11 @@ use serde::Deserialize;
 use super::i18n::t;
 
 /// `dreamweaver`, on the machine the app is running on. Fetched rather than compiled in, so a
-/// build is not a snapshot of the wiki -- worlds arrive weekly. The cost is a load the first frame
-/// has to wait out, which is what the app's loading frame is for.
+/// build is not a snapshot of the wiki -- worlds arrive weekly.
 #[cfg(all(not(target_family = "wasm"), not(feature = "production")))]
 const SERVER: &str = "http://127.0.0.1:5000";
 
-/// This project's own `dreamweaver`, deployed: same program, routes and document as a development
-/// build reaches locally.
+/// This project's own `dreamweaver`, deployed.
 ///
 /// The reference explorer at `explorer.yume.wiki` answers the same two routes but is not a
 /// fallback: its ids are its database's insert order and `dreamweaver`'s are the game's map
@@ -48,25 +46,23 @@ pub struct Dump {
     #[serde(rename = "worldData")]
     pub worlds: Vec<World>,
     /// How many cells the thumbnail atlas has to hold. Carried through [`Dump::showing`] rather
-    /// than measured again, because a world's cell is its place in the whole dump and a frontier
-    /// keeps only part of it. See [`World::cell`].
+    /// than measured again: a world's cell is its place in the whole dump, and a frontier keeps
+    /// only part of it.
     #[serde(skip)]
     pub packed: usize,
     /// Newest first. Most added no world at all, so the catalog is built out of
-    /// [`Dump::versions`] rather than out of this directly.
+    /// [`Dump::versions`] rather than this directly.
     #[serde(rename = "versionInfoData")]
     releases: Vec<Release>,
     /// Read only for the Japanese names: who made what is settled by the worlds themselves, in
     /// [`World::author`].
     #[serde(rename = "authorInfoData", default)]
     credits: Vec<Credit>,
-    /// When the dump was built, ISO 8601. Shown in the settings tab, so a reader can tell how old
-    /// the graph in front of them is.
+    /// When the dump was built, ISO 8601.
     #[serde(rename = "lastUpdate", default)]
     pub last_update: Option<String>,
     /// When the wiki was last read whole rather than only where it had changed: a dump can be
-    /// fresh and still be missing an edit an incremental read did not think to ask about. See
-    /// `crates/dreamweaver`.
+    /// fresh and still be missing an edit an incremental read did not ask about.
     #[serde(rename = "lastFullUpdate", default)]
     pub last_full_update: Option<String>,
 }
@@ -80,15 +76,15 @@ struct Credit {
 
 #[derive(Clone, Deserialize)]
 pub struct World {
-    /// As the wiki's English pages name it, which is also what its page is at: see [`wiki_url`].
+    /// As the wiki's English pages name it, which is also what its page is at. See [`wiki_url`].
     pub title: String,
     /// As the game itself names it, which the dump publishes for all but a few dozen worlds.
     #[serde(rename = "titleJP")]
     title_jp: Option<String>,
     pub author: String,
     /// Where the wiki serves this world's picture from, at the size the wiki holds it. Packed into
-    /// the atlas by `tools/atlas`, and fetched from here again once the view comes close enough
-    /// for the atlas to have run out of detail: see `detail`.
+    /// the atlas by `tools/atlas`, and fetched from here again once the view is close enough for
+    /// the atlas to have run out of detail. See `detail`.
     #[serde(rename = "filename")]
     pub image: String,
     /// `None` for the few worlds the wiki does not date. See [`Dump::versions`].
@@ -100,29 +96,26 @@ pub struct World {
     map_url: Option<String>,
     #[serde(rename = "mapLabel")]
     map_label: Option<String>,
-    /// Whether the dump says a reader is not meant to be shown this world -- the debug room, and
-    /// whatever else the wiki's own explorer holds back as a spoiler. Read only by [`hide`], which
-    /// takes those worlds out before anything else sees the dump.
+    /// Whether the dump says a reader is not meant to be shown this world. Read only by [`hide`],
+    /// which takes those worlds out before anything else sees the dump.
     #[serde(default)]
     secret: bool,
     pub connections: Vec<Connection>,
     /// Its place among the worlds the app draws, fixed when the dump was read and kept through
-    /// every later filtering of it. Written by [`parse`] and by nothing else. See [`World::cell`].
+    /// every later filtering of it. Written by [`parse`] and nothing else.
     #[serde(skip)]
     packed_at: usize,
-    /// Whether the player has never stood here, in a run only showing them where they have been.
-    /// Such a world is drawn only because it touches one they have, so it is named for what it is
-    /// rather than where, wears the placeholder picture, and has no maps and no page to open. See
-    /// [`Dump::showing`].
+    /// Whether the player has never stood here, in a run showing only where they have been. Such a
+    /// world is drawn because it touches one they have: named for what it is rather than where,
+    /// wearing the placeholder picture, with no maps and no page to open. See [`Dump::showing`].
     #[serde(skip)]
     unknown: bool,
 }
 
 /// What a world the player has not been to is called instead of its name.
 ///
-/// Held rather than built where it is read, because [`Title::show`] hands out a borrow and a
-/// message built on the spot would not outlive the call. One slot per language, so choosing a
-/// language renames these worlds along with everything else on screen.
+/// Held rather than built where it is read, because [`Title::show`] hands out a borrow that a
+/// message built on the spot would not outlive. One slot per language.
 fn unvisited() -> &'static str {
     static ENGLISH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     static JAPANESE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -133,26 +126,22 @@ fn unvisited() -> &'static str {
     held.get_or_init(|| t!("unvisited-location"))
 }
 
-/// Both names are kept rather than the one being shown, because they are not read for the same
-/// thing: the wiki's own pages are named in English whatever is on screen, and a reader may know a
-/// world by either.
+/// Both names are kept rather than the one on screen: the wiki's own pages are named in English
+/// whatever the language, and a reader may know a world by either.
 pub struct Title {
     /// Always there, and always what [`wiki_url`] is given.
     pub en: String,
     jp: Option<String>,
     /// Whether the names are held back, for a world the player has not been to. Both are still
-    /// carried -- the graph is built out of the same dump either way -- and neither is shown,
-    /// searched, or opened. See [`Dump::showing`].
+    /// carried, and neither is shown, searched, or opened.
     unknown: bool,
 }
 
 impl Title {
-    /// The Japanese name while the app speaks Japanese and the dump has one, and the English one
-    /// otherwise. Read rather than stored, so choosing a language renames every world on screen
-    /// without anything being rebuilt.
+    /// Read rather than stored, so choosing a language renames every world on screen without
+    /// anything being rebuilt.
     pub fn show(&self) -> &str {
         if self.unknown {
-            // Here rather than at each caller, so no reading of the name can miss it.
             return unvisited();
         }
         match &self.jp {
@@ -161,7 +150,7 @@ impl Title {
         }
     }
 
-    /// Whether this world may be named, searched for, and looked up. See [`Title::unknown`].
+    /// Whether this world may be named, searched for, and looked up.
     pub fn known(&self) -> bool {
         !self.unknown
     }
@@ -170,7 +159,7 @@ impl Title {
     /// fits best. Both are searched whichever is shown, so a reader who knows a world by one does
     /// not have to switch language to find it.
     ///
-    /// `needle` must already be lowercased, one being matched against every world.
+    /// `needle` must already be lowercased.
     pub fn find(&self, needle: &str) -> Option<(usize, usize)> {
         if self.unknown {
             return None;
@@ -181,8 +170,7 @@ impl Title {
     }
 
     /// The two wikis name their pages after their own name for a world, so a name is only ever
-    /// asked of the wiki that wrote it. The few dozen worlds the dump leaves unnamed in Japanese
-    /// have no page on the Japanese wiki to open.
+    /// asked of the wiki that wrote it.
     pub fn wiki_url(&self) -> String {
         match &self.jp {
             Some(jp) if super::i18n::speaking_japanese() => yume2kki_t_url(jp),
@@ -218,15 +206,14 @@ impl World {
         }
     }
 
-    /// `None` for a world the player has not been to, which wears the atlas's placeholder rather
-    /// than its own picture. See `thumbnails::cells`.
+    /// `None` for a world the player has not been to, which wears the atlas's placeholder.
     pub fn cell(&self) -> Option<usize> {
         (!self.unknown).then_some(self.packed_at)
     }
 
     /// In the order the wiki lists them, and empty for the few hundred worlds it has drawn none
-    /// of. The two lists are published in step but walked together rather than trusted to be: a
-    /// map the wiki left uncaptioned is one this would otherwise panic on.
+    /// of. The two lists are walked together rather than trusted to be in step: a map the wiki left
+    /// uncaptioned would otherwise panic here.
     pub fn maps(&self) -> Vec<Map> {
         let (Some(urls), Some(labels)) = (&self.map_url, &self.map_label) else {
             return Vec::new();
@@ -260,11 +247,10 @@ pub struct Version {
     pub worlds: Vec<usize>,
 }
 
-/// Both wikis list one person's whole body of work but keep it in different shapes, so which to
-/// open is [`Author::wiki_url`]'s to answer rather than the caller's.
+/// Both wikis list one person's whole body of work but in different shapes, so which to open is
+/// [`Author::wiki_url`]'s to answer rather than the caller's.
 pub struct Author {
-    /// Read the same way a world's is: the English one addresses their page, either one finds
-    /// them.
+    /// The English one addresses their page; either one finds them.
     pub name: Title,
     /// In world order.
     pub worlds: Vec<usize>,
@@ -285,20 +271,17 @@ impl Author {
 pub struct Connection {
     #[serde(rename = "targetId")]
     pub target_id: usize,
-    /// What the connection demands and which way it can be walked, as the bitfield the wiki
-    /// publishes. See [`Gate`] and [`flag`].
+    /// What the connection demands and which way it can be walked, as the wiki's own bitfield.
     #[serde(rename = "type")]
     pub flags: u16,
-    /// The wiki's own words for a demand, keyed by the flag making it: the effects to be wearing,
-    /// the odds, the season, or the sentence a locked condition is written out as. Most
-    /// connections demand nothing and carry none.
+    /// The wiki's own words for a demand, keyed by the flag making it. Most connections demand
+    /// nothing and carry none.
     #[serde(rename = "typeParams", default)]
     params: std::collections::HashMap<u16, TypeParams>,
 }
 
-/// The dump publishes a Japanese rendering beside the English, but only for the seasons, and
-/// those are four fixed words this app names for itself (`gate-seasonal-detail`), so serde skips
-/// it.
+/// The dump's Japanese rendering is only ever the four seasons, which this app names for itself
+/// (`gate-seasonal-detail`), so serde skips it.
 #[derive(Clone, Deserialize)]
 struct TypeParams {
     params: Option<String>,
@@ -323,8 +306,7 @@ impl Connection {
 pub struct Ask {
     pub gate: Gate,
     /// `None` where the wiki writes no words, and always for a direction that is inferred rather
-    /// than listed: nothing was written about a listing that does not exist. See
-    /// [`walkable_steps`].
+    /// than listed. See [`walkable_steps`].
     detail: Option<String>,
 }
 
@@ -374,8 +356,8 @@ impl Ask {
     }
 }
 
-/// The connection flags this module reads, from the wiki's own `ConnType`. The dump uses two more
-/// -- `SHORTCUT` and `TRACKED` -- which describe a connection rather than gating or pointing it.
+/// The connection flags this module reads, from the wiki's own `ConnType`. The two it leaves out,
+/// `SHORTCUT` and `TRACKED`, describe a connection rather than gating or pointing it.
 pub mod flag {
     /// Walkable from the world that lists it, never back.
     pub const ONE_WAY: u16 = 1 << 0;
@@ -407,9 +389,8 @@ pub enum Gate {
     /// Unlocked from the opposite entrance.
     Locked,
     /// Also where a shortcut comes out. The reference only ever admits [`flag::EXIT_POINT`]
-    /// together with the whole locked group, so it belongs at that group's strictest end rather
-    /// than beside [`Gate::Locked`], which would let a route through it sooner than the reference
-    /// would.
+    /// together with the whole locked group, so it belongs at that group's strictest end: beside
+    /// [`Gate::Locked`] it would let a route through sooner than the reference would.
     LockedCondition,
     /// Leads to an isolated section of the world at the far end.
     DeadEnd,
@@ -419,8 +400,8 @@ pub enum Gate {
 }
 
 impl Gate {
-    /// Harshest wins where a connection carries several: they are demands to be met together, so
-    /// the route is only as free as its strictest one.
+    /// Harshest wins: several flags are demands to be met together, so the route is only as free
+    /// as its strictest one.
     fn of(flags: u16) -> Gate {
         [
             (flag::DEAD_END, Gate::DeadEnd),
@@ -439,8 +420,7 @@ impl Gate {
         .map_or(Gate::Free, |(_, gate)| gate)
     }
 
-    /// The dump writes words for exactly these four; for the rest [`Gate::asks`] is all there is
-    /// to read out.
+    /// The dump writes words for exactly these four.
     fn worded(self) -> Option<u16> {
         match self {
             Gate::Effect => Some(flag::EFFECT),
@@ -451,8 +431,8 @@ impl Gate {
         }
     }
 
-    /// Empty for a condition that asks nothing, which is most of them: a row with nothing after
-    /// the title is a way a player can simply walk.
+    /// Empty for a condition that asks nothing: a row with nothing after the title is a way a
+    /// player can simply walk.
     fn asks(self) -> String {
         match self {
             Gate::Free => String::new(),
@@ -467,8 +447,8 @@ impl Gate {
     }
 }
 
-/// One connection of a world, from that world's side. A direction with no gate at all is a
-/// direction there is no way to walk, which is what makes a connection one-way.
+/// One connection of a world, from that world's side. A direction with no gate is a direction
+/// there is no way to walk, which is what makes a connection one-way.
 pub struct Step {
     pub world: usize,
     /// `None` where there is no way there.
@@ -478,8 +458,7 @@ pub struct Step {
 }
 
 impl Step {
-    /// The arrow the panel draws before a title. [`ICON_BLOCK`] is the connection the dump lists
-    /// but neither side can walk.
+    /// [`ICON_BLOCK`] is the connection the dump lists but neither side can walk.
     pub fn arrow(&self) -> MaterialIcon {
         match (self.out.is_some(), self.back.is_some()) {
             (true, true) => ICON_ARROW_RANGE,
@@ -489,7 +468,7 @@ impl Step {
         }
     }
 
-    /// What the drawing draws as marching dashes.
+    /// Drawn as marching dashes.
     pub fn one_way(&self) -> bool {
         self.out.is_some() != self.back.is_some()
     }
@@ -498,11 +477,11 @@ impl Step {
 /// Per world, every world it is joined to, each with what the connection asks in either direction.
 ///
 /// One entry per connection rather than one per listing: a connection is nearly always listed by
-/// both of the worlds it joins and is still one connection, so each carries it once. A world's own
-/// listings come first, in the dump's order, then the connections only the far side lists.
+/// both worlds it joins and is still one connection. A world's own listings come first, in the
+/// dump's order, then the connections only the far side lists.
 ///
-/// Both the lines the visualization draws and the ways onward it offers come from here, so the
-/// panel names a connection one-way on exactly the connections drawn that way.
+/// Both the lines drawn and the ways onward offered come from here, so the panel names a connection
+/// one-way on exactly the connections drawn that way.
 pub fn connections(worlds: &[World]) -> Vec<Vec<Step>> {
     let gates: std::collections::HashMap<_, _> = walkable_steps(worlds)
         .into_iter()
@@ -514,7 +493,7 @@ pub fn connections(worlds: &[World]) -> Vec<Vec<Step>> {
     for (from, world) in worlds.iter().enumerate() {
         for connection in &world.connections {
             let to = connection.target_id;
-            // A world connected to itself is no way anywhere, and the graph draws no line for it.
+            // A world connected to itself is no way anywhere.
             if to != from && !joined[from].contains(&to) {
                 joined[from].push(to);
             }
@@ -549,22 +528,21 @@ pub fn connections(worlds: &[World]) -> Vec<Vec<Step>> {
 /// The prefix the page rewrites out of every picture address, asking its own host instead.
 ///
 /// A page cannot ask the wiki directly: the edge answers a cross-origin request with a challenge
-/// page, and the browser sets `Origin` itself and will not let the header `detail::ORIGIN` carries
-/// stand in for it -- so what gets the native build its pictures is the one thing a page may not
-/// do. The page's own host is same-origin, and proxies on to the wiki.
+/// page, and the browser sets `Origin` itself rather than letting the header `detail::ORIGIN`
+/// carries stand in -- so what gets the native build its pictures is the one thing a page may not
+/// do. The page's own host is same-origin and proxies on to the wiki.
 #[cfg(target_family = "wasm")]
 const WIKI_IMAGES: &str = "https://yume.wiki/images/";
 
-/// Built once and kept, every address in the dump getting the same one. Whole rather than the bare
-/// path the host actually sees, because these addresses reach the network through `reqwest` rather
-/// than the document: it parses each by itself, with no page to resolve a bare path against.
+/// Whole rather than the bare path the host sees, because these addresses reach the network
+/// through `reqwest` rather than the document, which has no page to resolve a bare path against.
 #[cfg(target_family = "wasm")]
 fn proxied_images() -> &'static str {
     static PROXIED_IMAGES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     PROXIED_IMAGES.get_or_init(|| format!("{}/img/", origin()))
 }
 
-/// The only host the page may ask for anything unbidden. See [`proxied_images`] and [`url`].
+/// The only host the page may ask for anything unbidden.
 #[cfg(target_family = "wasm")]
 pub(super) fn origin() -> &'static str {
     static ORIGIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -579,13 +557,10 @@ pub(super) fn origin() -> &'static str {
 
 /// The host this run asks, which the page reads off itself.
 ///
-/// A page cannot ask the server directly, for the reason [`WIKI_IMAGES`] is rewritten: a request
-/// straight at it is cross-origin, which `dreamweaver` sends no `Access-Control-Allow-Origin` to
-/// allow, and mixed-content wherever the page is served over https. So the page asks its own host
-/// under the same routes -- see the proxies in `Trunk.toml`.
-///
-/// `production` therefore moves only the native builds; whatever serves the page proxies the
-/// routes on to wherever its own `dreamweaver` is.
+/// A request straight at the server is cross-origin, which `dreamweaver` sends no
+/// `Access-Control-Allow-Origin` to allow, and mixed-content wherever the page is served over
+/// https. So the page asks its own host under the same routes -- see the proxies in `Trunk.toml`,
+/// and note that `production` therefore moves only the native builds.
 fn server() -> &'static str {
     #[cfg(not(target_family = "wasm"))]
     return SERVER;
@@ -599,21 +574,19 @@ fn url() -> String {
 
 /// What the server says it is building, as the message to say about it.
 ///
-/// A server rebuilding the dump would rather say so than serve one it is about to replace -- see
-/// [`load`] -- so the wait can be a minute, and this is what the loading frame says during it.
-/// `GET /pollUpdate` is the reference implementation's route for asking, and `dreamweaver` answers
-/// in the same shape.
+/// A server rebuilding the dump says so rather than serving one it is about to replace, so the wait
+/// can be a minute. `GET /pollUpdate` is the reference implementation's route for asking, and
+/// `dreamweaver` answers in the same shape.
 ///
-/// `None` for everything that is not a stage this app has words for: a server between syncs, a
-/// host with no such route, and the finer stages only the reference server names. All of them mean
-/// the plain wait on screen.
+/// `None` for anything that is not a stage this app has words for -- a server between syncs, a host
+/// with no such route, the finer stages only the reference server names -- all of which mean the
+/// plain wait on screen.
 pub async fn building() -> Option<&'static str> {
     let url = format!("{}/pollUpdate", server());
     let said = match ask(&url).await {
         Ok(said) => said,
         Err(error) => {
-            // Not a warning: a host that does not answer this has nothing to say about what it is
-            // building, which is most of them.
+            // Not a warning: most hosts have nothing to say about what they are building.
             log::debug!("cannot reach {url}: {error}");
             return None;
         }
@@ -633,8 +606,7 @@ fn stage(task: &str) -> Option<&'static str> {
         .map(|(_, said)| *said)
 }
 
-/// What the server calls each stage, and the message that says it. The names on the left come from
-/// `dreamweaver`'s `progress`.
+/// The names on the left come from `dreamweaver`'s `progress`.
 const STAGES: [(&str, &str); 4] = [
     ("init", "dump-task-changes"),
     ("fetchWorldData", "dump-task-worlds"),
@@ -655,8 +627,8 @@ async fn ask(url: &str) -> Result<String, super::fetch::Error> {
 /// `Ok(None)` is the server saying it is building one, which is a wait rather than a failure --
 /// asking is also what starts that build. [`building`] is what to say meanwhile.
 ///
-/// `Err` carries what to say on screen rather than panicking: a document off the network can fail
-/// to arrive, or arrive as something else, and neither is worth taking the window down for.
+/// `Err` carries what to say on screen rather than panicking: a document off the network failing to
+/// arrive, or arriving as something else, is not worth taking the window down for.
 pub async fn load() -> Result<Option<Dump>, String> {
     let url = url();
     let Some(json) = dump(&url)
@@ -670,8 +642,8 @@ pub async fn load() -> Result<Option<Dump>, String> {
         .map_err(|error| format!("{url} is not the expected world dump: {error}"))
 }
 
-/// `None` for a server that has no dump to send yet. Its own request rather than [`download`],
-/// the dump being the one document with an answer that is neither itself nor a failure.
+/// `None` for a server that has no dump to send yet. Its own request rather than [`download`], the
+/// dump being the one document with an answer that is neither itself nor a failure.
 async fn dump(url: &str) -> Result<Option<String>, super::fetch::Error> {
     let response = super::fetch::client().get(url).send().await?;
     // The server is rebuilding. See `dreamweaver`'s `data`.
@@ -681,8 +653,7 @@ async fn dump(url: &str) -> Result<Option<String>, super::fetch::Error> {
     Ok(Some(response.error_for_status()?.text().await?))
 }
 
-/// For the documents that only ever answer with themselves. See [`dump`] for the one that does
-/// not.
+/// For the documents that only ever answer with themselves.
 async fn download(url: &str) -> Result<String, super::fetch::Error> {
     Ok(super::fetch::client()
         .get(url)
@@ -697,21 +668,20 @@ async fn download(url: &str) -> Result<String, super::fetch::Error> {
 fn parse(json: &str) -> serde_json::Result<Dump> {
     let mut dump = serde_json::from_str::<Dump>(json)?;
     hide(&mut dump.worlds);
-    // After the secrets have gone and before anything else can take a world out, this being the
-    // numbering `tools/atlas` packed the thumbnails against. Every later reading of the dump
-    // carries it rather than counting again.
+    // After the secrets have gone and before anything else can take a world out: this is the
+    // numbering `tools/atlas` packed the thumbnails against.
     dump.packed = dump.worlds.len();
     for (at, world) in dump.worlds.iter_mut().enumerate() {
         world.packed_at = at;
     }
-    // Every picture address the app fetches at runtime passes through here and only here. See
-    // [`WIKI_IMAGES`]. `tools/atlas` reads `data.json` itself and rightly misses this: it runs at
-    // build time and has no page to be on.
+    // Every picture address the app fetches at runtime passes through here and only here.
+    // `tools/atlas` reads `data.json` itself and rightly misses this: it runs at build time and has
+    // no page to be on.
     #[cfg(target_family = "wasm")]
     for world in &mut dump.worlds {
         world.image = world.image.replace(WIKI_IMAGES, proxied_images());
         if let Some(urls) = &mut world.map_url {
-            // Whole rather than entry by entry: every address in the list carries the same prefix.
+            // Whole rather than entry by entry: every address carries the same prefix.
             *urls = urls.replace(WIKI_IMAGES, proxied_images());
         }
     }
@@ -720,10 +690,9 @@ fn parse(json: &str) -> serde_json::Result<Dump> {
 
 /// Drops the worlds the dump marks secret, and renumbers what is left.
 ///
-/// A connection names the world it leads to by index, so taking a world out is not a matter of
-/// skipping it where it is drawn: every index above it moves, and a reference left pointing at the
-/// old one would draw a line somewhere else entirely. Done at the one place the dump becomes the
-/// app's, so nothing downstream ever sees those worlds.
+/// A connection names the world it leads to by index, so taking one out moves every index above it
+/// and a reference left pointing at the old one draws a line somewhere else entirely. Done where
+/// the dump becomes the app's, so nothing downstream ever sees those worlds.
 ///
 /// `tools/atlas` drops the same worlds, the atlas being packed by index too: the two agree on what
 /// a cell counts, or every picture after the first secret is somewhere else's.
@@ -741,7 +710,7 @@ fn hide(worlds: &mut Vec<World>) {
 /// world that has gone.
 ///
 /// The one place a world leaves the graph, so the renumbering is written once however many reasons
-/// there are to drop one. See [`hide`] and [`Dump::showing`].
+/// there are to drop one.
 fn retain(worlds: &mut Vec<World>, keep: &[bool]) {
     let mut kept = 0;
     let at: Vec<Option<usize>> = keep
@@ -761,8 +730,8 @@ fn retain(worlds: &mut Vec<World>, keep: &[bool]) {
     });
     for world in worlds.iter_mut() {
         world.connections.retain_mut(|connection| {
-            // `flatten` covers both a passage into a dropped world and one out of the dump
-            // altogether, which would be a dump disagreeing with itself.
+            // `flatten` covers a passage into a dropped world and one out of the dump altogether,
+            // which would be a dump disagreeing with itself.
             match at.get(connection.target_id).copied().flatten() {
                 Some(target) => {
                     connection.target_id = target;
@@ -781,8 +750,6 @@ fn same_release(name: &str) -> String {
 }
 
 impl Dump {
-    /// How many of the worlds this dump carries a player has stood in.
-    ///
     /// The dump is the yardstick rather than YNOproject's own catalog, because the dump is what is
     /// on screen. The count therefore comes out under what YNOproject would say, which records
     /// rooms the wiki keeps no world for.
@@ -793,30 +760,25 @@ impl Dump {
             .count()
     }
 
-    /// The same dump cut back to the worlds a player has stood in and the ones a step beyond
-    /// them, with nothing further in it at all.
+    /// The same dump cut back to the worlds a player has stood in and the ones a step beyond.
     ///
     /// `visited` is titles as the wiki writes them, which is how YNOproject names the places it
-    /// records a player having been. Matched by name, that being the only thing the two lists
-    /// share.
+    /// records a player having been; the name is the only thing the two lists share.
     ///
-    /// The worlds a step beyond are kept so the graph has an edge to grow at rather than stopping
-    /// dead at the last room the player walked into -- a step they could actually take, so a
-    /// passage that cannot be walked that way leads nowhere. They are kept as places rather than
-    /// worlds, so the graph says there is something there without saying what. See
-    /// [`World::unknown`].
+    /// The worlds a step beyond are a step the player could actually take, so a passage that cannot
+    /// be walked that way leads nowhere. They are kept as places rather than worlds, so the graph
+    /// says there is something there without saying what. See [`World::unknown`].
     ///
-    /// A whole dump rather than a mask over this one, because taking a world out renumbers every
-    /// connection above it: the same reason [`hide`] rebuilds rather than skips. One copy per
-    /// change of frontier, which is a person pressing a button.
+    /// A whole dump rather than a mask, because taking a world out renumbers every connection above
+    /// it -- the same reason [`hide`] rebuilds rather than skips. One copy per change of frontier,
+    /// which is a person pressing a button.
     pub fn showing(&self, visited: &std::collections::HashSet<String>) -> Dump {
         let been: Vec<bool> = self
             .worlds
             .iter()
             .map(|world| visited.contains(&world.title))
             .collect();
-        // Outward only. A passage the player could only come back through is not a way onward, so
-        // the world at the far end is not on the frontier however plainly the dump joins them.
+        // Outward only: a passage the player could only come back through is not a way onward.
         let mut shown = been.clone();
         for (from, onward) in walkable_steps(&self.worlds).into_iter().enumerate() {
             if !been[from] {
@@ -862,9 +824,8 @@ impl Dump {
 
     /// The releases that added worlds, newest first, each carrying what it added.
     ///
-    /// Ordered by the version history, which is the only ordering the dump gives -- version names
-    /// do not sort. The handful of releases the worlds name but the history does not know are left
-    /// at the end, undated.
+    /// Ordered by the version history, the only ordering the dump gives: version names do not sort.
+    /// The handful of releases the worlds name but the history does not know go last, undated.
     pub fn versions(&self) -> Vec<Version> {
         let rank: std::collections::HashMap<String, (usize, &Release)> = self
             .releases
@@ -915,12 +876,11 @@ impl Dump {
 
     /// Everyone credited, each carrying their worlds, and, per world, which of them made it.
     ///
-    /// Busiest first because only the first few are shown with nothing typed, and the names worth
-    /// offering unasked are the ones with the most behind them. Ties break by name, so the order
-    /// is fixed rather than however the worlds happened to be listed.
+    /// Busiest first, because only the first few are shown with nothing typed. Ties break by name,
+    /// so the order is fixed rather than however the worlds happened to be listed.
     pub fn authors(&self) -> (Vec<Author>, Vec<usize>) {
-        // Only where the two differ: the dump gives a Japanese name for everyone it credits, and
-        // for most it is the English one over again, which is nothing to show or search twice.
+        // Only where the two differ: the dump repeats the English name for most people, which is
+        // nothing to show or search twice.
         let jp: std::collections::HashMap<&str, &str> = self
             .credits
             .iter()
@@ -979,8 +939,7 @@ fn append_encoded(input: &str, output: &mut String) {
 }
 
 /// The dump carries no page address, only image ones, so this is built from the title the way the
-/// wiki builds it. The titles are ASCII but for a single accent, so the encoder only has to cover
-/// the bytes above it.
+/// wiki builds it.
 pub fn wiki_url(title: &str) -> String {
     let mut url = String::from("https://yume.wiki/2kki/");
     append_encoded(title, &mut url);
@@ -991,7 +950,7 @@ pub fn wiki_url(title: &str) -> String {
 const YUME2KKI_T: &str = "https://wikiwiki.jp/yume2kki-t/";
 
 /// YNOproject's list of what that wiki calls each place, which is what the game's own client
-/// addresses it by. See [`Pages`].
+/// addresses it by.
 const YNOLOCATIONS: &str =
     "https://raw.githubusercontent.com/ynoproject/ynolocations/refs/heads/master/2kki/ja.json";
 
@@ -1002,12 +961,10 @@ type Pages = std::collections::HashMap<String, String>;
 /// Empty until [`load_pages`] has answered.
 static PAGES: std::sync::OnceLock<Pages> = std::sync::OnceLock::new();
 
-/// Fetches the location list and keeps what [`yume2kki_t_url`] reads out of it.
-///
-/// Started beside the dump rather than on the first Japanese link, because on the page a window
-/// opened after the click has passed is a popup the browser blocks. A link clicked in the first
-/// moment of a run is therefore addressed without the list, which is the right address for all but
-/// the few dozen worlds in it -- and the same reason failure is a warning and nothing more.
+/// Started beside the dump rather than on the first Japanese link, because a window opened after
+/// the click has passed is a popup the browser blocks. A link clicked in the first moment of a run
+/// is therefore addressed without the list, which is right for all but the few dozen worlds in it
+/// -- and the same reason failure here is a warning and nothing more.
 pub async fn load_pages() {
     let pages = match download(YNOLOCATIONS).await {
         Ok(json) => parse_pages(&json),
@@ -1023,9 +980,9 @@ pub async fn load_pages() {
     let _ = PAGES.set(pages);
 }
 
-/// The list names places by map rather than by world, and most of it is which map is which. The
-/// pairs read here are nested several ways -- a map may name one place, several, or a different one
-/// per map it leads on from -- and none of that nesting matters, so it is walked, not modelled.
+/// The list names places by map rather than by world, and the pairs read here are nested several
+/// ways -- a map may name one place, several, or a different one per map it leads on from. None of
+/// that nesting matters, so it is walked rather than modelled.
 fn parse_pages(json: &str) -> Pages {
     let mut pages = Pages::new();
     let Ok(list) = serde_json::from_str::<serde_json::Value>(json) else {
@@ -1044,7 +1001,7 @@ fn parse_pages(json: &str) -> Pages {
     pages
 }
 
-/// Every `title`/`urlTitle` pair anywhere under `value`. See [`parse_pages`].
+/// Every `title`/`urlTitle` pair anywhere under `value`.
 fn collect_url_titles(value: &serde_json::Value, pages: &mut Pages) {
     match value {
         serde_json::Value::Object(fields) => match (fields.get("title"), fields.get("urlTitle")) {
@@ -1098,7 +1055,7 @@ pub fn author_url(author: &str) -> String {
 pub fn yume2kki_t_author_url(author: &str) -> String {
     let mut url = format!("{YUME2KKI_T}::cmd/taglist?tag=");
     // The wiki tags with the name and the honorific together. A query rather than a path, so a
-    // space stays a space rather than becoming the underscore a page name would want.
+    // space stays a space rather than the underscore a page name would want.
     append_query_encoded(author, &mut url);
     append_query_encoded("氏", &mut url);
     url
@@ -1121,17 +1078,16 @@ pub struct Routes {
     pub parents: Vec<Option<usize>>,
     /// Per world, how many connections its canonical route is long, and `None` where unreachable.
     /// Measured here rather than read from the dump's own `depth`, so it agrees with the
-    /// connections this visualization actually knows about.
+    /// connections this visualization knows about.
     pub depth: Vec<Option<u32>>,
 }
 
 impl Routes {
     /// Per world, how many worlds' canonical route home passes through it: how much of the game it
     /// is the way to, which is what the node sizes show. Sizing reads it through a logarithmic
-    /// curve, so a leaf, a small hub and a gateway separate while the origin, which everything
-    /// hangs off, stays on the same scale as the rest.
+    /// curve, so the origin -- which everything hangs off -- stays on the same scale as the rest.
     pub fn descendant_counts(&self) -> Vec<u32> {
-        // Deepest first, so a world's own descendants are all counted before it hands them up.
+        // Deepest first, so a world's descendants are all counted before it hands them up.
         let mut order: Vec<usize> = (0..self.parents.len()).collect();
         order.sort_unstable_by_key(|&world| std::cmp::Reverse(self.depth[world]));
         let mut descendants = vec![0; self.parents.len()];
@@ -1147,7 +1103,7 @@ impl Routes {
     pub fn subtree(&self, root: usize) -> Vec<usize> {
         // Shallowest first, so a world's parent has already been decided when it is reached. A
         // world the origin cannot reach sorts before every depth and has no parent to inherit
-        // from, which is what keeps it out of every subtree but its own.
+        // from, which keeps it out of every subtree but its own.
         let mut order: Vec<usize> = (0..self.parents.len()).collect();
         order.sort_unstable_by_key(|&world| self.depth[world]);
         let mut inside = vec![false; self.parents.len()];
@@ -1165,12 +1121,10 @@ impl Routes {
 /// Walks the route to every world a player could actually be expected to walk.
 ///
 /// Routes are ordered by the harshest [`Gate`] anywhere along them and only then by length, so an
-/// unconditional route wins however long it is, and a world whose every route is conditional takes
-/// the mildest available. That ordering is why the depth reported here is the higher, honest one:
-/// a locked or chance-gated shortcut no longer makes a world look shallow.
+/// unconditional route wins however long it is. That is why the depth reported here is the higher,
+/// honest one: a locked or chance-gated shortcut no longer makes a world look shallow.
 ///
-/// Directed, like the lines the visualization draws: a connection the player can only walk one way
-/// is not a way in, so it cannot carry a route.
+/// Directed, like the lines drawn: a connection the player can only walk one way is not a way in.
 pub fn canonical_routes(worlds: &[World]) -> Routes {
     let mut routes = Routes {
         parents: vec![None; worlds.len()],
@@ -1182,10 +1136,10 @@ pub fn canonical_routes(worlds: &[World]) -> Routes {
     let origin = origin_world(worlds);
     let steps = walkable_steps(worlds);
 
-    // Dijkstra over (gate, depth): the route settled for a world is always its own parent's route
-    // with one step added, so the parent chain and the depth cannot disagree. Reversed because
-    // `BinaryHeap` is a max-heap. The world and the parent ride along in the key rather than
-    // beside it, so ties resolve the same way on every run.
+    // Dijkstra over (gate, depth): the route settled for a world is always its parent's route with
+    // one step added, so the parent chain and the depth cannot disagree. Reversed because
+    // `BinaryHeap` is a max-heap. The world and the parent ride in the key rather than beside it,
+    // so ties resolve the same way on every run.
     let mut queue =
         std::collections::BinaryHeap::from([std::cmp::Reverse((Gate::Free, 0, origin, origin))]);
     while let Some(std::cmp::Reverse((gate, depth, world, parent))) = queue.pop() {
@@ -1208,16 +1162,14 @@ pub fn canonical_routes(worlds: &[World]) -> Routes {
     routes
 }
 
-/// Where the game starts, and so where every route ends: the room the player wakes up in. Not the
-/// page's own [`origin`] elsewhere in this module, which is an address.
+/// Where the game starts, and so where every route ends. Not the page's own [`origin`] elsewhere
+/// in this module, which is an address.
 ///
-/// By name rather than by position, as the reference implementation finds it too. The dump usually
-/// lists it first, but only because it was the first world the reference's database ever held: a
-/// dump built from nothing lists the worlds alphabetically and starts at `3D Structures Path`, and
-/// seeding the walk there leaves nearly every world unreachable -- one flat layer at no depth.
-///
-/// The first world if the dump has no such title, which is not worth failing over: the walk then
-/// reports what it can reach from wherever it started.
+/// By name rather than by position. The dump usually lists it first, but only because it was the
+/// first world the reference's database ever held: a dump built from nothing lists the worlds
+/// alphabetically and starts at `3D Structures Path`, and seeding the walk there leaves nearly
+/// every world unreachable -- one flat layer at no depth. The first world if the dump has no such
+/// title, which is not worth failing over.
 fn origin_world(worlds: &[World]) -> usize {
     worlds
         .iter()
@@ -1230,13 +1182,13 @@ const ORIGIN: &str = "Urotsuki's Room";
 
 /// Every step a player can take, as a directed adjacency list carrying what each demands.
 ///
-/// A connection is nearly always listed by both of the worlds it joins, each with its own flags,
-/// and those two listings are the two directions. Where only one side lists it, the other is
-/// inferred the way the wiki's own path finder infers it: [`flag::ONE_WAY`] means there is no way
-/// back, and [`flag::UNLOCK`] means the way back is [`Gate::Locked`].
+/// A connection is nearly always listed by both worlds it joins, and those two listings are the two
+/// directions. Where only one side lists it, the other is inferred the way the wiki's own path
+/// finder infers it: [`flag::ONE_WAY`] means there is no way back, [`flag::UNLOCK`] means the way
+/// back is [`Gate::Locked`].
 ///
-/// The routes walk this directly, and [`connections`] is the same thing read pairwise, so a line
-/// drawn as one-way is one-way on exactly the steps a route is denied.
+/// The routes walk this directly and [`connections`] reads it pairwise, so a line drawn as one-way
+/// is one-way on exactly the steps a route is denied.
 fn walkable_steps(worlds: &[World]) -> Vec<Vec<(usize, Ask)>> {
     let listed: std::collections::HashSet<_> = worlds
         .iter()
@@ -1277,13 +1229,11 @@ fn walkable_steps(worlds: &[World]) -> Vec<Vec<(usize, Ask)>> {
 mod tests {
     use super::World;
 
-    // Read off disk rather than fetched, so the tests neither need a server running nor say
-    // anything different depending on what one has published since. `just dreamweaver` writes
-    // exactly what it serves to `data.json`.
+    // Read off disk rather than fetched, so the tests neither need a server running nor answer
+    // differently depending on what one has published since. `just dreamweaver` writes it.
     //
-    // Whoever has never run it has no dump, and that is not a failure of these tests. On CI it
-    // is: skipping there would leave the dump unchecked. A dump that is present but does not
-    // parse stays a failure everywhere -- that is the shape change these tests exist to catch.
+    // A missing dump is not a failure of these tests, except on CI, where skipping would leave the
+    // dump unchecked. A dump that is present but does not parse fails everywhere.
     fn load() -> Option<super::Dump> {
         let file = concat!(env!("CARGO_MANIFEST_DIR"), "/data.json");
         let json = match std::fs::read_to_string(file) {
@@ -1366,8 +1316,7 @@ mod tests {
                 .iter()
                 .map(|world| (world.title.as_str(), world.cell()))
                 .collect::<Vec<_>>(),
-            // Kept as a place rather than a world: no cell of its own, so it wears the
-            // placeholder.
+            // Kept as a place rather than a world: no cell, so it wears the placeholder.
             [("Nexus", Some(0)), ("Sofa Room", None)]
         );
         // Sofa Room's step onward led to a world no longer there, so it is gone rather than
@@ -1391,8 +1340,7 @@ mod tests {
 
     #[test]
     fn a_frontier_does_not_reach_through_a_passage_it_cannot_be_walked_down() {
-        // Every listed step is one-way *into* the world listing it, so from Nexus there is no way
-        // onward at all.
+        // Every listed step is one-way *into* the world listing it, so Nexus has no way onward.
         let mut dump = chain(
             &["Nexus", "Sofa Room", "Far Room", "Farther Room"],
             super::flag::NO_ENTRY,
@@ -1572,8 +1520,7 @@ mod tests {
         }
     }
 
-    // Compared against a walk ignoring both direction and conditions, which is what this used to
-    // report.
+    // Compared against a walk ignoring both direction and conditions.
     #[test]
     fn conditions_only_ever_push_a_world_deeper() {
         let Some(worlds) = load().map(|dump| dump.worlds) else {
@@ -1623,7 +1570,7 @@ mod tests {
 
     // Anything unreached that the wiki documents a passage to is a misread flag closing a passage
     // that is open. The one world that really did document a way out and no way in was `Gallery of
-    // Me`, which the dump marks secret and `hide` takes out along with the passages into it.
+    // Me`, which the dump marks secret and `hide` takes out with the passages into it.
     #[test]
     fn a_world_is_unreached_only_where_the_wiki_leaves_no_way_in() {
         let Some(worlds) = load().map(|dump| dump.worlds) else {
@@ -1749,9 +1696,9 @@ mod tests {
 
     #[test]
     fn a_japanese_title_addresses_the_page_the_wiki_files_it_under() {
-        // A slice of the list, in each of the shapes it writes a place in: a bare name, a name and
-        // the page it is written up on, a map leading to several places, and one leading somewhere
-        // different per map it came from.
+        // A slice of the list in each shape it writes a place in: a bare name, a name and the page
+        // it is written up on, a map leading to several places, and one leading somewhere different
+        // per map it came from.
         let pages = super::parse_pages(
             r#"{
                 "urlRoot": "https://wikiwiki.jp/yume2kki-t/",
@@ -1773,14 +1720,13 @@ mod tests {
         let plain = "https://wikiwiki.jp/yume2kki-t/%E6%B9%96%E4%B8%8A%E3%81%AE%E6%A9%8B";
         assert_eq!(super::page_url(&pages, "湖上の橋"), plain);
         assert_eq!(super::yume2kki_t_url("湖上の橋"), plain);
-        // An area written up inside another world's page: the anchor stays an anchor rather than
-        // being encoded away.
+        // An area written up inside another world's page: the anchor stays an anchor.
         assert_eq!(
             super::page_url(&pages, "製作者の部屋"),
             "https://wikiwiki.jp/yume2kki-t/%E3%81%86%E3%82%8D%E3%81%A4%E3%81%8D%E9%82%B8#map0230"
         );
-        // A place written up on a bigger page, and one filed under a path -- the one shape the list
-        // keeps outside its maps. The slash stays a slash.
+        // A place written up on a bigger page, and one filed under a path -- the one shape the
+        // list keeps outside its maps. The slash stays a slash.
         assert_eq!(
             super::page_url(&pages, "昭和路地：バスツアー"),
             "https://wikiwiki.jp/yume2kki-t/%E6%98%AD%E5%92%8C%E8%B7%AF%E5%9C%B0"
@@ -1791,7 +1737,7 @@ mod tests {
         );
     }
 
-    // The subtree carries the world it is rooted at and nothing off to the side, however near.
+    // Nothing off to the side, however near.
     #[test]
     fn a_subtree_is_a_world_and_everything_behind_it() {
         //   0 ── 1 ── 2 ── 3

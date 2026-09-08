@@ -3,9 +3,8 @@
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-feature=+simd128"]
 
-# `just test-wasm`. The shipping target cannot run a test binary without a JS host, and this one
-# is the same backend, the same feature and the same lane width, so it is what the behaviour of
-# the vectorized loops is checked on.
+# `just test-wasm`. The shipping target cannot run a test binary without a JS host, and this one is
+# the same backend, feature and lane width.
 [target.wasm32-wasip2]
 rustflags = ["-C", "target-feature=+simd128"]
 runner = "wasmtime"

@@ -1,9 +1,9 @@
 //! The wiki's floor plans for a world -- see [`super::world::World::maps`].
 //!
 //! Read next to the graph rather than in place of it, so they get a window that can be moved and
-//! resized and that stays open across selections. Some run to a few thousand pixels of corridors,
-//! hence [`egui::Scene`] -- panned and zoomed rather than laid out. Worlds whose floors the wiki
-//! drew separately get a tab per map.
+//! resized and stays open across selections. Some run to a few thousand pixels of corridors, hence
+//! [`egui::Scene`] -- panned and zoomed rather than laid out. Worlds whose floors the wiki drew
+//! separately get a tab per map.
 
 use egui_material_icons::icons::{ICON_CLOSE_FULLSCREEN, ICON_FIT_SCREEN, ICON_OPEN_IN_FULL};
 use three_d::renderer::CpuTexture;
@@ -27,21 +27,21 @@ pub(super) struct Maps {
     sizing: Sizing,
 }
 
-/// egui keeps a window's position and size under its id and nowhere else, so maximizing
-/// overwrites the only record of where it was: the rect to go back to is held here instead.
+/// egui keeps a window's position and size under its id and nowhere else, so maximizing overwrites
+/// the only record of where it was.
 #[derive(Clone, Copy)]
 enum Sizing {
     /// Moved and resized by hand, which is where the window opens.
     Free,
     Full(egui::Rect),
-    /// The one frame it takes to put the window back. egui's memory of it is the maximized rect
-    /// by now, so the old one is forced on it once before it is let go of again.
+    /// The one frame it takes to put the window back: egui's memory of it is the maximized rect by
+    /// now, so the old one is forced on it once.
     Restoring(egui::Rect),
 }
 
 struct Open {
     world: usize,
-    /// The world's title, which is the window's. A map's caption names its tab instead.
+    /// The window's title. A map's caption names its tab instead.
     title: String,
     sheets: Vec<Sheet>,
     /// Always a sheet that exists: only the tabs move it.
@@ -51,11 +51,9 @@ struct Open {
 struct Sheet {
     label: String,
     picture: Picture,
-    /// What part of the map the window is looking at, in the picture's own pixels. Per map, so
-    /// stepping through the tabs and back leaves each one where it was left.
-    ///
-    /// Empty until the picture arrives and there is a size to fit, which is also what
-    /// [`egui::Scene`] reads as "no view yet" and fits from.
+    /// In the picture's own pixels, per map, so stepping through the tabs and back leaves each one
+    /// where it was left. Empty until the picture arrives and there is a size to fit, which is also
+    /// what [`egui::Scene`] reads as "no view yet".
     at: egui::Rect,
 }
 
@@ -74,8 +72,7 @@ impl Maps {
         }
     }
 
-    /// Opening starts every one of the world's maps loading at once: there are never more than
-    /// seven, and they are tabs of one window.
+    /// Every one of the world's maps starts loading at once: there are never more than seven.
     pub(super) fn toggle(&mut self, world: usize, title: &str, maps: &[world::Map]) {
         if self.open.as_ref().is_some_and(|open| open.world == world) {
             self.open = None;
@@ -113,12 +110,12 @@ impl Maps {
             .open(&mut showing)
             .constrain(true);
         let window = match self.sizing {
-            // Not scrolling: the map does its own panning, so the window's edge only says how
-            // much of the screen to give it.
+            // Not scrolling: the map does its own panning, so the window's edge only says how much
+            // of the screen to give it.
             Sizing::Free => window.default_size(SIZE).resizable(true),
             // three-d tells egui nothing about the system's furniture, so egui's content rect is
-            // the whole window; the app's own insets are what keep a maximized window out from
-            // under a status bar.
+            // the whole window; the app's own insets keep a maximized window out from under a
+            // status bar.
             Sizing::Full(_) => window.fixed_rect(ctx.content_rect() - insets),
             Sizing::Restoring(rect) => window.fixed_rect(rect),
         };
@@ -235,8 +232,8 @@ impl Sheet {
     }
 }
 
-/// The view holding the whole picture, which [`egui::Scene`] letterboxes into however wide or
-/// tall the window happens to be. The picture is added at the origin, so this is where it lands.
+/// The view holding the whole picture, which [`egui::Scene`] letterboxes into however wide or tall
+/// the window happens to be. The picture is added at the origin, so this is where it lands.
 fn fits(texture: &egui::TextureHandle) -> egui::Rect {
     egui::Rect::from_min_size(egui::Pos2::ZERO, texture.size_vec2())
 }

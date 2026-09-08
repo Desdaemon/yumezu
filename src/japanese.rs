@@ -1,16 +1,14 @@
 //! The Japanese face, which nothing this app starts with has and everything Japanese needs.
 //!
-//! egui's own fonts carry Latin and little else, so Japanese is drawn as empty boxes without
-//! this. A face carrying the glyphs is a few megabytes wherever it comes from, so it is sent for
-//! as the app starts and installed the frame it turns up, on [`super::fetch`]'s executor with
-//! nothing waiting on it.
+//! egui's own fonts carry Latin and little else, so Japanese is drawn as empty boxes without this.
+//! A face carrying the glyphs is a few megabytes wherever it comes from, so it is sent for as the
+//! app starts and installed the frame it turns up.
 //!
-//! Sent for whatever language the run is in, because the language is not what decides whether
-//! Japanese is drawn: an English run shows the wiki's Japanese names beside the English ones.
+//! Sent for whatever language the run is in: an English run shows the wiki's Japanese names beside
+//! the English ones.
 //!
 //! Where it comes from is the whole of what the platforms differ in. A device usually has one
-//! already, which [`installed`] asks for by name. A page has no fonts to ask about and downloads
-//! one instead.
+//! already, which [`installed`] asks for by name; a page downloads one.
 
 // Only ever added, never looked up: a fallback rather than a family anything asks for.
 const NAME: &str = "japanese";
@@ -18,8 +16,7 @@ const NAME: &str = "japanese";
 pub(super) enum Japanese {
     /// Started as the app is built, so this is what every run opens in.
     Coming(super::fetch::Pending<Option<(Vec<u8>, u32)>>),
-    /// Installed, or looked for and not found: either way a device with no Japanese font draws the
-    /// boxes, and there is no second place to look.
+    /// Installed, or looked for and not found: there is no second place to look.
     Settled,
 }
 
@@ -41,9 +38,8 @@ impl Japanese {
     }
 }
 
-/// Reading a whole font collection is the one blocking thing this app does off its own thread. It
-/// is one call at startup, over long before anything else wants that thread, which is why it is
-/// left on [`super::fetch`]'s executor rather than given one of its own.
+/// Reading a whole font collection is the one blocking thing this app does off its own thread: one
+/// call at startup, over long before anything else wants that thread.
 #[cfg(not(target_family = "wasm"))]
 async fn face() -> Option<(Vec<u8>, u32)> {
     installed()
@@ -56,8 +52,8 @@ async fn face() -> Option<(Vec<u8>, u32)> {
 }
 
 /// Added at the lowest priority, so it is reached only for the glyphs nothing already installed
-/// carries: the Latin in a Japanese sentence keeps the shape the rest of the panel is drawn in,
-/// and the icons keep theirs. `None` leaves the panel exactly as it was.
+/// carries: the Latin in a Japanese sentence keeps the shape the rest of the panel is drawn in.
+/// `None` leaves the panel exactly as it was.
 fn install(ctx: &egui::Context, face: Option<(Vec<u8>, u32)>) {
     let Some((face, index)) = face else {
         log::warn!("no Japanese font: Japanese will be drawn as empty boxes");
@@ -87,13 +83,11 @@ fn install(ctx: &egui::Context, face: Option<(Vec<u8>, u32)>) {
 /// How far the face has to be moved for its baseline to land on the panel's own, as a fraction of
 /// the font size. Positive is downwards, per [`egui::FontTweak::y_offset_factor`].
 ///
-/// egui centres the faces in a family rather than aligning their baselines, placing a glyph at
-/// its own face's ascent plus half of however much shorter that face's line is than the family's.
-/// Centring suits the emoji faces egui ships, which have no baseline worth speaking of, and not a
-/// second text face: a Japanese face reserves far more of its line above the baseline than a
-/// Latin one -- Noto Sans CJK JP asks 1.16 of the font size where Ubuntu Light asks 0.93 -- so
-/// centring drops the Japanese a full point below the Latin beside it, visible in a line like
-/// `ここへ: Chainsaw が必要。`.
+/// egui centres the faces in a family rather than aligning their baselines, which suits the emoji
+/// faces it ships and not a second text face: a Japanese face reserves far more of its line above
+/// the baseline than a Latin one -- Noto Sans CJK JP asks 1.16 of the font size where Ubuntu Light
+/// asks 0.93 -- so centring drops the Japanese a full point below the Latin beside it, visible in a
+/// line like `ここへ: Chainsaw が必要。`.
 ///
 /// Measured rather than guessed at, the face differing per platform. Both sides are measured
 /// against the proportional family, which is what the panel is drawn in; the face is inserted

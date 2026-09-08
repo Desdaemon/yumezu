@@ -1,9 +1,8 @@
 //! Building a dump out of what the wiki knows.
 //!
-//! Four fetches come back describing four parts of the same thing -- worlds, the passages between
-//! them, the people credited for them, the releases they arrived in -- and none knows about the
-//! others. This is where they are joined into one graph, measured, and written out in the shape
-//! the reader expects.
+//! Four fetches describe four parts of the same thing -- worlds, the passages between them, the
+//! people credited for them, the releases they arrived in -- and none knows about the others. This
+//! is where they are joined into one graph, measured, and written out for the reader.
 //!
 //! A rebuild does not have to fetch all four: [`Fetched`] keeps the last answers, and a sync that
 //! knows which pages have been edited re-asks only the parts those pages could have changed.
@@ -18,34 +17,31 @@ use crate::versions;
 
 /// What the last sync fetched, kept so the next one can leave most of it alone.
 ///
-/// Every fetch here is a question about pages -- the authors are one page, the releases a handful,
-/// and a passage belongs to the page that writes it up -- so an account of which pages have been
-/// edited is also an account of which answers can still be trusted. On a wiki where a week's
-/// editing touches a dozen worlds, that is two or three requests instead of thirty.
+/// Every fetch here is a question about pages, so an account of which pages have been edited is
+/// also an account of which answers can still be trusted. On a wiki where a week's editing touches
+/// a dozen worlds, that is two or three requests instead of thirty.
 ///
-/// The worlds themselves are not kept: they are one query for all sixteen hundred, and a world
-/// that changed can add or remove one, which would make a cache something to reconcile rather than
-/// something to skip.
+/// The worlds themselves are not kept: they are one query for all sixteen hundred, and a world that
+/// changed can add or remove one, which would make this something to reconcile rather than skip.
 ///
-/// A cache with no invalidation of its own, which is safe only because it is never read except
-/// beside a [`Refresh`] saying what has moved, and because a run that has just come up has an
-/// empty one and so fetches everything.
+/// No invalidation of its own, which is safe only because it is never read except beside a
+/// [`Refresh`] saying what has moved, and a run that has just come up has an empty one.
 #[derive(Default)]
 pub struct Fetched {
     authors: Vec<smw::Author>,
     releases: Vec<smw::Version>,
-    /// Passages, in the pieces they were asked in: keyed by the first character of the world they
-    /// leave. See [`crate::smw::connections`].
+    /// Keyed by the first character of the world the passage leaves. See
+    /// [`crate::smw::connections`].
     passages: BTreeMap<char, Vec<smw::Connection>>,
 }
 
 /// How much of the wiki a sync re-reads.
 pub enum Refresh {
-    /// All of it, whatever the wiki says about itself: a sync with no dump to ask about, or one
-    /// the wiki no longer remembers that far back.
+    /// Whatever the wiki says about itself: a sync with no dump to ask about, or one the wiki no
+    /// longer remembers that far back.
     Everything,
-    /// Only what these pages can have changed, spelled without the namespace. An empty list is a
-    /// wiki that has not moved, and never reaches here -- the caller stands the sync down instead.
+    /// Spelled without the namespace. An empty list never reaches here: the caller stands the sync
+    /// down instead.
     Pages(Vec<String>),
 }
 
@@ -58,7 +54,7 @@ impl Refresh {
         }
     }
 
-    /// How the version history is asked about, being written across a dozen subpages of one title.
+    /// The version history is written across a dozen subpages of one title.
     fn touches_under(&self, prefix: &str) -> bool {
         match self {
             Refresh::Everything => true,
@@ -80,30 +76,27 @@ impl Refresh {
     }
 }
 
-/// The page the wiki keeps its author list on, and the title its version history is written under.
-/// Both are the store's own subjects, and an edit to either is what makes those answers stale.
+/// The wiki's author list, and the title its version history is written under. An edit to either
+/// is what makes those answers stale.
 const AUTHORS: &str = "Authors";
 const VERSION_HISTORY: &str = "Version History";
 
-/// The map the game starts the player on. The world built out of it opens the dump: every reader
-/// walks its routes out from there.
+/// The map the game starts the player on. The world built out of it opens the dump.
 ///
 /// A map number rather than a title, the wiki renaming a world far more readily than the game
 /// renumbers a map.
 const ORIGIN_MAP: u32 = 2;
 
-/// A world built out of any of these is published as a secret, the dump's one way of saying "do
-/// not show this".
+/// A world built out of any of these is published as a secret, the dump's one way of saying "do not
+/// show this".
 ///
-/// Map 1 is the debug room: the wiki documents it as a location like any other and the store hands
-/// it back like any other, but the game never walks the player into it and the wiki carries no
-/// property for that. This is the one secret the program supplies; every other is an operator's
-/// own mark, from [`marked_secret`].
+/// Map 1 is the debug room: the wiki documents it as a location like any other, but the game never
+/// walks the player into it and the wiki carries no property for that. Every other secret is an
+/// operator's own mark, from [`marked_secret`].
 const SECRET_MAPS: [u32; 1] = [1];
 
-/// `previous` is the last dump published, consulted for two things only: what an operator has
-/// marked on the worlds, and when the dump was last rebuilt without asking. Everything else comes
-/// from the wiki, or from `fetched`, which is the wiki as of the last time this asked.
+/// `previous` is the last dump published, consulted only for what an operator has marked on the
+/// worlds and when the dump was last rebuilt without asking.
 pub async fn run(
     http: &reqwest::Client,
     previous: &Dump,
@@ -111,8 +104,7 @@ pub async fn run(
     fetched: &mut Fetched,
     progress: &Progress,
 ) -> smw::Result<Dump> {
-    // First and on its own: what the worlds are decides which pieces of the passage query there
-    // are to ask for.
+    // First and alone: what the worlds are decides which pieces of the passage query to ask for.
     progress.at(progress::WORLDS);
     let locations = smw::locations(http).await?;
     let initials: BTreeSet<char> = locations
@@ -146,14 +138,13 @@ pub async fn run(
         fetched.releases = releases;
     }
     fetched.passages.extend(passages);
-    // A piece with no worlds left is a letter the wiki no longer has a world under, and holding
-    // its passages would keep a deleted world reachable.
+    // Holding a piece with no worlds left would keep a deleted world reachable.
     fetched
         .passages
         .retain(|initial, _| initials.contains(initial));
 
-    /// Which of the parts asked for whole were asked for this time, so a log line reads as an
-    /// account of what this sync cost rather than of what it ended up holding.
+    /// Which parts were asked for this time, so a log line reads as what this sync cost rather
+    /// than what it ended up holding.
     fn again(read: bool) -> &'static str {
         match read {
             true => "read again",
@@ -179,7 +170,7 @@ pub async fn run(
     ))
 }
 
-/// Awaits `work` only if it is wanted, so several conditional fetches can still be run as one.
+/// Awaits `work` only if it is wanted, so several conditional fetches can still run as one.
 async fn optional<T>(
     wanted: bool,
     work: impl std::future::Future<Output = smw::Result<T>>,
@@ -207,13 +198,12 @@ fn assemble<'a>(
         .collect();
 
     // One entry per pair of worlds rather than per row. The wiki writes a passage up once per
-    // direction, and occasionally twice for one direction where there is more than one way
-    // through; either way it is the one passage, carrying everything the wiki said about it.
+    // direction, and occasionally twice where there is more than one way through; either way it is
+    // one passage carrying everything the wiki said about it.
     let mut passages: HashMap<(usize, usize), Passage> = HashMap::new();
     let mut leaving: Vec<Vec<usize>> = vec![Vec::new(); locations.len()];
     for connection in connections {
-        // A passage the wiki marks as gone describes a version of the game nobody is playing, and
-        // would otherwise make removed worlds look reachable.
+        // A passage the wiki marks as gone would otherwise make removed worlds look reachable.
         if connection.is_removed {
             continue;
         }
@@ -221,8 +211,7 @@ fn assemble<'a>(
             at.get(connection.origin.as_str()),
             at.get(connection.destination.as_str()),
         ) else {
-            // Either end being unknown means the wiki documents a passage to a page that is not a
-            // location, which is a hole in the wiki rather than in this program.
+            // An unknown end is a passage to a page that is not a location: a hole in the wiki.
             continue;
         };
         let passage = passages.entry((from, to)).or_insert_with(|| {
@@ -243,8 +232,8 @@ fn assemble<'a>(
         }
     }
 
-    // The order passages are fetched in is not stable between requests, and both the distances and
-    // the published dump walk this. Sorted so two syncs of one wiki produce the same document.
+    // Fetch order is not stable between requests, and both the distances and the published dump
+    // walk this. Sorted so two syncs of one wiki produce the same document.
     for leaving in &mut leaving {
         leaving.sort_unstable();
     }
@@ -268,9 +257,8 @@ fn assemble<'a>(
             .collect::<Vec<_>>(),
     );
 
-    // A world the game no longer has is measured -- it is part of the graph, and a live world can
-    // sit behind one -- but not published. So the published index is not the fetched index, and
-    // every passage has to be renumbered into it.
+    // A world the game no longer has is measured -- a live world can sit behind one -- but not
+    // published, so every passage has to be renumbered into the published index.
     let published: Vec<Option<usize>> = {
         let mut next = 0;
         removed
@@ -369,22 +357,19 @@ fn assemble<'a>(
 #[derive(Default)]
 struct Passage {
     flags: ConnType,
-    /// The wiki's words for whichever conditions it writes words for, keyed by the flag imposing
-    /// them.
+    /// Keyed by the flag imposing the condition.
     wording: std::collections::BTreeMap<i16, TypeParams>,
 }
 
 /// The worlds this dump is about, in [`published_place`] order.
 ///
-/// Every world the wiki documents is here, the secrets included. A secret is published and marked
-/// rather than dropped for two reasons: the mark is carried from one dump to the next by title, so
-/// a dropped world is a mark forgotten at the next sync, and hiding is a question about a reader
-/// rather than about the game.
+/// Secrets included: the mark is carried from one dump to the next by title, so a dropped world is
+/// a mark forgotten at the next sync, and hiding is a question about a reader rather than the game.
 ///
-/// A world's published id is its index in this list, so the order is part of the interface: it is
-/// what a client's own caches are keyed by and what the thumbnail atlas is packed in. It is
-/// therefore a property of the game rather than of this program's history -- two runs reading the
-/// same wiki publish the same ids, whether either had a dump to start from or not.
+/// A world's published id is its index here, so the order is part of the interface -- what a
+/// client's caches are keyed by and what the thumbnail atlas is packed in. It is a property of the
+/// game rather than of this program's history: two runs reading the same wiki publish the same ids,
+/// whether either had a dump to start from or not.
 fn published_worlds(mut locations: Vec<smw::Location>) -> Vec<smw::Location> {
     locations.sort_by(|one, other| published_place(one).cmp(&published_place(other)));
     locations
@@ -393,15 +378,14 @@ fn published_worlds(mut locations: Vec<smw::Location>) -> Vec<smw::Location> {
 /// The origin first, then by the earliest RPG Maker map the world is built out of, then by title.
 ///
 /// The map numbers are the game's own, handed out in the order the maps were made, so this is very
-/// nearly the order the worlds were added in: a world already published moves only if the wiki
-/// corrects which maps it is, and one added next week takes a number above every number now in use
-/// and lands at the end.
+/// nearly the order the worlds were added in: a published world moves only if the wiki corrects
+/// which maps it is, and one added next week lands at the end.
 ///
-/// [`ORIGIN_MAP`] is named rather than left to that rule, and has to be: the debug room is map 1
-/// and would otherwise open the dump. It is also the one place in the order a reader depends on.
+/// [`ORIGIN_MAP`] has to be named rather than left to that rule: the debug room is map 1 and would
+/// otherwise open the dump. It is also the one place in the order a reader depends on.
 ///
-/// Two worlds sharing their earliest map -- ninety-odd groups do -- are separated by title, and
-/// the worlds the wiki names no map for sort after everything by the same rule.
+/// Worlds sharing their earliest map are separated by title, and the worlds the wiki names no map
+/// for sort after everything by the same rule.
 fn published_place(location: &smw::Location) -> (bool, u32, &str) {
     (
         !location.map_ids.contains(&ORIGIN_MAP),
@@ -410,7 +394,7 @@ fn published_place(location: &smw::Location) -> (bool, u32, &str) {
     )
 }
 
-/// The worlds an operator has marked as a spoiler, which no sync should unmark.
+/// Marked by an operator as a spoiler, which no sync should unmark.
 fn marked_secret(previous: &Dump) -> std::collections::HashSet<&str> {
     previous
         .worlds
@@ -420,14 +404,14 @@ fn marked_secret(previous: &Dump) -> std::collections::HashSet<&str> {
         .collect()
 }
 
-/// `None` for an absent *or* empty field. The wiki holds both, and the reader treats an empty
-/// string as a value it has -- an empty Japanese title would be shown as a world's name.
+/// `None` for an absent *or* empty field: the reader treats an empty string as a value it has, so
+/// an empty Japanese title would be shown as a world's name.
 fn text(value: Option<&str>) -> Option<String> {
     value.filter(|text| !text.is_empty()).map(str::to_owned)
 }
 
-/// Blank entries are kept: the reader reads two of these fields in step with each other, so a gap
-/// in one has to be a gap in the other.
+/// Blank entries are kept: the reader reads two of these fields in step, so a gap in one has to be
+/// a gap in the other.
 fn joined(parts: impl Iterator<Item = String>) -> Option<String> {
     let parts: Vec<String> = parts.collect();
     (!parts.is_empty()).then(|| parts.join("|"))
@@ -435,21 +419,18 @@ fn joined(parts: impl Iterator<Item = String>) -> Option<String> {
 
 /// Percent-encodes an address the way a browser's `encodeURI` does.
 ///
-/// The wiki serves pictures under the page titles they were uploaded for, so an address can carry
-/// a space or a Japanese character verbatim -- and every reader hands these straight to an HTTP
-/// client, which refuses a raw space.
+/// The wiki serves pictures under the page titles they were uploaded for, so an address can carry a
+/// space or a Japanese character verbatim, and readers hand these straight to an HTTP client.
 fn encode_uri(url: &str) -> String {
-    /// What `encodeURI` leaves alone: the unreserved set, the reserved delimiters that make an
-    /// address an address, and `#`.
+    /// What `encodeURI` leaves alone: the unreserved set, the reserved delimiters, and `#`.
     const KEEP: &str = ";,/?:@&=+$-_.!~*'()#";
     let mut encoded = String::with_capacity(url.len());
     for byte in url.bytes() {
         if byte.is_ascii_alphanumeric() || KEEP.as_bytes().contains(&byte) {
             encoded.push(byte as char);
         } else if byte == b'%' {
-            // Already-encoded input is left alone rather than encoded twice, which is where
-            // `encodeURI` and this part company: it would turn `%27` into `%2527`. The wiki serves
-            // both forms, so re-encoding would break the addresses that are already right.
+            // Where `encodeURI` and this part company: it would turn `%27` into `%2527`. The wiki
+            // serves both forms, so re-encoding would break the addresses already right.
             encoded.push('%');
         } else {
             encoded.push_str(&format!("%{byte:02X}"));
@@ -458,15 +439,12 @@ fn encode_uri(url: &str) -> String {
     encoded
 }
 
-/// When the dump was built, and when it was last built without first asking whether it needed to
-/// be.
+/// When the dump was built, and when it was last built without first asking whether it needed to be.
 ///
-/// A soft sync only runs once the wiki has said it changed, so the dump it publishes is as complete
-/// as any other -- but it was reached by trusting the wiki's account of itself, and if that account
-/// were wrong no soft sync would notice. So `lastFullUpdate` marks the last time this program saw
-/// the whole wiki for itself, and a soft sync carries it over rather than moving it.
-///
-/// A dump with no previous stamp is a full sync however it was asked for.
+/// A soft sync publishes a dump as complete as any other, but reached by trusting the wiki's account
+/// of itself, and if that account were wrong no soft sync would notice. So `lastFullUpdate` marks
+/// the last time this program saw the whole wiki for itself, and a soft sync carries it over rather
+/// than moving it. A dump with no previous stamp is a full sync however it was asked for.
 fn stamps(previous: &Dump, full: bool) -> (Option<String>, Option<String>) {
     let now = stamp();
     let last_full = match full {
@@ -476,12 +454,12 @@ fn stamps(previous: &Dump, full: bool) -> (Option<String>, Option<String>) {
     (Some(now.clone()), Some(last_full.unwrap_or(now)))
 }
 
-/// How much of the wiki's record of its own recent changes is worth trusting.
+/// How far back the wiki's record of its own recent changes is worth trusting.
 ///
 /// MediaWiki keeps that record for a fixed span and then forgets, answering a question about a
 /// moment further back with the changes it still has rather than with a complaint -- so a dump
 /// older than that would read an empty answer as "nothing has changed" and stay stale for ever.
-/// The wiki's default is ninety days, and a month leaves room for it to be configured tighter.
+/// The wiki's default is ninety days; a month leaves room for it to be configured tighter.
 const HORIZON: time::Duration = time::Duration::days(30);
 
 /// How far before the last dump a soft sync starts looking.
@@ -489,14 +467,14 @@ const HORIZON: time::Duration = time::Duration::days(30);
 /// The store is not written by the edit that changes it: a job queue re-reads the page afterwards,
 /// and until it has, a query answers with what the page used to say. A sync asking only about what
 /// changed since it last ran would take the stale answer, move its stamp past the edit, and never
-/// ask again. An hour costs a handful of pages re-read and closes that window.
+/// ask again.
 const MARGIN: time::Duration = time::Duration::hours(1);
 
 /// The moment a soft sync asks the wiki about, or `None` for a dump too old for the question to
-/// mean anything -- which is a full sync's job. See [`HORIZON`] and [`MARGIN`].
+/// mean anything, which is a full sync's job.
 pub fn asked_from(since: &str, now: time::OffsetDateTime) -> Option<String> {
     // A stamp that will not parse was not written by this program, so there is nothing to date the
-    // question from and reading the whole wiki is the safe answer.
+    // question from.
     let since = moment(since)?;
     (now - since < HORIZON).then(|| iso(since - MARGIN))
 }
@@ -511,11 +489,10 @@ fn stamp() -> String {
     iso(time::OffsetDateTime::now_utc())
 }
 
-/// Also what a release is dated with: a dump writing its own stamps one way and its release dates
-/// another would be two conventions for one reader.
+/// Also what a release is dated with: two conventions would be two things for one reader to know.
 pub fn iso(now: time::OffsetDateTime) -> String {
     // Written out rather than formatted with a description: the shape is fixed and the
-    // milliseconds are always zero, the reader only ever reading the day out of it.
+    // milliseconds are always zero.
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
         now.year(),
@@ -561,8 +538,7 @@ mod tests {
             version_gaps: Vec::new(),
         };
         let published = super::published_worlds(vec![
-            // Map 1: the game never walks the player here, but the dump still carries it as a
-            // secret and hiding it is the client's job.
+            // Map 1: the dump carries it as a secret and hiding it is the client's job.
             world("Debug Room", &[1]),
             world("Nexus", &[10, 11]),
             // The earliest of its maps places it, not the first one the wiki lists.
@@ -581,8 +557,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "Urotsuki's Room",
-                // Named rather than earned: map 1 is lower than the origin's map 2, so only the
-                // origin coming first by rule keeps the debug room from opening the dump.
+                // Map 1 is lower than the origin's map 2, so only the origin coming first by rule
+                // keeps the debug room from opening the dump.
                 "Debug Room",
                 "Hand Hub",
                 "Nexus",
@@ -613,9 +589,8 @@ mod tests {
         assert_eq!(built, full);
     }
 
-    // The cost of getting this wrong is asymmetric: asking for a piece that had not changed wastes
-    // one request, where failing to ask for one that had leaves the dump quietly wrong until the
-    // next full sync.
+    // Asymmetric: asking for a piece that had not changed wastes one request, where failing to ask
+    // for one that had leaves the dump quietly wrong until the next full sync.
     #[test]
     fn only_the_pieces_an_edited_page_belongs_to_are_asked_for_again() {
         let letters: std::collections::BTreeSet<char> = "ABS".chars().collect();
@@ -642,15 +617,15 @@ mod tests {
         assert_eq!(everything.shards(&letters), letters);
     }
 
-    // The two corrections a soft sync makes to "everything since the dump was built", both there
-    // because trusting the wiki's account of itself literally would lose edits.
+    // Two corrections to "everything since the dump was built", both because trusting the wiki's
+    // account of itself literally would lose edits.
     #[test]
     fn the_wiki_is_asked_about_a_little_before_the_dump_was_built() {
         let now = time::OffsetDateTime::from_unix_timestamp(1_788_393_600).expect("a moment");
         let built = super::iso(now - time::Duration::hours(6));
 
-        // Back an hour, the store being indexed after the edit that changed it and a query inside
-        // that window answering with what the page used to say.
+        // Back an hour: the store is indexed after the edit, and a query inside that window
+        // answers with what the page used to say.
         assert_eq!(
             super::asked_from(&built, now).as_deref(),
             Some(super::iso(now - time::Duration::hours(7)).as_str())
@@ -671,8 +646,7 @@ mod tests {
         );
     }
 
-    // An address already escaped is left alone rather than escaped twice, which would turn `%27`
-    // into `%2527` and serve nobody a picture.
+    // Escaping twice would turn `%27` into `%2527` and serve nobody a picture.
     #[test]
     fn an_already_escaped_address_is_left_as_it_is() {
         let escaped = "https://yume.wiki/images/0/Urotsuki%27s_Room.png";

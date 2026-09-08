@@ -3,19 +3,18 @@
 Where this crate is shaped by the compiler rather than by the problem, what each of those shapes
 is currently worth, and what to re-measure when the toolchain moves.
 
-Everything here is a workaround for something LLVM does not do on its own today. None of it is a
-permanent decision. If a later compiler stops needing one of these, the right response is to
-delete it and take the plainer code: `tests/codegen.rs` will say which ones still earn their
-keep, and the numbers below say what is at stake if one silently stops working.
+Everything here is a workaround for something LLVM does not do on its own today, and none of it is
+permanent. If a later compiler stops needing one, delete it and take the plainer code:
+`tests/codegen.rs` says which ones still earn their keep, and the numbers below say what is at
+stake if one silently stops working.
 
 Measured 2026-09-07 on rustc 1.98.1 / LLVM 22.1.8, one core of an AMD Ryzen 7 9800X3D. Node
 counts are the whole graph; `theta = 0` is the exact O(n²) pass and `0.9` the Barnes-Hut default.
 
 ## The repulsion kernel
 
-`repulsion_on` is the pass that dominates a step. It is plain scalar Rust over
-`[f32; LANES]` chunks, written so that LLVM's SLP vectorizer widens it; nothing in it is
-architecture-specific, and the same source is what runs on x86-64, aarch64 and wasm.
+`repulsion_on` dominates a step. It is plain scalar Rust over `[f32; LANES]` chunks, written so
+LLVM's SLP vectorizer widens it; the same source runs on x86-64, aarch64 and wasm.
 
 Three spellings in it are load-bearing.
 
@@ -58,18 +57,17 @@ zero they return, but only when running on aarch64, because `fmaxnm` and `fminnm
 same one the comparisons do; a force of `-0.0` moves a node exactly as far as one of `0.0`, so
 `the_two_clamp_bodies_agree` compares zeroes by value.
 
-That second one is worth the note. It is invisible from x86 — the same test passes there bit for
-bit — and it was found by `just test-arm`, which runs these tests on armv8 under qemu. Both
-bodies are compiled everywhere so that one host can check them against each other at all, but a
-property that only appears on the hardware needs the hardware. `tests/codegen.rs` covers the
-separate question of whether each target got the body meant for it, in both directions.
+The zero disagreement is invisible from x86 — the same test passes there bit for bit — and was
+found by `just test-arm`, which runs these tests on armv8 under qemu. Both bodies are compiled
+everywhere so one host can check them against each other, but a property that only appears on the
+hardware needs the hardware. `tests/codegen.rs` covers the separate question of whether each target
+got the body meant for it.
 
 `llvm-mca` has no wasm model, and a browser's own backend is what picks the final instructions
 anyway; the x86 rows are the closest available reading of what a desktop browser ends up running.
 
-Those are static estimates of one loop, and the millisecond tables further down are the same
-comparison run as a whole simulation, on this machine and on a phone. Where they disagree, the
-milliseconds are what happened.
+Those are static estimates of one loop; the millisecond tables below are the same comparison run
+as a whole simulation. Where they disagree, the milliseconds are what happened.
 
 **The lane loop iterates `as_chunks`, not a running index.** Five slices indexed by a common
 `base` leaves a bounds check inside the vector body: LLVM does not prove `base + LANES <= n` from
@@ -78,10 +76,9 @@ milliseconds are what happened.
 remainder that `as_chunks` hands back is statically shorter than `LANES`, which also turns the
 scalar tail from a loop into a peeled sequence.
 
-**`repulsion_on` is not `#[inline]`.** It was, with a comment saying the lane loop went scalar
-without it. That is no longer true — with the attribute removed the out-of-line copy vectorizes
-identically, on x86-64 and on wasm — and the function is entered once per node, so the call is
-already amortized over every interaction that node has.
+**`repulsion_on` is not `#[inline]`.** It was, against the lane loop going scalar without it. That
+is no longer true — the out-of-line copy vectorizes identically on x86-64 and wasm — and the
+function is entered once per node, so the call is already amortized over that node's interactions.
 
 What each is worth, one change at a time, from `just bench`. Milliseconds per step of the whole
 simulation; the clamp column is each architecture built with the body meant for the other one, and
@@ -106,16 +103,15 @@ Barnes-Hut at the default angle, 16000 nodes, which is the shape the application
 | Cortex-A55, 2.0 GHz | 127.4 | 131.9 | 364.9 |
 | Cortex-A76, 2.2 GHz | 28.0 | 37.7 | 86.4 |
 
-The bounds check is by a distance the largest of the three, 3x to 8x, and it is the one nothing
-about the source suggests: the indexed loop reads identically and differs only in what LLVM can
-prove about it. It costs most where the vectors are widest, because what it really costs is the
-vectorization rather than the check.
+The bounds check is by a distance the largest of the three, 3x to 8x, and the one nothing about
+the source suggests: the indexed loop reads identically and differs only in what LLVM can prove
+about it. It costs most where the vectors are widest, because what it costs is the vectorization
+rather than the check.
 
-The clamp is 1.3x to 2.4x on the exact pass, and the two aarch64 rows are the reason there are two
-bodies at all. Note how far the Cortex-A76 figure, 1.5x, is from the 10% that `llvm-mca` estimates
-for the aarch64 cores it does model — it has no A76 model, and this is the core the difference
-turned out to matter most on. The A55 row moves by several points between runs, so read it as
-somewhere around a tenth rather than as 12.6%.
+The clamp is 1.3x to 2.4x on the exact pass, and the two aarch64 rows are why there are two bodies
+at all. The Cortex-A76 figure, 1.5x, is far from the 10% `llvm-mca` estimates for the aarch64 cores
+it does model — it has no A76 model, and that is the core the difference matters most on. The A55
+row moves by several points between runs, so read it as around a tenth rather than as 12.6%.
 
 Barnes-Hut dilutes all of it, because the octree walk around the kernel is untouched either way.
 That is the honest number for the application, and it is still 1.35x on a phone's big core.
@@ -153,12 +149,11 @@ the emitted wasm holds `f32x4` instructions or scalar ones.
 | `"s"`, no LTO, package override | 8.31 MB | 2.299 MB | vector |
 | `"z"`, no LTO, package override | 8.01 MB | 2.242 MB | vector |
 
-The last row is smaller after brotli than any of the others, this crate included, and still gets
-the vectorized kernel. What it gives up is cross-crate inlining for everything else in the
-binary, which is mostly rendering and does not show in a size measurement; that is the reason the
-shipped profile is the second row and not the last. Fat LTO is not paying for itself on size
-here either way - it costs 374 KB of raw wasm against the same profile without it, and saves 9 KB
-after brotli.
+The last row is smaller after brotli than any of the others and still gets the vectorized kernel.
+What it gives up is cross-crate inlining for everything else in the binary, which is mostly
+rendering and does not show in a size measurement; that is why the shipped profile is the second
+row and not the last. Fat LTO is not paying for itself on size either way — 374 KB more raw wasm
+than the same profile without it, 9 KB less after brotli.
 
 ## Left on the table
 
@@ -184,14 +179,14 @@ iteration against the current code:
 | cortex-x2 | 23.5 | 23.0 | 33.0 |
 | cortex-x4 | 19.0 | 25.0 | 33.0 |
 
-The reason is that latency is not what binds here. On Skylake the loop is limited by ports 0 and 1,
-which the estimate's extra multiplies land on too, so its block throughput goes *up*, 12.5 to 14.5,
-while the divider it frees was never full. The divide and square root are pipelined on everything
-modern, and there is enough independent work either side of them to cover the latency. Two
-Newton-Raphson steps are a loss everywhere. One is a gain on exactly one class of aarch64 core, and
-a loss on the newest ones and on both in-order cores, where trading two instructions for four costs
-more than the operations saved — `cortex-a510` and `cortex-a55` have 64-bit NEON and the least
-headroom to begin with, so the machines that would most want this are the ones it hurts most.
+Latency is not what binds here. On Skylake the loop is limited by ports 0 and 1, which the
+estimate's extra multiplies land on too, so its block throughput goes *up*, 12.5 to 14.5, while the
+divider it frees was never full. The divide and square root are pipelined on everything modern,
+with enough independent work either side to cover the latency. Two Newton-Raphson steps are a loss
+everywhere. One is a gain on exactly one class of aarch64 core, and a loss on the newest ones and
+on both in-order cores, where trading two instructions for four costs more than the operations
+saved — `cortex-a510` and `cortex-a55` have 64-bit NEON and the least headroom, so the machines
+that would most want this are the ones it hurts most.
 
 Two more things to weigh. wasm has no such instruction at all — its SIMD is required to be
 bit-deterministic — so the browser build, the one under the most pressure, cannot have it. And LLVM

@@ -1,8 +1,8 @@
 //! Reading the release names the wiki writes into a world's infobox.
 //!
-//! Two of them are lists packed into one string, and both pack a `-` into entries whose version
-//! names may themselves begin `pre-`. So neither can be split on the first dash it happens to
-//! contain; both are split on the dash a version name starts after.
+//! Two are lists packed into one string, both packing a `-` into entries whose version names may
+//! themselves begin `pre-`. So neither can be split on the first dash it contains; both are split
+//! on the dash a version name starts after.
 
 use crate::model::{VerGap, VerUpdated};
 
@@ -21,8 +21,8 @@ fn separator(entry: &str) -> Option<usize> {
 
 /// Splits `0.120d patch 21-0.120e,0.125a-0.125b` into the spans a world was absent for.
 ///
-/// An entry with no separator is dropped rather than guessed at: a gap is two names by definition,
-/// and half of one says nothing about when the world came back.
+/// An entry with no separator is dropped rather than guessed at: half a gap says nothing about
+/// when the world came back.
 pub fn gaps(packed: &str) -> Option<Vec<VerGap>> {
     let gaps: Vec<VerGap> = packed
         .split(',')
@@ -41,16 +41,15 @@ pub fn gaps(packed: &str) -> Option<Vec<VerGap>> {
 /// Splits `0.118e,0.120a-c,0.121` into the releases that changed a world.
 ///
 /// Here the part after the separator is the wiki's shorthand for the kind of change rather than
-/// another version, so an entry without one is kept: a release changed the world and the wiki did
-/// not say how.
+/// another version, so an entry without one is kept: the wiki did not say how it changed.
 pub fn updates(packed: &str) -> Option<Vec<VerUpdated>> {
     let updates: Vec<VerUpdated> = packed
         .split(',')
         .filter(|entry| !entry.is_empty())
         .map(|entry| {
-            // Recognised by what follows rather than by where it is: the shorthand is one or two
-            // of `a-z` and `+`, which no version name is, so the dash inside `pre-` and the dash
-            // before a patch number are both left alone.
+            // Recognised by what follows rather than where it is: the shorthand is one or two of
+            // `a-z` and `+`, which no version name is, so the dash inside `pre-` and the one before
+            // a patch number are both left alone.
             let shorthand = entry.rfind('-').filter(|&at| {
                 at > 0
                     && !entry[at + 1..].is_empty()

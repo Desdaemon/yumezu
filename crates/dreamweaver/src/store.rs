@@ -1,10 +1,9 @@
 //! Where the dump lives between requests, and where it survives a restart.
 //!
-//! No database: the dump is small enough to hold whole, it is rebuilt from the wiki rather than
-//! edited, and the file it is written to is the very thing clients are served. So the store is one
-//! JSON document, kept parsed for the sync that reads the last one and serialized for the requests
-//! that hand it out. A server coming up with the wiki unreachable still serves the last dump it
-//! wrote, which is the only durability this needs.
+//! No database: the dump is small enough to hold whole, it is rebuilt rather than edited, and the
+//! file it is written to is the very thing clients are served. So it is one JSON document, kept
+//! parsed for the sync that reads the last one and serialized for the requests that hand it out. A
+//! server coming up with the wiki unreachable still serves the last dump it wrote.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -12,8 +11,8 @@ use std::sync::{Arc, RwLock};
 use crate::model::Dump;
 
 pub struct Snapshot {
-    /// For the next sync, which reads the previous dump to keep worlds in the order they were
-    /// already published in and to carry over what an operator marked on them.
+    /// For the next sync, which reads the previous dump to keep the published world order and to
+    /// carry over what an operator marked on them.
     pub dump: Dump,
     /// Byte for byte what a client is sent and what the file holds. Kept rather than produced per
     /// request, being a couple of megabytes and identical every time.
@@ -26,9 +25,8 @@ pub struct Store {
 }
 
 impl Store {
-    /// A missing or unreadable file is not an error: it is the state before the first sync. A file
-    /// that is there but malformed means a previous run wrote something a later one cannot read,
-    /// which is worth complaining about.
+    /// A missing or unreadable file is the state before the first sync. One that is there but
+    /// malformed means a previous run wrote something a later one cannot read.
     pub fn open(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let dump = match std::fs::read_to_string(&path) {
@@ -59,11 +57,11 @@ impl Store {
         self.current.read().unwrap().clone()
     }
 
-    /// The write comes first, into a neighbouring file that is then renamed over the real one, so
-    /// a run dying mid-write leaves the previous dump intact rather than half a document.
+    /// Written into a neighbouring file and renamed over the real one, so a run dying mid-write
+    /// leaves the previous dump intact rather than half a document.
     ///
     /// A failed write is reported and nothing more: the new dump is still better than the old one
-    /// for everyone being served now, and the next sync will try the file again.
+    /// for everyone being served now, and the next sync tries the file again.
     pub fn publish(&self, dump: Dump) -> Arc<Snapshot> {
         let snapshot = Arc::new(snapshot(dump));
         if let Err(error) = write(&self.path, &snapshot.json) {

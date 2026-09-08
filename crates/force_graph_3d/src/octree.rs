@@ -5,10 +5,9 @@
 
 use crate::LANES;
 
-/// The group a single tree walk serves, so it trades walk count against interaction-list length.
-/// Measured on a 4000-node graph at the default opening angle: 8 bodies costs 3.5 ms per step, 32
-/// costs 2.2 ms, 64 costs 2.5 ms. A multiple of [`LANES`], so a leaf's bodies fill whole
-/// iterations of the repulsion kernel.
+/// The group one tree walk serves: walk count against interaction-list length. A 4000-node graph
+/// at the default opening angle costs 3.5 ms per step at 8 bodies, 2.2 ms at 32, 2.5 ms at 64. A
+/// multiple of [`LANES`], so a leaf's bodies fill whole iterations of the repulsion kernel.
 const LEAF_CAPACITY: usize = LANES * 4;
 /// Coincident bodies would subdivide forever. At this depth the leaf keeps them all instead.
 const MAX_DEPTH: u32 = 20;
@@ -17,11 +16,9 @@ const NIL: u32 = u32::MAX;
 
 #[derive(Default)]
 pub(crate) struct Octree {
-    /// Center of mass of the cell.
     com_x: Vec<f32>,
     com_y: Vec<f32>,
     com_z: Vec<f32>,
-    /// Total mass of the cell.
     mass: Vec<f32>,
     /// How many pair interactions the cell stands in for.
     count: Vec<f32>,
@@ -183,7 +180,6 @@ impl Octree {
         self.width.len()
     }
 
-    /// The bodies of `cell`, if `cell` is a leaf.
     pub fn leaf_bodies(&self, cell: usize) -> Option<&[u32]> {
         let (start, count) = self.bodies[cell];
         self.is_leaf[cell].then(|| &self.order[start as usize..(start + count) as usize])
@@ -198,8 +194,8 @@ impl Octree {
     ///
     /// `query` is the leaf the box was measured from. Its own bodies must reach the kernel as
     /// bodies, never folded into an aggregate: only an exactly zero offset makes a node's pull on
-    /// itself zero, and an aggregate standing in for the node itself sits a rounding error away,
-    /// which the softened inverse square turns into a full-strength kick.
+    /// itself zero, and an aggregate standing in for it sits a rounding error away, which the
+    /// softened inverse square turns into a full-strength kick.
     #[allow(clippy::too_many_arguments)]
     pub fn gather(
         &self,
@@ -238,10 +234,9 @@ impl Octree {
             let (start, count) = self.bodies[cell];
             let encloses_query = start <= query_start && query_start < start + count;
             if !encloses_query && width * width < theta_sqrd * distance_sqrd {
-                // The aggregate replaces `count` pairs, each of which the exact pass would have
-                // clamped to `force_max` on its own, so it carries that many pairs' worth of
-                // headroom. Clamping it as one pair is what makes an aggregate under-report a
-                // crowded cell.
+                // The aggregate replaces `count` pairs the exact pass would each have clamped to
+                // `force_max`, so it carries that many pairs' worth of headroom. Clamping it as
+                // one pair is what makes an aggregate under-report a crowded cell.
                 out.push(
                     com[0],
                     com[1],

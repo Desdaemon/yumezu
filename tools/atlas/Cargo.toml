@@ -1,6 +1,5 @@
-# Its own workspace on purpose: this is a build-time asset step, and making it a member of the
-# app's workspace would pull an HTTP stack and an image codec into every `cargo check` of the
-# visualization itself.
+# Its own workspace on purpose: a member of the app's would pull an HTTP stack and an image codec
+# into every `cargo check` of the visualization itself.
 [workspace]
 
 [package]
