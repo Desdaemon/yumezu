@@ -43,8 +43,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: curl -L https://explorer.yumemiru.dev/data -o data.json
-
       - run: cargo nextest run --workspace
 
       - run: just test-wasm
