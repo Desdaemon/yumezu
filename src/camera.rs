@@ -273,21 +273,39 @@ impl AppStatics {
         );
     }
 
+    /// How far off the camera has to stand to hold a sphere of `radius`.
+    ///
+    /// Read against whichever field of view angle is narrower, so a route that fits vertically
+    /// cannot still hang off the sides of a tall window, and against the bounding sphere, so the
+    /// fit does not depend on which way what is framed is turned relative to the camera.
+    fn framing_distance(&self, radius: f32) -> f32 {
+        let viewport = self.camera.viewport();
+        let half_y = FOV_Y_DEGREES.to_radians() * 0.5;
+        let half_x = (half_y.tan() * viewport.width as f32 / viewport.height as f32).atan();
+        (radius * FRAMING_MARGIN / half_y.min(half_x).sin())
+            .clamp(self.control.min_distance, self.control.max_distance)
+    }
+
+    /// Puts the camera where [`Self::ease_to_frame`] would carry it, in one step: what an opening
+    /// view is framed with, there being nothing on screen yet to travel from.
+    pub(super) fn snap_to_frame(&mut self, bounds: &Bounds) {
+        let offset = self.camera.position() - self.control.target;
+        let up = self.camera.up();
+        let distance = self.framing_distance(bounds.radius);
+        self.camera.set_view(
+            bounds.center + offset / offset.magnitude() * distance,
+            bounds.center,
+            up,
+        );
+        self.control.target = bounds.center;
+    }
+
     /// Returns whether the camera still has ground to cover.
     ///
     /// Only the orbit centre and the distance move: the direction the camera looks from is left
     /// exactly as the person left it, so the graph does not spin under them while it closes in.
-    /// Framed against whichever field of view angle is narrower, so a route that fits vertically
-    /// cannot still hang off the sides of a tall window.
     pub(super) fn ease_to_frame(&mut self, bounds: &Bounds, dt: f32) -> bool {
-        let viewport = self.camera.viewport();
-        let half_y = FOV_Y_DEGREES.to_radians() * 0.5;
-        let half_x = (half_y.tan() * viewport.width as f32 / viewport.height as f32).atan();
-        // Against the bounding sphere, so the fit does not depend on which way the route is
-        // turned relative to the camera.
-        let goal_distance = (bounds.radius * FRAMING_MARGIN / half_y.min(half_x).sin())
-            .clamp(self.control.min_distance, self.control.max_distance);
-
+        let goal_distance = self.framing_distance(bounds.radius);
         let offset = self.camera.position() - self.control.target;
         let up = self.camera.up();
         let distance = offset.magnitude();

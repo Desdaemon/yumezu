@@ -300,6 +300,9 @@ struct AppEntities {
     /// Empty in a run drawing the whole game, which is what settles whether the panel offers the
     /// list at all. See [`Highlight::Untaken`].
     untaken: Vec<usize>,
+    /// The world a run opens framed on, with everything behind it: `None` in a dump that does not
+    /// hold it, which opens on the camera's own pose instead. See [`opening_room`].
+    opening: Option<usize>,
     /// Cleared once the camera arrives at the selected route, or as soon as the person takes the
     /// camera back.
     framing: bool,
@@ -626,10 +629,10 @@ impl App {
         self.ctx.wctx = None;
         self.ctx.window = None;
     }
-    /// Says where the camera was left, in the syntax of the literal in [`App::new`]: the view a run
-    /// opens on is picked by flying to one worth opening on and copying this line out of the log.
-    /// The layout is the same every run -- see `scatter` -- so the numbers mean the same thing
-    /// next time, but only within the dimensions they were read in.
+    /// Says where the camera was left, in the syntax of the literal in [`App::new`]: the angle a
+    /// run opens from is picked by turning the graph to one worth opening on and copying this line
+    /// out of the log. The layout is the same every run -- see `scatter` -- so the numbers mean
+    /// the same thing next time, but only within the dimensions they were read in.
     fn call_the_camera_out(&self) {
         let (eye, at) = (self.statics.camera.position(), self.statics.camera.target());
         let dimensions = self
@@ -651,7 +654,9 @@ impl App {
     pub fn new() -> Self {
         let camera = Camera::new_perspective(
             Viewport::new_at_origo(1, 1),
-            // Picked by hand off a settled three-dimensional layout.
+            // Only which way a run looks from: where it looks and how far off it stands are
+            // framed onto the tree instead, in [`App::build`]. Picked by hand off a settled
+            // three-dimensional layout.
             vec3(-49.7, -47.1, -31.0),
             vec3(218.5, -173.5, 180.6),
             vec3(0.0, 1.0, 0.0),
@@ -765,6 +770,15 @@ impl App {
         // a new layout, so where the camera was looking is nowhere in particular.
         if self.selected.is_some() {
             data.select(self.selected);
+        }
+        // Where a graph with nothing lit opens: on the tree, framed as picking it out would frame
+        // it, and snapped rather than eased -- there is no view yet to travel from.
+        if let Some(bounds) = (opening && data.selected.is_none())
+            .then(|| data.framing_bounds())
+            .flatten()
+        {
+            self.statics.snap_to_frame(&bounds);
+            data.framing = true;
         }
         self.data = Some(data);
     }
@@ -998,8 +1012,14 @@ impl App {
                     self.statics.ease_to_frame(&bounds, dt);
                     true
                 }
-                None => match data.highlight_bounds() {
-                    Some(bounds) => self.statics.ease_to_frame(&bounds, dt),
+                None => match data.framing_bounds() {
+                    Some(bounds) => {
+                        let easing = self.statics.ease_to_frame(&bounds, dt);
+                        // An opening frame is kept whether or not the camera has caught up, as an
+                        // arrival is: the tree is still spreading out of its scatter, so arriving
+                        // only means arriving at how far it had got.
+                        easing || (data.selected.is_none() && !data.graph.is_settled())
+                    }
                     None => false,
                 },
             };

@@ -23,6 +23,19 @@ const GRAB_TOLERANCE_PIXELS: f32 = 14.0;
 /// How far the cursor may travel between press and release and still count as a click, in physical
 /// pixels.
 const GESTURE_SLOP_PIXELS: f32 = 6.0;
+/// The world a run opens framed on, with everything behind it: the game's hub, which nearly the
+/// whole graph hangs off. As the wiki's English pages spell it.
+const OPENING_ROOM: &str = "Nexus";
+
+/// Which world that is, or `None` in a dump that has no such title -- a frontier drawing a player
+/// who has not been there, which opens on the camera's own pose rather than on some other tree.
+pub(super) fn opening_room(worlds: &[world::World]) -> Option<usize> {
+    worlds
+        .iter()
+        .position(|world| world.title == OPENING_ROOM)
+        .or_else(|| (worlds.len() > 3).then_some(2)) // or default to the third world, which is almost always Nexus
+}
+
 /// How many worlds the panel names out of a highlighted subtree.
 const NOTABLE_WORLDS: usize = 10;
 /// Connections a world needs to count as a "notable" descendant.
@@ -450,11 +463,16 @@ impl AppEntities {
     fn framed(&self) -> Vec<usize> {
         match self.selected {
             Some(Highlight::Route(world)) if !self.frame_route => vec![world],
+            // What a run opens framed on. Read only while framing, so clearing a selection later
+            // leaves the person looking at whatever they were looking at.
+            None => self
+                .opening
+                .map_or_else(Vec::new, |root| self.routes.subtree(root)),
             _ => self.highlighted(),
         }
     }
 
-    /// `None` with nothing selected.
+    /// `None` for a run with nothing selected and no world to open on.
     ///
     /// Centred on the middle of the bounding box rather than on the average, so a route that piles
     /// up near the origin and reaches out with a few steps is still framed around what it spans
@@ -463,7 +481,7 @@ impl AppEntities {
     /// The reach counts each world's own radius, so the sphere holds the thumbnails rather than
     /// the points they hang on: that is what a lone world is framed by, and what keeps a hub on
     /// the rim of a group whole instead of clipped by the window edge.
-    pub(super) fn highlight_bounds(&self) -> Option<Bounds> {
+    pub(super) fn framing_bounds(&self) -> Option<Bounds> {
         let highlighted = self.framed();
         if highlighted.is_empty() {
             return None;
@@ -490,7 +508,7 @@ impl AppEntities {
         self.bounds_of(&wanted)
     }
 
-    /// The sphere holding a set of worlds, pictures and all. See [`Self::highlight_bounds`].
+    /// The sphere holding a set of worlds, pictures and all. See [`Self::framing_bounds`].
     fn bounds_of(&self, wanted: &[bool]) -> Option<Bounds> {
         // Paired with the radius, both ends of the reach below needing the two together.
         let mut positions = Vec::new();

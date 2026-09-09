@@ -328,6 +328,7 @@ pub(super) fn entities(
         author_of,
         versions,
         selected: None,
+        opening: opening_room(worlds),
         deepest,
         right_press: None,
         menu: None,

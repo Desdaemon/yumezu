@@ -58,21 +58,19 @@ jobs:
       - name: Wait for all test dependencies
         wait: [install-deps, install-tools, recover-cache]
 
+      # `CHROMEWEBDRIVER` is set by the image and names the directory, not the binary. Expanded by
+      # the shell because the `env` context does not carry the runner's own environment.
+      # Runs first; its the longest by a few seconds.
+      - run: CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver" just test-browser
+        background: true
+
       - run: cargo nextest run --workspace
         background: true
 
       - run: just test-wasm
         background: true
 
-      # `CHROMEWEBDRIVER` is set by the image and names the directory, not the binary. Expanded by
-      # the shell because the `env` context does not carry the runner's own environment.
-      - run: CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver" just test-browser
-        background: true
-
       - wait: cache-cross
-
-      # Slower than the other two together, and the only one that executes the aarch64 clamp rather
-      # than reading the instructions it compiled to.
       - run: just test-arm
         background: true
 
