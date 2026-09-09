@@ -1,5 +1,9 @@
 # yumezu
 
+<p align="center">
+  <image src="icons/icon.png" alt="yumezu icon" width="256">
+</p>
+
 ## Install
 
 Check [Releases](https://github.com/Desdaemon/yumezu/releases) for the latest version.
