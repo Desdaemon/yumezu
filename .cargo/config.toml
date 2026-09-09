@@ -2,6 +2,9 @@
 # without it the browser build runs them one lane at a time.
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-feature=+simd128"]
+# The tests run in a real browser, which is the only place the shipping target can run at all.
+# `wasm-bindgen-test-runner` ships with the CLI and must be the same version as the crate.
+runner = "wasm-bindgen-test-runner"
 
 # `just test-wasm`. The shipping target cannot run a test binary without a JS host, and this one is
 # the same backend, feature and lane width.

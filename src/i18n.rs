@@ -212,6 +212,9 @@ fn matching(tag: &str) -> Option<Language> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_family = "wasm")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
     use super::Language;
 
     // Read off the file: a bundle answers whether it has a message but will not list the ones it

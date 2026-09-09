@@ -1228,6 +1228,9 @@ fn walkable_steps(worlds: &[World]) -> Vec<Vec<(usize, Ask)>> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_family = "wasm")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
     use super::World;
 
     // Read off disk rather than fetched, so the tests neither need a server running nor answer

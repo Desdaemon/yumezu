@@ -1,8 +1,9 @@
-# Three runs. The workspace run is every test on the host, `force_graph_3d`'s codegen checks
+# Four runs. The workspace run is every test on the host, `force_graph_3d`'s codegen checks
 # included -- those cross-compile for wasm and aarch64 and read the emitted IR, but never execute it.
-# The other two run the force-graph tests where that IR actually lands: the clamp becomes
+# Two of the rest run the force-graph tests where that IR actually lands: the clamp becomes
 # `f32x4.pmin`/`pmax` on wasm, whose NaN rules are not x86's, and `fmaxnm`/`fminnm` on aarch64, which
-# is a different source body again.
+# is a different source body again. The last runs the app's own tests in a browser, the only engine
+# the shipping target has.
 name: CI
 
 on:
@@ -29,19 +30,26 @@ jobs:
         with:
           # The codegen checks compile for `wasm32-unknown-unknown` and `aarch64-linux-android` and
           # read the IR back -- neither is linked, so the Android one needs no NDK. `wasm32-wasip2`
-          # is the one that can run a test binary. All three have to be present: a missing target
-          # makes those checks skip themselves, and `CI` is what turns that skip into a failure.
+          # runs one under wasmtime and `wasm32-unknown-unknown` runs one in the browser. All
+          # three have to be present: a missing target makes those checks skip themselves, and
+          # `CI` is what turns that skip into a failure.
           targets: wasm32-unknown-unknown, wasm32-wasip2, aarch64-linux-android
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest, just, wasmtime, cross
+          # `wasm-bindgen` generates the glue the browser tests load, and must be the same
+          # version as the crate. Chrome and its driver are already on the image.
+          tool: cargo-nextest, just, wasmtime, cross, wasm-bindgen@0.2.127
 
       - uses: Swatinem/rust-cache@v2
 
       - run: cargo nextest run --workspace
 
       - run: just test-wasm
+
+      # `CHROMEWEBDRIVER` is set by the image and names the directory, not the binary. Expanded by
+      # the shell because the `env` context does not carry the runner's own environment.
+      - run: CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver" just test-browser
 
       # Slower than the other two together, and the only one that executes the aarch64 clamp rather
       # than reading the instructions it compiled to.

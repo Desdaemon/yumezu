@@ -34,12 +34,25 @@ dreamweaver-release:
     strip target/x86_64-unknown-linux-gnu/release/dreamweaver
     @ls -lh target/x86_64-unknown-linux-gnu/release/dreamweaver
 
-test: && test-wasm test-arm
+test: && test-wasm test-browser test-arm
     cargo nextest run --workspace
 
 # Runs the force-graph behaviour tests compiled to wasm with SIMD on,
 test-wasm:
     cargo test -p force_graph_3d --lib --target wasm32-wasip2
+
+# Runs the app's own tests on the target that ships, in a real browser and with the same SIMD the
+# page gets. Headless through chromedriver where there is one; without it the suite is served
+# instead and the URL it prints opens in any browser. `NO_HEADLESS=1 just test-browser` forces the
+# second even when chromedriver is installed.
+test-browser:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "${NO_HEADLESS:-}" ] && command -v chromedriver >/dev/null; then
+        cargo test -p yumezu --lib --target wasm32-unknown-unknown
+    else
+        NO_HEADLESS=1 cargo test -p yumezu --lib --target wasm32-unknown-unknown
+    fi
 
 # Runs the force-graph behaviour tests on armv8, under qemu in cross's image.
 test-arm:

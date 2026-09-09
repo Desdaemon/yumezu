@@ -8,7 +8,9 @@ license = "MIT"
 # The wiki is asked over its own `api.php`, which answers in JSON, so talking to it needs nothing but
 # a transport and a deserializer. `rustls` explicitly: the default platform verifier is right for the
 # app but drags a native TLS stack into a server build that has no use for one.
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "http2", "query", "rustls"] }
+# Named only to pick the provider; see the same dep in the workspace root.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "http2", "query", "rustls-no-provider"] }
 # A connection's attributes are independent flags the reader gets back out of one number, so the
 # type is a bitfield rather than an enum. `bitflags` makes one that can still be matched on and
 # printed.

@@ -52,7 +52,7 @@ serde_json = "1"
 three-d = { version = "0.20.0", git = "https://github.com/asny/three-d" }
 # explicitly depended to override features
 three-d-asset = { version = "0.10", features = ["jpeg", "png", "http-rustls"] }
-reqwest = { version = "0.13.4" }
+reqwest = { version = "0.13.4", default-features = false, features = ["charset", "http2", "system-proxy", "json", "query", "stream", "rustls-no-provider"] }
 winit = "0.30"
 # `std::time::Instant` panics on the page; this is the same type everywhere else.
 web-time = "1"
@@ -70,6 +70,9 @@ skrifa = "0.44"
 phf = { version = "0.14.0", features = ["macros"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
+# Named only to pick the provider. Both are compiled in if anything in the graph asks for the
+# other, and aws-lc-rs costs ~900KiB of the binary over ring for the same suites.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 fontique = { version = "0.11", default-features = false, features = ["system"] }
 egui-winit = { version = "0.35", default-features = false, features = ["clipboard"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
@@ -95,6 +98,10 @@ web-sys = { version = "0.3.104", features = [
   "KeyboardEvent", "Node",
 ] }
 
+
+[target.'cfg(target_family = "wasm")'.dev-dependencies]
+# Pinned to `wasm-bindgen` itself, which the CLI generating the glue must also match exactly.
+wasm-bindgen-test = "=0.3.77"
 
 [target.'cfg(target_os = "android")'.dependencies]
 winit = { version = "0.30", features = ["android-native-activity"] }

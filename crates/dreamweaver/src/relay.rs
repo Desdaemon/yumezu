@@ -172,6 +172,8 @@ fn client() -> reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT
         .get_or_init(|| {
+            // `rustls-no-provider` leaves this to the process, and reqwest panics without it.
+            let _ = rustls::crypto::ring::default_provider().install_default();
             reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()

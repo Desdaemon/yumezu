@@ -139,6 +139,8 @@ fn judged<'a>(
 
 #[cfg(not(target_family = "wasm"))]
 fn transport() -> reqwest::Client {
+    // `rustls-no-provider` leaves this to the process, and reqwest panics without it.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let builder = reqwest::Client::builder();
     // reqwest 0.13 made `rustls-platform-verifier` its one way to check a certificate, and that
     // verifier reaches the system trust store through a Java class which must be in the apk and
@@ -243,4 +245,15 @@ pub fn clear() {
             }
         };
     });
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    /// `rustls-no-provider` moves the choice of provider out of reqwest's features and into
+    /// [`super::transport`], where nothing but a run can prove it was made: the builder panics
+    /// instead of failing to compile.
+    #[test]
+    fn transport_has_a_crypto_provider() {
+        super::transport();
+    }
 }
