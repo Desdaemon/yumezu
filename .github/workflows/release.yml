@@ -62,6 +62,13 @@ jobs:
             exit 1
           fi
 
+          # The keystore is a binary file carried as base64 -- Actions secrets are UTF-8 only, and
+          # the apk job decodes this one back. Checked here because a value that is not base64 at
+          # all is otherwise a failure twenty minutes in. Not the signing key below it: the
+          # packager takes either that key's contents or a path to it, so neither shape is wrong.
+          printf '%s' "$KEYSTORE" | base64 -d > /dev/null 2>&1 \
+            || { echo "::error::ANDROID_KEYSTORE does not decode as base64"; exit 1; }
+
   # One package per host: linuxdeploy and NSIS both run only on the system they package for.
   desktop:
     needs: plan
@@ -81,14 +88,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: just
+          tool: just,${{ env.PACKAGER }}
 
       # `fontique`, reached through `three-d`, links fontconfig and finds it with pkg-config.
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
-
-      # A build rather than a download: no prebuilt binary is published for it.
-      - run: cargo install --locked ${{ env.PACKAGER }}
 
       - run: just assets
 
@@ -109,7 +113,7 @@ jobs:
           # There is no FUSE on a runner, and linuxdeploy and its plugin are both AppImages.
           APPIMAGE_EXTRACT_AND_RUN: 1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.format }}
           # Each host matches one of these. The signatures come along: they are what a person
@@ -148,7 +152,14 @@ jobs:
           YUMEZU_KEYSTORE: ${{ runner.temp }}/production.jks
           YUMEZU_KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
 
-      - uses: actions/upload-artifact@v4
+      # `RUNNER_TEMP` is destroyed with a GitHub-hosted runner but not with a self-hosted one, and
+      # a key that outlives the job it was needed for is the whole of the risk. `always()` so a
+      # failed build leaves nothing behind either.
+      - name: Remove the release key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/production.jks"
+
+      - uses: actions/upload-artifact@v7
         with:
           name: apk
           path: target/android/yumezu.apk
@@ -163,7 +174,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: packages
           merge-multiple: true
