@@ -22,9 +22,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # 22s of `just test-arm` is this pull, and the setup below outlasts it, so fetching it
+      # alongside takes it off the critical path. The tag is cross's own version -- hence the pin.
+      - run: docker pull ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
+        id: cache-cross
+        background: true
+
       # `fontique`, which the renderer pulls in through `three-d`, links fontconfig on Linux and
       # finds it with pkg-config. Everything else native is opened at runtime rather than linked.
       - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
+        id: install-deps
+        background: true
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -36,21 +44,36 @@ jobs:
           targets: wasm32-unknown-unknown, wasm32-wasip2, aarch64-linux-android
 
       - uses: taiki-e/install-action@v2
+        id: install-tools
         with:
           # `wasm-bindgen` generates the glue the browser tests load, and must be the same
           # version as the crate. Chrome and its driver are already on the image.
-          tool: cargo-nextest, just, wasmtime, cross, wasm-bindgen@0.2.127
+          tool: cargo-nextest, just, wasmtime, cross@0.2.5, wasm-bindgen@0.2.127
+        background: true
 
       - uses: Swatinem/rust-cache@v2
+        id: recover-cache
+        background: true
+
+      - name: Wait for all test dependencies
+        wait: [install-deps, install-tools, recover-cache]
 
       - run: cargo nextest run --workspace
+        background: true
 
       - run: just test-wasm
+        background: true
 
       # `CHROMEWEBDRIVER` is set by the image and names the directory, not the binary. Expanded by
       # the shell because the `env` context does not carry the runner's own environment.
       - run: CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver" just test-browser
+        background: true
+
+      - wait: cache-cross
 
       # Slower than the other two together, and the only one that executes the aarch64 clamp rather
       # than reading the instructions it compiled to.
       - run: just test-arm
+        background: true
+
+      - wait-all:
