@@ -54,14 +54,18 @@ cp "$ROOT/static/thumbnails.jpg" "$OUT/staging/assets/static/" 2>/dev/null \
 cp "$ROOT/static/unknown_location.png" "$OUT/staging/assets/static/" 2>/dev/null \
     || echo "no static/unknown_location.png; unvisited worlds will have no picture" >&2
 
-# There are no resources to compile, so linking is only the manifest plus the assets beside it.
+# The launcher icon, and all that `android/res` holds. `link` takes compiled resources only, so
+# the zip below is that directory in the one form it reads.
+"$TOOLS/aapt2" compile --dir "$ROOT/android/res" -o "$OUT/res.zip"
+
 "$TOOLS/aapt2" link \
     -o "$OUT/unaligned.apk" \
     -I "$PLATFORM/android.jar" \
     --manifest "$ROOT/android/AndroidManifest.xml" \
     -A "$OUT/staging/assets" \
     --min-sdk-version "$MIN_SDK" \
-    --target-sdk-version 34
+    --target-sdk-version 34 \
+    "$OUT/res.zip"
 
 # Stored rather than deflated, because the manifest says `extractNativeLibs="false"`: the loader
 # maps the library straight out of the apk, which needs it uncompressed and aligned.

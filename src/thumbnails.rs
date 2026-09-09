@@ -13,8 +13,8 @@ use three_d::renderer::*;
 
 use super::fetch;
 
-// The same relative path reaches all three: beside the page, under the working directory, and
-// inside the apk.
+// One relative path for every target: beside the page, inside the apk, and under whichever root
+// [`installed`] finds on the desktop.
 const PATH: &str = "static/thumbnails.jpg";
 // Shipped beside the atlas by the same command that packs it. Whole rather than the cell of it the
 // atlas also carries -- see [`placeholder`].
@@ -74,12 +74,46 @@ fn picture(path: &'static str, mip_levels: Option<u32>) -> fetch::Pending<Option
     })
 }
 
-#[cfg(not(target_os = "android"))]
+/// The page asks its own host, so the relative path is the URL and there is nothing to resolve.
+#[cfg(target_family = "wasm")]
 async fn read(path: &str) -> Result<Vec<u8>, String> {
     let mut assets = three_d_asset::io::load_async(&[path])
         .await
         .map_err(|error| error.to_string())?;
     assets.remove(path).map_err(|error| error.to_string())
+}
+
+#[cfg(all(not(target_family = "wasm"), not(target_os = "android")))]
+async fn read(path: &str) -> Result<Vec<u8>, String> {
+    let found = installed(path).unwrap_or_else(|| path.into());
+    let mut assets = three_d_asset::io::load_async(&[&found])
+        .await
+        .map_err(|error| error.to_string())?;
+    assets.remove(&found).map_err(|error| error.to_string())
+}
+
+/// Where an installed copy keeps [`PATH`] and [`UNKNOWN`], which is not the working directory: an
+/// app started from a menu has whatever directory the launcher had. Each packager puts resources
+/// somewhere different, so all of them are tried and the first that is there wins. `None` leaves
+/// the relative path, which is the checkout the app was built in.
+#[cfg(all(not(target_family = "wasm"), not(target_os = "android")))]
+fn installed(path: &str) -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let candidates = [
+        // An AppImage mounts itself and names the mount; resources sit under the binary's own name.
+        std::env::var_os("APPDIR").map(|appdir| {
+            std::path::Path::new(&appdir)
+                .join("usr/lib")
+                .join(exe.file_name().unwrap_or_default())
+                .join(path)
+        }),
+        // NSIS, which installs resources beside the binary.
+        exe.parent().map(|dir| dir.join(path)),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate.is_file())
 }
 
 /// An apk holds its assets compressed inside itself rather than as files, so there is no path to

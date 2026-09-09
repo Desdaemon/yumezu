@@ -2,8 +2,12 @@
 
 ## Install
 
-Needs [`just`](https://github.com/casey/just) and, on Linux, fontconfig's headers -- the renderer
-links it. Nothing else native here is linked rather than opened at runtime.
+Check [Releases](https://github.com/Desdaemon/yumezu/releases) for the latest version.
+Available for Linux, Windows and Android, or visit <https://explorer.yumemiru.dev>.
+
+### From source
+
+Needs [`just`](https://github.com/casey/just) and, on Linux, fontconfig's headers.
 
 ```bash
 sudo apt install libfontconfig1-dev   # or fontconfig-devel, or fontconfig

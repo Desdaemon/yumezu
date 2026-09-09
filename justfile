@@ -65,3 +65,31 @@ test-arm:
 # `just apk` wants.
 bench *args:
     tools/bench.sh {{args}}
+
+# The thumbnail atlas and the placeholder, taken from the deployed page rather than packed again:
+# `just thumbnails` downloads every world's image from the wiki, and these are the two files that
+# run produced. Neither is committed -- they are the wiki's to distribute, see `.gitignore` -- so a
+# fresh clone and a CI runner both start without them.
+#
+# A package built without them has no world pictures at all, and `cargo packager` refuses to build
+# one, so this is not optional the way `android/build.sh`'s own copy is.
+assets:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for name in thumbnails.jpg unknown_location.png; do
+        [ -f "static/$name" ] \
+            || curl -fsSL --retry 3 -o "static/$name" "https://explorer.yumemiru.dev/static/$name"
+    done
+
+# Builds this host's desktop package into `target/packages`: an AppImage on Linux, an NSIS
+# installer on Windows. `cargo packager` only packages, so the binary is built first.
+#
+# Unsigned unless CARGO_PACKAGER_SIGN_PRIVATE_KEY is set, and an unsigned package is one no
+# installed copy will take as an update -- see `src/update.rs`. Signed or not, a package built
+# without YUMEZU_UPDATE_PUBKEY has no update controls to press.
+#
+# NO_STRIP is linuxdeploy's: its own strip cannot read the `.relr.dyn` section that every library a
+# current toolchain built has, and it treats that failure as fatal.
+package: assets
+    cargo build --release --locked --bin yumezu_main --features production
+    NO_STRIP=1 APPIMAGE_EXTRACT_AND_RUN=1 cargo packager --release

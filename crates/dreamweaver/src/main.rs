@@ -90,13 +90,21 @@ async fn main() -> std::process::ExitCode {
     let due = Arc::new(Due::new(options.sync_every, &store.snapshot().dump));
     let server = Server {
         store,
-        http: reqwest::Client::new(),
+        http: http(),
         fetched: Arc::default(),
         progress: Arc::default(),
         due,
     };
     serve(server, options).await;
     std::process::ExitCode::SUCCESS
+}
+
+/// The client the wiki is asked over.
+fn http() -> reqwest::Client {
+    // `rustls-no-provider` leaves the provider to the process, and reqwest panics building a
+    // client without one.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::new()
 }
 
 const USAGE: &str = "dreamweaver [--listen ADDR|PATH] [--data PATH] [--sync-every HOURS]";
@@ -402,4 +410,15 @@ async fn data(State(server): State<Server>) -> axum::response::Response {
 async fn poll_update(State(server): State<Server>) -> impl IntoResponse {
     let task = server.progress.task();
     axum::Json(serde_json::json!({ "task": task, "done": task.is_none() }))
+}
+
+#[cfg(test)]
+mod tests {
+    /// `rustls-no-provider` moves the choice of provider out of reqwest's features and into
+    /// [`super::http`], where nothing but a run can prove it was made: the builder panics instead
+    /// of failing to compile.
+    #[test]
+    fn the_client_has_a_crypto_provider() {
+        super::http();
+    }
 }

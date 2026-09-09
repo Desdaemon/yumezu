@@ -13,6 +13,9 @@ members = [
 [lib]
 crate-type = ["cdylib"]
 
+# Not `yumezu`: the lib target is already that, and trunk cannot tell two artifacts of one name
+# apart -- `found more than one target artifact`. The name reaches the desktop packages as the
+# installed file name, which `productName` below overrides everywhere a person reads it.
 [[bin]]
 name = "yumezu_main"
 path = "src/main.rs"
@@ -23,6 +26,34 @@ production = []
 # couple of seconds, the GPU's own clock over the whole frame or over each pass, and the switches
 # for both in the settings tab. Native only, and never shipped.
 profile = []
+
+# Desktop packaging. `cargo packager` reads this table but does not build anything: the binary has
+# to exist under `binariesDir` first, which is why `just package` builds before packaging. Keys are
+# camelCase because the config denies unknown fields and only some of them carry a kebab alias.
+#
+# No wix: an NSIS installer is what a person double-clicks, and dropping it keeps the WiX toolchain
+# off the Windows runner entirely. Both formats are what `cargo-packager-updater` can replace in
+# place -- see `src/update.rs`.
+[package.metadata.packager]
+productName = "yumezu"
+identifier = "dev.yumemiru.yumezu"
+description = "A 3D graph of every world in Yume 2kki"
+category = "Reference"
+homepage = "https://explorer.yumemiru.dev"
+formats = ["appimage", "nsis"]
+icons = ["icons/icon.png"]
+outDir = "target/packages"
+# Read at runtime rather than compiled in, the same as on the page and in the apk -- see
+# `src/thumbnails.rs`, which is also what knows where each format puts them.
+# Mapped rather than bare paths: a bare one is copied by its file name alone, and both formats have
+# to keep the `static/` the three targets share.
+resources = [
+  { src = "static/thumbnails.jpg", target = "static/thumbnails.jpg" },
+  { src = "static/unknown_location.png", target = "static/unknown_location.png" },
+]
+
+[package.metadata.packager.nsis]
+installerIcon = "icons/icon.ico"
 
 [profile.min]
 inherits = "release"
@@ -82,6 +113,10 @@ http = "1.5"
 
 [target.'cfg(all(not(target_family = "wasm"), not(target_os = "android")))'.dependencies]
 env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
+# The two desktop packages replace themselves through this; see `src/update.rs`. It carries its own
+# reqwest, a major behind the one above, so the desktop binary holds two -- desktop being the one
+# target here with no size budget.
+cargo-packager-updater = "0.2"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 sys-locale = { version = "0.3", features = ["js"] }

@@ -834,6 +834,7 @@ impl Panel {
         // that locks behind the person who ticked it.
         self.guide |= ui.button(t!("show-controls")).clicked();
         Self::clear_cache(ui);
+        update::controls(ui);
         Self::freshness(ui, dump);
         Self::yno(ui, sidebar, account, dump);
 

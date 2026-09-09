@@ -116,6 +116,15 @@ mod store;
 mod text_agent;
 mod thumbnails;
 mod ui;
+#[cfg(all(not(target_family = "wasm"), not(target_os = "android")))]
+mod update;
+
+/// What [`update`] is on the two targets that do not install packages: the page reloads and the
+/// apk goes through the store, so neither has anything to replace.
+#[cfg(any(target_family = "wasm", target_os = "android"))]
+mod update {
+    pub(super) fn controls(_ui: &mut egui::Ui) {}
+}
 mod world;
 mod yno;
 
