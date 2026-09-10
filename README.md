@@ -9,6 +9,15 @@
 Check [Releases](https://github.com/Desdaemon/yumezu/releases) for the latest version.
 Available for Linux, Windows, macOS and Android, or visit <https://explorer.yumemiru.dev>.
 
+### MacOS
+
+Newer versions of MacOS outright reject unsigned binaries, which includes yumezu.
+Once downloaded and installed, remove the quarantine flag with:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/yumezu.app
+```
+
 ### From source
 
 Needs [`just`](https://github.com/casey/just) and, on Linux, fontconfig's headers.
