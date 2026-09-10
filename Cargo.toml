@@ -108,6 +108,9 @@ egui-winit = { version = "0.35", default-features = false, features = ["clipboar
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
 reqwest-middleware = "0.5.2"
 http-cache-reqwest = "=1.0.0-alpha.8"
+# Named to open the download store itself -- see `src/fetch.rs`. The version has to be the one
+# `http-cache-reqwest` builds against: the manager takes the `Database`.
+redb = "4.2"
 http = "1.5"
 
 [target.'cfg(all(not(target_family = "wasm"), not(target_os = "android")))'.dependencies]

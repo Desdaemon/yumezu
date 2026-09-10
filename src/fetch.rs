@@ -188,6 +188,11 @@ fn cache() -> Option<http_cache_reqwest::Cache<http_cache_reqwest::RedbManager>>
 /// Kept apart from [`cache`] so [`clear`] reaches the same store. Opened once: two handles on one
 /// redb file is a lock the second would fail on, and emptying a second store would leave the
 /// client serving out of the first.
+///
+/// Every store made durable, rather than the manager's default of one batch in sixty-four. The
+/// rest of a batch is made durable by dropping the manager, and this one is never dropped -- it
+/// lives here for the length of the process, so a run downloading fewer than sixty-four things
+/// kept none of them and started the next run empty.
 #[cfg(not(target_family = "wasm"))]
 fn store() -> Option<&'static http_cache_reqwest::RedbManager> {
     static STORE: std::sync::OnceLock<Option<http_cache_reqwest::RedbManager>> =
@@ -195,7 +200,15 @@ fn store() -> Option<&'static http_cache_reqwest::RedbManager> {
     STORE
         .get_or_init(|| {
             let file = super::store::cache_directory()?.join("downloads.redb");
-            http_cache_reqwest::RedbManager::new(&file)
+            redb::Database::create(&file)
+                .map_err(|error| error.to_string())
+                .and_then(|database| {
+                    http_cache_reqwest::RedbManager::from_database_with_flush_interval(
+                        std::sync::Arc::new(database),
+                        1,
+                    )
+                    .map_err(|error| error.to_string())
+                })
                 .inspect_err(|error| log::warn!("cannot open {}: {error}", file.display()))
                 .ok()
         })
