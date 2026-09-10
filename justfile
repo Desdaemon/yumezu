@@ -1,10 +1,10 @@
 # Serves the page. `just dreamweaver` has to be running alongside it: the page asks its own host
 # for the world dump, and `Trunk.toml` puts that request through to the server.
-serve:
+serve: assets
     trunk serve --release
 
-dist *args:
-    trunk build --cargo-profile=min --features=production {{args}}
+dist *args: assets
+    trunk build --cargo-profile=min {{args}}
 
 # Downloads every world's image from the wiki and packs them into `static/thumbnails.jpg`, which
 # the app samples for the node thumbnails. Downloads are cached under `tools/atlas/cache`, so
@@ -69,10 +69,11 @@ bench *args:
 # The thumbnail atlas and the placeholder, taken from the deployed page rather than packed again:
 # `just thumbnails` downloads every world's image from the wiki, and these are the two files that
 # run produced. Neither is committed -- they are the wiki's to distribute, see `.gitignore` -- so a
-# fresh clone and a CI runner both start without them.
+# fresh clone starts without them.
 #
-# A package built without them has no world pictures at all, and `cargo packager` refuses to build
-# one, so this is not optional the way `android/build.sh`'s own copy is.
+# For `just dist` alone. `index.html` copies both into `dist/static/`, which is what publishes them:
+# every target reads the atlas from the host's `/static/` at runtime, so this is where the pictures
+# a package will fetch come from.
 assets:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -94,7 +95,7 @@ assets:
 #
 # NO_STRIP is linuxdeploy's: its own strip cannot read the `.relr.dyn` section that every library a
 # current toolchain built has, and it treats that failure as fatal.
-package: assets
+package:
     #!/usr/bin/env bash
     set -euo pipefail
     case "$(uname -s)" in
@@ -102,5 +103,5 @@ package: assets
         Darwin) formats=app,dmg ;;
         *) formats=nsis ;;
     esac
-    cargo build --release --locked --bin yumezu_main --features production
+    cargo build --release --locked --bin yumezu_main
     NO_STRIP=1 APPIMAGE_EXTRACT_AND_RUN=1 cargo packager --release --formats "$formats"

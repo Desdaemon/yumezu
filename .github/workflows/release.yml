@@ -104,10 +104,8 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
 
-      - run: just assets
-
       # The pubkey is compiled in, so it belongs to this step rather than to the packaging below.
-      - run: cargo build --release --locked --bin yumezu_main --features production
+      - run: cargo build --release --locked --bin yumezu_main
         env:
           YUMEZU_UPDATE_PUBKEY: ${{ vars.YUMEZU_UPDATE_PUBKEY }}
 
@@ -150,8 +148,6 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-
-      - run: just assets
 
       # A file rather than an environment variable because `apksigner` reads a file, and outside
       # the checkout so that nothing can pick it up as a resource.

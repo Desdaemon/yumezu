@@ -84,6 +84,18 @@ pub fn client() -> Client {
     CLIENT.get_or_init(build).clone()
 }
 
+/// A whole response body, for a caller wanting bytes rather than a document.
+pub async fn bytes(url: &str) -> Result<Vec<u8>, Error> {
+    Ok(client()
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?
+        .to_vec())
+}
+
 /// Order is the whole of it. A builder runs its middleware outermost first, so [`judged`] is added
 /// before the cache and therefore wraps it, the only position the cache's verdict can be read
 /// from -- it is written onto the response on the way back out.
@@ -99,9 +111,9 @@ fn build() -> Client {
 }
 
 /// Logs what the cache made of every request, which is otherwise unobservable: the store is one
-/// opaque file, and the point of a hit is that no traffic leaves the device to watch. At `info`
-/// because that is the level Android is set to, and a phone has no proxy to watch and no cache
-/// directory to look in without a debug build.
+/// opaque file, and the point of a hit is that no traffic leaves the device to watch. At `debug`:
+/// it is a line per request, which a run drawing a sidebar of pictures makes far too many of to sit
+/// at `info`.
 ///
 /// `x-cache-lookup` says whether the store had anything for the address at all and `x-cache`
 /// whether that thing was served, so `HIT`/`MISS` was held but had to be revalidated or could not

@@ -12,17 +12,16 @@ use serde::Deserialize;
 
 use super::i18n::t;
 
-/// `dreamweaver`, on the machine the app is running on. Fetched rather than compiled in, so a
-/// build is not a snapshot of the wiki -- worlds arrive weekly.
-#[cfg(all(not(target_family = "wasm"), not(feature = "production")))]
-const SERVER: &str = "http://127.0.0.1:5000";
-
-/// This project's own `dreamweaver`, deployed.
+/// This project's own `dreamweaver`, deployed. Fetched rather than compiled in, so a build is not a
+/// snapshot of the wiki -- worlds arrive weekly.
 ///
 /// The reference explorer at `explorer.yume.wiki` answers the same two routes but is not a
 /// fallback: it publishes no `cell`, so every world would come out of it wearing the
 /// placeholder.
-#[cfg(all(not(target_family = "wasm"), feature = "production"))]
+///
+/// A local `dreamweaver` is reached through the page instead -- `just serve` proxies to it, see
+/// `Trunk.toml`. Only trunk serves `static/`, so a native build has no local host to ask.
+#[cfg(not(target_family = "wasm"))]
 const SERVER: &str = "https://explorer.yumemiru.dev";
 
 /// Authors whose yume2kki-t tag is not their name in the dump.
@@ -559,9 +558,10 @@ pub(super) fn origin() -> &'static str {
 ///
 /// A request straight at the server is cross-origin, which `dreamweaver` sends no
 /// `Access-Control-Allow-Origin` to allow, and mixed-content wherever the page is served over
-/// https. So the page asks its own host under the same routes -- see the proxies in `Trunk.toml`,
-/// and note that `production` therefore moves only the native builds.
-fn server() -> &'static str {
+/// https. So the page asks its own host under the same routes -- see the proxies in `Trunk.toml`.
+///
+/// Also where [`super::thumbnails`] reads the atlas from, which is why this is not private.
+pub(super) fn server() -> &'static str {
     #[cfg(not(target_family = "wasm"))]
     return SERVER;
     #[cfg(target_family = "wasm")]

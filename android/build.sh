@@ -35,25 +35,17 @@ readonly BIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$BIN/$TRIPLE$MIN_SDK-clang
 export CC_aarch64_linux_android=$BIN/$TRIPLE$MIN_SDK-clang
 export AR_aarch64_linux_android=$BIN/llvm-ar
-# `production` points the app at the published dump rather than a `dreamweaver` on localhost, and
-# there is no localhost on a phone.
-cargo build --release --lib --features production --target "$TRIPLE"
+cargo build --release --lib --target "$TRIPLE"
 
 # The staging tree's layout *is* the apk's: `lib/<abi>` is where the framework looks for the library
-# named in the manifest, and `assets` is what the AssetManager in `src/thumbnails.rs` reads through.
+# named in the manifest. Nothing else goes in -- the thumbnails are fetched at runtime like the dump,
+# see `src/thumbnails.rs`.
 rm -rf "$OUT/staging"
-mkdir -p "$OUT/staging/lib/$ABI" "$OUT/staging/assets/static"
+mkdir -p "$OUT/staging/lib/$ABI"
 # Stripped on the way in: the debug symbols are two thirds of the library and nothing on a phone
 # reads them. `target/` keeps the unstripped copy for symbolising a crash out of logcat.
 "$BIN/llvm-strip" -o "$OUT/staging/lib/$ABI/libyumezu.so" \
     "$ROOT/target/$TRIPLE/release/libyumezu.so"
-# Absent until `just thumbnails` has been run, and the app draws the graph without pictures then.
-cp "$ROOT/static/thumbnails.jpg" "$OUT/staging/assets/static/" 2>/dev/null \
-    || echo "no static/thumbnails.jpg; the apk will have no world pictures" >&2
-# The same, and just as survivable: an unvisited world keeps its node without a picture on it.
-cp "$ROOT/static/unknown_location.png" "$OUT/staging/assets/static/" 2>/dev/null \
-    || echo "no static/unknown_location.png; unvisited worlds will have no picture" >&2
-
 # The launcher icon, and all that `android/res` holds. `link` takes compiled resources only, so
 # the zip below is that directory in the one form it reads.
 "$TOOLS/aapt2" compile --dir "$ROOT/android/res" -o "$OUT/res.zip"
@@ -62,7 +54,6 @@ cp "$ROOT/static/unknown_location.png" "$OUT/staging/assets/static/" 2>/dev/null
     -o "$OUT/unaligned.apk" \
     -I "$PLATFORM/android.jar" \
     --manifest "$ROOT/android/AndroidManifest.xml" \
-    -A "$OUT/staging/assets" \
     --min-sdk-version "$MIN_SDK" \
     --target-sdk-version 34 \
     "$OUT/res.zip"

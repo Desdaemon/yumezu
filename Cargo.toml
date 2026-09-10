@@ -21,7 +21,6 @@ name = "yumezu_main"
 path = "src/main.rs"
 
 [features]
-production = []
 # Builds `src/profile.rs` in place of its do-nothing stand-in: a report of what a frame cost every
 # couple of seconds, the GPU's own clock over the whole frame or over each pass, and the switches
 # for both in the settings tab. Native only, and never shipped.
@@ -51,14 +50,6 @@ formats = ["appimage", "nsis", "app", "dmg"]
 # that is not a png, and NSIS reads `installerIcon` below, so only macOS sees it.
 icons = ["icons/icon.png", "icons/icon.icns"]
 outDir = "target/packages"
-# Read at runtime rather than compiled in, the same as on the page and in the apk -- see
-# `src/thumbnails.rs`, which is also what knows where each format puts them.
-# Mapped rather than bare paths: a bare one is copied by its file name alone, and every format has
-# to keep the `static/` the three targets share.
-resources = [
-  { src = "static/thumbnails.jpg", target = "static/thumbnails.jpg" },
-  { src = "static/unknown_location.png", target = "static/unknown_location.png" },
-]
 
 [package.metadata.packager.nsis]
 installerIcon = "icons/icon.ico"

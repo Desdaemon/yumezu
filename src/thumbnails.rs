@@ -3,6 +3,10 @@
 //! One image rather than a texture per world, because the nodes are drawn as a single instanced
 //! mesh: fifteen hundred textures would be fifteen hundred draw calls.
 //!
+//! Fetched from the same host as the dump rather than shipped beside the binary, so a package does
+//! not freeze the pictures at release time while the worlds they illustrate go on arriving. See
+//! [`read`].
+//!
 //! A world's cell is the one the dump gives it, which the server hands out once and never moves,
 //! so an atlas is still right about every world it was packed with however far the dump has moved
 //! on since. A world the atlas is too small to hold a cell for is simply one packed after it was:
@@ -14,10 +18,10 @@ use three_d::renderer::*;
 
 use super::fetch;
 
-// One relative path for every target: beside the page, inside the apk, and under whichever root
-// [`installed`] finds on the desktop.
+// Under the host's own root on every target -- see [`read`]. Published with the page: the two
+// `copy-file` links in `index.html` are what put them there.
 const PATH: &str = "static/thumbnails.jpg";
-// Shipped beside the atlas by the same command that packs it. Whole rather than the cell of it the
+// Written beside the atlas by the same command that packs it. Whole rather than the cell of it the
 // atlas also carries -- see [`placeholder`].
 const UNKNOWN: &str = "static/unknown_location.png";
 /// Size of one thumbnail in texels. Must match `tools/atlas`, which writes the atlas.
@@ -31,8 +35,8 @@ pub const ASPECT: f32 = CELL[0] as f32 / CELL[1] as f32;
 /// of a cell, so no world samples its neighbour's picture.
 const MIP_LEVELS: u32 = 5;
 
-/// `None` is not fatal: the app draws the graph without pictures, which is also where a fresh
-/// checkout stands until `just thumbnails` has been run.
+/// `None` is not fatal: the graph draws without pictures until one arrives, and the caller asks
+/// again after a wait -- see [`super::Atlas`].
 pub fn load() -> fetch::Pending<Option<CpuTexture>> {
     picture(PATH, Some(MIP_LEVELS))
 }
@@ -75,71 +79,15 @@ fn picture(path: &'static str, mip_levels: Option<u32>) -> fetch::Pending<Option
     })
 }
 
-/// The page asks its own host, so the relative path is the URL and there is nothing to resolve.
-#[cfg(target_family = "wasm")]
+/// Off the host the dump comes from, so the pictures stay as current as the worlds they belong to
+/// and no package carries a copy that ages.
+///
+/// One implementation for every target: [`super::world::server`] is the page's own origin on wasm,
+/// so the same relative path is the same URL there.
 async fn read(path: &str) -> Result<Vec<u8>, String> {
-    let mut assets = three_d_asset::io::load_async(&[path])
+    fetch::bytes(&format!("{}/{path}", super::world::server()))
         .await
-        .map_err(|error| error.to_string())?;
-    assets.remove(path).map_err(|error| error.to_string())
-}
-
-#[cfg(all(not(target_family = "wasm"), not(target_os = "android")))]
-async fn read(path: &str) -> Result<Vec<u8>, String> {
-    let found = installed(path).unwrap_or_else(|| path.into());
-    let mut assets = three_d_asset::io::load_async(&[&found])
-        .await
-        .map_err(|error| error.to_string())?;
-    assets.remove(&found).map_err(|error| error.to_string())
-}
-
-/// Where an installed copy keeps [`PATH`] and [`UNKNOWN`], which is not the working directory: an
-/// app started from a menu has whatever directory the launcher had. Each packager puts resources
-/// somewhere different, so all of them are tried and the first that is there wins. `None` leaves
-/// the relative path, which is the checkout the app was built in.
-#[cfg(all(not(target_family = "wasm"), not(target_os = "android")))]
-fn installed(path: &str) -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let candidates = [
-        // An AppImage mounts itself and names the mount; resources sit under the binary's own name.
-        std::env::var_os("APPDIR").map(|appdir| {
-            std::path::Path::new(&appdir)
-                .join("usr/lib")
-                .join(exe.file_name().unwrap_or_default())
-                .join(path)
-        }),
-        // NSIS, which installs resources beside the binary.
-        exe.parent().map(|dir| dir.join(path)),
-        // A macOS bundle, whose binary is in `Contents/MacOS` and whose resources are a level up.
-        exe.parent()
-            .and_then(|macos| macos.parent())
-            .map(|contents| contents.join("Resources").join(path)),
-    ];
-    candidates
-        .into_iter()
-        .flatten()
-        .find(|candidate| candidate.is_file())
-}
-
-/// An apk holds its assets compressed inside itself rather than as files, so there is no path to
-/// hand the loader: the framework unpacks one on demand.
-#[cfg(target_os = "android")]
-async fn read(path: &str) -> Result<Vec<u8>, String> {
-    use std::io::Read as _;
-
-    let manager = super::ANDROID
-        .get()
-        .ok_or("the framework's handle was never passed on")?
-        .asset_manager();
-    let name = std::ffi::CString::new(path).map_err(|error| error.to_string())?;
-    let mut asset = manager
-        .open(&name)
-        .ok_or_else(|| format!("{path} is not in the apk"))?;
-    let mut bytes = Vec::new();
-    asset
-        .read_to_end(&mut bytes)
-        .map_err(|error| error.to_string())?;
-    Ok(bytes)
+        .map_err(|error| error.to_string())
 }
 
 /// Per world, the uv transform landing its quad on its cell. `of` holds `None` for a world the

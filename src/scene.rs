@@ -359,7 +359,7 @@ pub(super) fn entities(
         dash_runs_stale: true,
         recolored: true,
         glowing: None,
-        atlas: Some(thumbnails::load()),
+        atlas: Atlas::Loading(thumbnails::load()),
         sheet: None,
         cells: worlds.iter().map(world::World::cell).collect(),
         unvisited: unvisited.clone(),
@@ -641,15 +641,34 @@ impl AppEntities {
     }
 
     /// Points the thumbnail quads at their own cells of the atlas once it has arrived, and hands
-    /// egui a copy for the catalog. Nothing is drawn until then, or ever if it cannot be had.
-    pub(super) fn receive_atlas(&mut self, context: &Context, egui: &egui::Context) {
-        let Some(loaded) = self.atlas.as_ref().and_then(fetch::Pending::take) else {
+    /// egui a copy for the catalog. Nothing is drawn until then.
+    ///
+    /// An atlas that could not be had is asked for again after [`ATLAS_RETRIED_AFTER_SECONDS`]:
+    /// `seconds` is the frame's own, and the wait therefore runs on frames the app was drawing
+    /// anyway rather than keeping it awake. So a run left alone defers its next try until something
+    /// touches it, which is the right trade for pictures the graph reads fine without.
+    pub(super) fn receive_atlas(&mut self, seconds: f32, context: &Context, egui: &egui::Context) {
+        let loaded = match &mut self.atlas {
+            Atlas::Settled => return,
+            Atlas::Waiting(until) => {
+                *until -= seconds;
+                if *until <= 0.0 {
+                    self.atlas = Atlas::Loading(thumbnails::load());
+                }
+                return;
+            }
+            Atlas::Loading(pending) => match pending.take() {
+                Some(loaded) => loaded,
+                None => return,
+            },
+        };
+        // Logged where it is found. The graph goes on being drawn as it was before thumbnails
+        // existed, so the only cost of another try is the try.
+        let Some(atlas) = loaded else {
+            self.atlas = Atlas::Waiting(ATLAS_RETRIED_AFTER_SECONDS);
             return;
         };
-        self.atlas = None;
-        // Both failures are logged where they are found, and both leave the graph drawn as it was
-        // before thumbnails existed.
-        let Some(atlas) = loaded else { return };
+        self.atlas = Atlas::Settled;
         self.sheet = thumbnails::Sheet::new(egui, &atlas);
         let Some(cells) = thumbnails::cells(&self.cells, &atlas) else {
             return;

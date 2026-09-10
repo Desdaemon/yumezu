@@ -32,6 +32,10 @@ const IDLE_REDRAW_HZ: f32 = 30.0;
 /// Frames a second while the only reason to draw one is to see whether something asked for over
 /// the network has landed. Nothing on screen is moving, so this is a poll and not an animation.
 const POLL_REDRAW_HZ: f32 = 10.0;
+/// How long the app waits before asking for the thumbnail atlas again, after a try that could not
+/// be had. Longer than the dump's retries because nothing is waiting on it: the graph draws while
+/// the atlas is missing, only without the pictures on its nodes. See [`Atlas`].
+const ATLAS_RETRIED_AFTER_SECONDS: f32 = 10.0;
 /// How long the loading frame takes to fade off the graph behind it. See [`App::veil`].
 const LOADING_FADE_SECONDS: f32 = 0.5;
 
@@ -263,6 +267,18 @@ pub(super) struct App {
     stats: FrameStats,
 }
 
+/// Where the thumbnail atlas has got to, which is a state rather than a handle because a try that
+/// fails is retried: it is fetched over the network like everything else, and one flaky moment
+/// should not leave a run without pictures. Modelled on [`Dump`], which waits the same way.
+enum Atlas {
+    Loading(fetch::Pending<Option<CpuTexture>>),
+    /// Seconds until the next ask.
+    Waiting(f32),
+    /// On screen, or wrong-shaped and therefore never going to be: a mismatch between the atlas and
+    /// the dump is not something asking again can mend.
+    Settled,
+}
+
 struct AppEntities {
     graph: Graph,
     /// Held here rather than beside the camera, so rebuilding the graph drops the gesture along
@@ -371,8 +387,8 @@ struct AppEntities {
     /// which the pointer moved from one row to another is told apart from one in which it did
     /// not move at all.
     glowing: Option<usize>,
-    /// The thumbnail atlas on its way in, until [`AppEntities::receive_atlas`] takes it.
-    atlas: Option<fetch::Pending<Option<CpuTexture>>>,
+    /// The thumbnail atlas, from the ask through to the pictures being on screen. See [`Atlas`].
+    atlas: Atlas,
     /// The same atlas as the sidebar's catalog draws out of. `None` until it arrives, and forever
     /// if it cannot be had.
     sheet: Option<thumbnails::Sheet>,
@@ -1047,7 +1063,11 @@ impl App {
         }
 
         data.pull_grabbed_node(&self.statics.camera);
-        data.receive_atlas(ctx, self.overlay.as_ref().unwrap().gui.context());
+        data.receive_atlas(
+            (frame_input.elapsed_time as f32 * 1e-3).min(0.05),
+            ctx,
+            self.overlay.as_ref().unwrap().gui.context(),
+        );
         // Unclamped: the layout steps at a fixed rate and caps how much of a long frame it catches
         // up on itself, so a stalled tab is already its problem. What it returns is whether there
         // is geometry to rebuild.
@@ -1205,7 +1225,9 @@ impl App {
                 .then(|| Wanted::after_hz(IDLE_REDRAW_HZ)),
                 // Nothing is moving; a frame is drawn only because reading what has arrived is
                 // something only a frame does. See [`App::draw`].
-                (self.yno.asking() || data.atlas.is_some() || data.detail.pending())
+                (self.yno.asking()
+                    || matches!(data.atlas, Atlas::Loading(_))
+                    || data.detail.pending())
                     .then(|| Wanted::after_hz(POLL_REDRAW_HZ)),
             ]
             .into_iter()
