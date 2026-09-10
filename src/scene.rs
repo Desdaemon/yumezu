@@ -626,6 +626,7 @@ impl AppEntities {
         ]
         .into_iter()
         .flatten()
+        .chain(self.detail.drawn_lit(&self.lit_nodes))
     }
 
     /// Whether the overlay has anything at all to draw, and so whether the depth it wants out of
@@ -843,11 +844,13 @@ impl AppEntities {
         ready.then_some(&self.glow as &dyn Object)
     }
 
-    /// Every world the view is asking more of than the atlas holds, widest on screen first.
+    /// Every world the view is asking more of than the atlas holds, nearest the camera first.
     ///
     /// What [`detail`] is driven from, and the reason it needs no view of its own: a world is here
-    /// because its node is on screen and drawn wider than [`detail::SWITCH_PIXELS`], and it
-    /// carries the quad it would have been drawn on so the full picture lands over its thumbnail.
+    /// because its node is on screen and drawn wider than [`detail::LEAVE_PIXELS`], and it carries
+    /// the quad it would have been drawn on so the full picture lands over its thumbnail. The whole
+    /// hysteresis band, not only what the switch admits: which end applies turns on what is
+    /// already held, which only [`detail::Detail::track`] knows.
     ///
     /// A world in the middle of becoming itself is asked for at the size it is about to be rather
     /// than the size it is now, so the picture is fetched while the placeholder is still shrinking
@@ -858,7 +861,7 @@ impl AppEntities {
         let forward = camera.view_direction();
         let colors = self.thumbnail_instances.colors.as_ref();
         let across = camera.right_direction().normalize();
-        let mut magnified = Vec::new();
+        let mut magnified: Vec<(f32, detail::Magnified)> = Vec::new();
         self.graph.visit_nodes(|node| {
             let world = node.index().index();
             let position = world_pos(node.position());
@@ -879,22 +882,28 @@ impl AppEntities {
             let grown = self.arrivals.grown(world);
             // Ranked and admitted at the size it is settling at, drawn at the size it is now.
             let width = drawn_width(camera, across, full, position, center);
-            if width < detail::SWITCH_PIXELS {
+            if width < detail::LEAVE_PIXELS {
                 return;
             }
             let radius = full * grown;
-            magnified.push(detail::Magnified {
-                world,
-                width,
-                transformation: Mat4::from_translation(
-                    position - forward * (radius * detail::LIFT),
-                ) * billboard
-                    * Mat4::from_nonuniform_scale(radius * thumbnails::ASPECT, radius, 1.0),
-                color: colors.map_or(Srgba::WHITE, |colors| colors[world]),
-            });
+            magnified.push((
+                (position - camera.position()).magnitude2(),
+                detail::Magnified {
+                    world,
+                    width,
+                    transformation: Mat4::from_translation(
+                        position - forward * (radius * detail::LIFT),
+                    ) * billboard
+                        * Mat4::from_nonuniform_scale(radius * thumbnails::ASPECT, radius, 1.0),
+                    color: colors.map_or(Srgba::WHITE, |colors| colors[world]),
+                },
+            ));
         });
-        magnified.sort_by(|a, b| b.width.total_cmp(&a.width));
-        magnified
+        // Not by drawn width: perspective inflates a node as it goes off-axis, a third wider in
+        // the corner than the same node dead centre, so width would spend the budget on the
+        // worlds leaving the window rather than the one the view is pointed at.
+        magnified.sort_by(|(a, _), (b, _)| a.total_cmp(b));
+        magnified.into_iter().map(|(_, it)| it).collect()
     }
 }
 /// A lattice of soft blue glows on the background color, in the style of the game's own panoramas.

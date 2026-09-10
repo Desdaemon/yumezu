@@ -4,7 +4,7 @@
 //! own copy is fetched and drawn over the world's atlas quad. Only [`HELD`] at once, each being a
 //! texture and a draw call of its own where the atlas is one of each for the whole graph.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use three_d::renderer::*;
 
@@ -16,8 +16,11 @@ use super::{fetch, thumbnails};
 /// stretched a little is not visibly soft, and switching at the first magnified texel would spend a
 /// download on a node nobody is looking at yet.
 pub const SWITCH_PIXELS: f32 = 160.0;
-/// A ceiling on cost, not on the view: the widest nodes are served first, so coming in on a crowd
-/// sharpens the ones nearest the camera and leaves the rest on the atlas.
+/// Node width at which a world gives its own picture back. Under [`SWITCH_PIXELS`] so a node
+/// sitting on the switch does not trade picture for atlas cell every other frame.
+pub const LEAVE_PIXELS: f32 = SWITCH_PIXELS * 0.75;
+/// A ceiling on cost, not on the view: the nearest nodes are served first, so coming in on a crowd
+/// sharpens the ones the view has come in on and leaves the rest on the atlas.
 const HELD: usize = 8;
 /// The wiki's edge answers a request with no `Origin` with a challenge page rather than the
 /// picture. Only the native build sets it: the browser sets its own and will not be overridden.
@@ -29,10 +32,8 @@ pub const LIFT: f32 = 0.02;
 
 enum Held {
     Loading(fetch::Pending<Option<CpuTexture>>),
-    /// Boxed because it dwarfs the other two variants, which are the common ones.
+    /// Boxed because it dwarfs [`Held::Loading`], which every entry passes through.
     Ready(Box<Gm<Mesh, ColorMaterial>>),
-    /// Kept so the wiki is not asked again every time the view comes back.
-    Missing,
 }
 
 pub struct Detail {
@@ -40,7 +41,9 @@ pub struct Detail {
     /// been to, which has no picture of its own to fetch.
     images: Vec<String>,
     held: HashMap<usize, Held>,
-    /// Widest first, which is the order they are drawn in and the budget is spent in.
+    /// Kept so the wiki is not asked again every time the view comes back.
+    missing: HashSet<usize>,
+    /// Nearest the camera first, which is the order the budget is spent in.
     wanted: Vec<usize>,
     unvisited: Unvisited,
 }
@@ -61,8 +64,8 @@ struct Unvisited {
 
 pub struct Magnified {
     pub world: usize,
-    /// How wide the node comes out on screen, in physical pixels: both what admitted it and what
-    /// the caller ranks by.
+    /// How wide the node comes out on screen, in physical pixels. What admits it, not what ranks
+    /// it -- see [`Detail::wanted`].
     pub width: f32,
     /// Taken from the world's own atlas quad, so the switch changes the detail and nothing else.
     pub transformation: Mat4,
@@ -76,6 +79,7 @@ impl Detail {
         Self {
             images,
             held: HashMap::new(),
+            missing: HashSet::new(),
             wanted: Vec::new(),
             unvisited: Unvisited {
                 loading: unvisited.then(thumbnails::placeholder),
@@ -113,20 +117,24 @@ impl Detail {
         }
     }
 
-    /// `magnified` is every world drawn wider than [`SWITCH_PIXELS`], widest first. Anything past
+    /// `magnified` is every world drawn wider than [`LEAVE_PIXELS`], nearest first. Anything past
     /// [`HELD`] is left on the atlas, and anything held but no longer asked for is dropped.
     pub fn track(&mut self, context: &Context, magnified: &[Magnified]) {
-        // Filtered before the budget is counted: a world with no picture of its own already has
-        // the placeholder, and a slot spent on it would push out a world that has one.
+        // Filtered before the budget is counted: a world with no picture to be had already has the
+        // atlas cell or the placeholder, and a slot spent on it would push out a world that has
+        // one.
         let magnified: Vec<&Magnified> = magnified
             .iter()
-            .filter(|it| !self.images[it.world].is_empty())
+            .filter(|it| !self.images[it.world].is_empty() && !self.missing.contains(&it.world))
+            // The upper edge of the band the caller admitted: a world wide enough starts, one
+            // already held carries on down to [`LEAVE_PIXELS`]. Loading counts, dropping it
+            // stranding the fetch.
+            .filter(|it| it.width >= SWITCH_PIXELS || self.held.contains_key(&it.world))
             .take(HELD)
             .collect();
         let wanted: Vec<usize> = magnified.iter().map(|it| it.world).collect();
         // Before the new ones start, so a picture on its way out frees its slot in the same frame.
-        self.held
-            .retain(|world, held| matches!(held, Held::Missing) || wanted.contains(world));
+        self.held.retain(|world, _| wanted.contains(world));
         self.wanted = wanted;
 
         for it in magnified {
@@ -136,7 +144,12 @@ impl Detail {
                 None => Held::Loading(load(self.images[it.world].clone())),
                 Some(Held::Loading(pending)) => match pending.take() {
                     Some(Some(picture)) => Held::Ready(Box::new(quad(context, &picture))),
-                    Some(None) => Held::Missing,
+                    // Out of the running above rather than occupying a slot it can never draw
+                    // from.
+                    Some(None) => {
+                        self.missing.insert(it.world);
+                        continue;
+                    }
                     None => Held::Loading(pending),
                 },
                 Some(held) => held,
@@ -151,24 +164,34 @@ impl Detail {
         }
     }
 
-    /// Widest first, the order [`Detail::track`] left them in.
     pub fn drawn(&self) -> impl Iterator<Item = &dyn Object> {
-        // Placeholders first: one draw call for however many worlds wear them. A world turning over
-        // wears both for a moment, and the placeholder wins because [`LIFT`] lifts it against the
-        // node's whole radius while the picture is lifted against the shrinking radius it is drawn
-        // at.
+        // A world turning over wears both for a moment, and the placeholder wins on depth:
+        // [`LIFT`] lifts it against the node's whole radius where the picture is lifted against
+        // the shrinking radius it is drawn at.
         self.unvisited
             .quads
             .iter()
             .map(|quads| quads as &dyn Object)
-            .chain(
-                self.wanted
-                    .iter()
-                    .filter_map(|world| match self.held.get(world) {
-                        Some(Held::Ready(quad)) => Some(quad.as_ref() as &dyn Object),
-                        _ => None,
-                    }),
-            )
+            .chain(self.pictures().map(|(_, quad)| quad))
+    }
+
+    /// The pictures of the worlds a selection lights.
+    ///
+    /// The overlay clears the depth [`Detail::drawn`] wrote, so a lit world it does not draw again
+    /// falls back to the atlas quad underneath. Only the lit ones -- a magnified world outside the
+    /// selection belongs under the overlay, not in it.
+    pub fn drawn_lit<'a>(&'a self, lit: &'a [usize]) -> impl Iterator<Item = &'a dyn Object> {
+        self.pictures()
+            .filter_map(|(world, quad)| lit.contains(&world).then_some(quad))
+    }
+
+    fn pictures(&self) -> impl Iterator<Item = (usize, &dyn Object)> {
+        self.wanted
+            .iter()
+            .filter_map(|&world| match self.held.get(&world) {
+                Some(Held::Ready(quad)) => Some((world, quad.as_ref() as &dyn Object)),
+                _ => None,
+            })
     }
 }
 
