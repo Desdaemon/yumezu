@@ -123,6 +123,109 @@ const PAN_ASIDE_SETTLES_SECONDS: f64 = 8.0;
 /// has not reached would stall the very thing being measured.
 const GPU_CLOCK_DEPTH: usize = 4;
 
+/// The two answers a timer query has, looked up out of the GL the window already opened.
+///
+/// glow reaches for `glGetQueryObjectuiv` only when GL 4.5's `glGetQueryBufferObjectiv` loaded
+/// and for the `EXT` spelling otherwise, so on a 4.1 context -- every one macOS gives out --
+/// it calls a pointer it never loaded and panics. Both symbols are in the process all the same,
+/// where `dlsym` finds them. See `glow`'s `native::get_query_parameter_u32`.
+#[cfg(unix)]
+mod answers {
+    use std::ffi::{c_char, c_void};
+    use std::sync::LazyLock;
+
+    type Uiv = unsafe extern "C" fn(u32, u32, *mut u32);
+    type Ui64v = unsafe extern "C" fn(u32, u32, *mut u64);
+
+    // SAFETY: the declaration is `dlsym`'s own, from `<dlfcn.h>`.
+    #[allow(unsafe_code)]
+    unsafe extern "C" {
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    }
+
+    /// `RTLD_DEFAULT`, which is every symbol the process has loaded, in the order it loaded them.
+    /// Apple spells it `-2` and everybody else the null handle.
+    #[cfg(target_vendor = "apple")]
+    const LOADED: *mut c_void = -2isize as *mut c_void;
+    #[cfg(not(target_vendor = "apple"))]
+    const LOADED: *mut c_void = std::ptr::null_mut();
+
+    /// `name` must be nul terminated, and `F` must be the symbol's own signature.
+    #[allow(unsafe_code)]
+    unsafe fn find<F: Copy>(name: &str) -> Option<F> {
+        const { assert!(size_of::<F>() == size_of::<*mut c_void>()) };
+        // SAFETY: the handle is the documented constant, the name is nul terminated, and a
+        // symbol that is not there comes back null rather than as a fault.
+        let found = unsafe { dlsym(LOADED, name.as_ptr().cast()) };
+        // SAFETY: the caller named the signature, and a function pointer is pointer sized.
+        (!found.is_null()).then(|| unsafe { std::mem::transmute_copy(&found) })
+    }
+
+    #[allow(unsafe_code)]
+    pub(super) static UIV: LazyLock<Option<Uiv>> =
+        // SAFETY: the signature is `glGetQueryObjectuiv`'s own.
+        LazyLock::new(|| unsafe { find("glGetQueryObjectuiv\0") });
+    #[allow(unsafe_code)]
+    pub(super) static UI64V: LazyLock<Option<Ui64v>> =
+        // SAFETY: the signature is `glGetQueryObjectui64v`'s own.
+        LazyLock::new(|| unsafe { find("glGetQueryObjectui64v\0") });
+}
+
+/// Whether an answer can be read at all, which is the one thing [`GpuClock`] cannot recover from
+/// finding out late: glow panics rather than answers.
+fn readable() -> bool {
+    #[cfg(unix)]
+    {
+        answers::UIV.is_some() && answers::UI64V.is_some()
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// # Safety
+/// `query` must be the context's own, and `parameter` one the query answers.
+#[allow(unsafe_code)]
+unsafe fn parameter_u32(context: &Context, query: three_d::context::Query, parameter: u32) -> u32 {
+    #[cfg(unix)]
+    {
+        let _ = context;
+        let mut answer = 0;
+        if let Some(uiv) = *answers::UIV {
+            // SAFETY: the caller vouched for both arguments, and the answer is one `u32`.
+            unsafe { uiv(query.0.get(), parameter, &raw mut answer) };
+        }
+        answer
+    }
+    #[cfg(not(unix))]
+    // SAFETY: the caller vouched for both arguments.
+    unsafe {
+        context.get_query_parameter_u32(query, parameter)
+    }
+}
+
+/// # Safety
+/// As [`parameter_u32`].
+#[allow(unsafe_code)]
+unsafe fn parameter_u64(context: &Context, query: three_d::context::Query, parameter: u32) -> u64 {
+    #[cfg(unix)]
+    {
+        let _ = context;
+        let mut answer = 0;
+        if let Some(ui64v) = *answers::UI64V {
+            // SAFETY: the caller vouched for both arguments, and the answer is one `u64`.
+            unsafe { ui64v(query.0.get(), parameter, &raw mut answer) };
+        }
+        answer
+    }
+    #[cfg(not(unix))]
+    // SAFETY: the caller vouched for both arguments.
+    unsafe {
+        context.get_query_parameter_u64(query, parameter)
+    }
+}
+
 /// Seconds the GPU spent on a frame, which the processor's own milliseconds never say: a frame
 /// here spends under one of them and then waits in the driver, so this is the number that tells a
 /// view that is slow from one that is merely paced.
@@ -139,9 +242,13 @@ impl GpuClock {
     fn new(context: &Context) -> Self {
         // SAFETY: names no object and reads no memory. A refusal comes back as an error.
         #[allow(unsafe_code)]
-        let queries = (0..GPU_CLOCK_DEPTH)
-            .map_while(|_| unsafe { context.create_query() }.ok())
-            .collect();
+        let queries = if readable() {
+            (0..GPU_CLOCK_DEPTH)
+                .map_while(|_| unsafe { context.create_query() }.ok())
+                .collect()
+        } else {
+            Vec::new()
+        };
         Self {
             context: context.clone(),
             queries,
@@ -193,11 +300,8 @@ impl GpuClock {
         let oldest = self.queries[self.begun % GPU_CLOCK_DEPTH];
         #[allow(unsafe_code)]
         unsafe {
-            (self
-                .context
-                .get_query_parameter_u32(oldest, QUERY_RESULT_AVAILABLE)
-                != 0)
-                .then(|| self.context.get_query_parameter_u64(oldest, QUERY_RESULT) as f64 * 1e-9)
+            (parameter_u32(&self.context, oldest, QUERY_RESULT_AVAILABLE) != 0)
+                .then(|| parameter_u64(&self.context, oldest, QUERY_RESULT) as f64 * 1e-9)
         }
     }
 }
