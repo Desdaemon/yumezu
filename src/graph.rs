@@ -394,7 +394,22 @@ impl AppEntities {
     pub(super) fn highlighted(&self) -> Vec<usize> {
         match self.selected {
             None => Vec::new(),
-            Some(Highlight::Route(_)) => self.route(),
+            // Both ways from the world that was picked: the chain home, and the worlds one step
+            // on from it. One step rather than the whole subtree -- that is what
+            // [`Highlight::Descendants`] is for. The two meet at that world and nowhere else,
+            // which is what lets [`AppEntities::repaint`] colour them apart.
+            Some(Highlight::Route(world)) => {
+                let mut lit = self.route();
+                lit.extend(
+                    self.routes
+                        .parents
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, parent)| **parent == Some(world))
+                        .map(|(child, _)| child),
+                );
+                lit
+            }
             Some(Highlight::Descendants(world)) => self.routes.subtree(world),
             Some(Highlight::Author(author)) => self.authors[author].worlds.clone(),
             Some(Highlight::Version(version)) => self.versions[version].worlds.clone(),
@@ -468,6 +483,9 @@ impl AppEntities {
             None => self
                 .opening
                 .map_or_else(Vec::new, |root| self.routes.subtree(root)),
+            // The chain home rather than everything a route lights: what the button asks to be
+            // shown whole is the way there, not however much of the game hangs off its end.
+            Some(Highlight::Route(_)) => self.route(),
             _ => self.highlighted(),
         }
     }
@@ -508,11 +526,11 @@ impl AppEntities {
         self.bounds_of(&wanted)
     }
 
-    /// Where the world a list row is pointing at sits, which is what the view leans onto. `None`
-    /// whenever no row is pointing at one. See [`AppStatics::lean_toward`].
-    pub(super) fn pointed_at(&self) -> Option<Vec3> {
+    /// Where one world sits, which is what the view leans onto. See
+    /// [`AppStatics::lean_toward`].
+    pub(super) fn world_at(&self, world: usize) -> Option<Vec3> {
         let mut wanted = vec![false; self.titles.len()];
-        wanted[self.pointed?] = true;
+        *wanted.get_mut(world)? = true;
         Some(self.bounds_of(&wanted)?.center)
     }
 

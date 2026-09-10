@@ -107,6 +107,8 @@ pub(super) struct Overlay {
     /// What the running surface was built for. Kept because a surface is asked for its samples
     /// once, as it is built, so this is a choice only the next start can honour.
     antialias_running: bool,
+    /// Whether the view leans onto the world a row is pointing at. See [`leaning_remembered`].
+    pub(super) leaning: bool,
 }
 
 /// What the sidebar keeps between frames: held apart from [`Panel`], which is this frame's
@@ -152,6 +154,8 @@ struct Panel {
     /// tab can say when the two have parted. See [`Overlay::antialias_running`].
     antialias: bool,
     antialias_running: bool,
+    /// What the switch was left set to. See [`leaning_remembered`].
+    leaning: bool,
     /// A world picked out of one of the lists, to be routed to.
     chosen: Option<usize>,
     /// A world a list row is pointing at, to be brightened where it sits in the graph. At most one:
@@ -238,6 +242,7 @@ impl Overlay {
             layout: Layout::remembered(),
             antialias: remembered,
             antialias_running: remembered,
+            leaning: leaning_remembered(),
         }
     }
 
@@ -272,6 +277,7 @@ impl Overlay {
             layered: parameters.dag_level_distance.is_some(),
             antialias: self.antialias,
             antialias_running: self.antialias_running,
+            leaning: self.leaning,
             chosen: None,
             pointed: None,
             lit: None,
@@ -416,6 +422,10 @@ impl Overlay {
         if panel.antialias != self.antialias {
             self.antialias = panel.antialias;
             antialias_remember(self.antialias);
+        }
+        if panel.leaning != self.leaning {
+            self.leaning = panel.leaning;
+            leaning_remember(self.leaning);
         }
         // Followed live, so the panel resizes under the hand, but written through only once the
         // hand is off it: a store is not something to write every frame of a drag.
@@ -829,6 +839,7 @@ impl Panel {
         ui.add(egui::Slider::new(&mut self.ui_scale, UI_SCALE_RANGE).text(t!("ui-scale")))
             .on_hover_text(t!("ui-scale-hint"));
         self.antialiasing(ui);
+        self.leaning(ui);
         profile::controls(ui);
         // The way back to a panel that was dismissed for good, so ticking that box is not a door
         // that locks behind the person who ticked it.
@@ -1046,6 +1057,13 @@ impl Panel {
         if self.antialias != self.antialias_running {
             ui.label(t!("antialias-restart"));
         }
+    }
+
+    /// The motion a person is most likely to want stopped, being the one nothing asked for: see
+    /// [`AppStatics::lean_toward`].
+    fn leaning(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.leaning, t!("leaning"))
+            .on_hover_text(t!("leaning-hint"));
     }
 
     /// Every language names itself, so someone who cannot read the one the app opened in can still

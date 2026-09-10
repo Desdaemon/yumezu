@@ -114,6 +114,9 @@ antialias = 輪郭をなめらかに
 antialias-hint = グラフの輪郭を整えるかどうか。フレームを描く中で最も重いため、リフレッシュレート
     に届かないときはまずこれを切る。
 antialias-restart = 次回の起動から反映される。
+
+leaning = 指した世界へ寄る
+leaning-hint = 一覧で世界を指すと、視点がゆっくりとそこへ寄ります。オフにすると視点は動きません。
 show-controls = 操作方法を表示
 clear-cache = ダウンロードを消去
 clear-cache-hint = 実行間に保存された画像を消去します。次に見るときは再取得されます

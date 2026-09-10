@@ -36,14 +36,10 @@ pub(super) struct AppStatics {
     pub(super) cursor: CursorIcon,
     pub(super) touches: Touches,
     pub(super) walk: Walk,
-    /// How far the orbit centre has been carried toward what a list row is pointing at. Kept so
-    /// the same ground can be given back: a nudge that stayed would walk the view across the graph
-    /// one pointed row at a time.
-    pub(super) lean: Vec3,
-    /// What [`Self::lean`] is easing onto, itself easing onto where the pointed world is. Two
+    /// What the orbit centre is easing onto, itself easing onto where the pointed world is. Two
     /// eases in series rather than one: a single ease is at its fastest the instant it starts,
     /// which is the jolt a row under the pointer should never give.
-    pub(super) lean_goal: Vec3,
+    pub(super) lean_aim: Vec3,
     /// Whether the window is the one being typed at. What the dashes march for is somebody
     /// watching them, so this is what lets a settled layout stop being drawn at all rather than
     /// go on at [`IDLE_REDRAW_HZ`] for as long as the app is open.
@@ -317,48 +313,51 @@ impl AppStatics {
         self.control.target = bounds.center;
     }
 
-    /// Carries what the camera looks at a little of the way toward `at`, and gives that ground
-    /// back once nothing is pointed at. Returns whether it still has ground to cover.
+    /// Carries what the camera looks at toward `at`. Returns whether it still has ground to cover.
     ///
     /// In three dimensions the eye stays where it is and turns onto the world, which is the whole
     /// of the move: a look, not a journey. A flat view has no such turn to make -- the camera is
     /// held square to the plane -- so there the eye travels with what it looks at and the lean
     /// reads as a pan.
     ///
-    /// What has been given is remembered rather than read back off the camera, which a pan, a
-    /// dolly and a framing move are all writing to as well.
+    /// Nothing is given back when the pointing stops. Where the lean left the view is where the
+    /// person is now looking from, and taking that back under them would be the app moving the
+    /// camera at the one moment they have taken it over.
     pub(super) fn lean_toward(
         &mut self,
         at: Option<Vec3>,
         dimensions: Dimensions,
         dt: f32,
     ) -> bool {
-        let centre = self.control.target - self.lean;
-        let goal = match (at, dimensions) {
-            (None, _) => vec3(0.0, 0.0, 0.0),
-            (Some(at), Dimensions::Two) => at - centre,
+        let Some(at) = at else {
+            // Primed at where the view now is, so the next lean starts from rest rather than from
+            // wherever the last one was heading.
+            self.lean_aim = self.control.target;
+            return false;
+        };
+        let goal = match dimensions {
+            Dimensions::Two => at,
             // The eye does not travel here, so the centre landing on the world also sets how far
             // off the eye stands: only as near as the orbit will stand it.
-            (Some(at), Dimensions::Three) => self.within_orbit(at) - centre,
+            Dimensions::Three => self.within_orbit(at),
         };
-        // Against the goal itself rather than what the first ease has reached, which starts out
-        // level with the lean and would read as arrived before either had moved.
-        if (goal - self.lean).magnitude()
+        // Against the goal itself rather than against what the first ease has reached, which
+        // starts out level with the centre and would read as arrived before either had moved.
+        if goal.distance(self.control.target)
             < self.control.target.distance(self.camera.position()) * LEAN_ARRIVAL_TOLERANCE
         {
             return false;
         }
 
         // A fixed fraction of what is left per unit of time, as a framing move eases, and applied
-        // twice over: see [`Self::lean_goal`].
+        // twice over: see [`Self::lean_aim`].
         let step = 1.0 - (-dt / (LEAN_WINDOW_MS * 1e-3)).exp();
-        self.lean_goal += (goal - self.lean_goal) * step;
-        let travel = (self.lean_goal - self.lean) * step;
+        self.lean_aim += (goal - self.lean_aim) * step;
+        let travel = (self.lean_aim - self.control.target) * step;
         if dimensions == Dimensions::Two {
             self.camera.translate(travel);
         }
         self.control.target += travel;
-        self.lean += travel;
         if dimensions == Dimensions::Three {
             let (eye, up) = (self.camera.position(), self.camera.up());
             self.camera.set_view(eye, self.control.target, up);

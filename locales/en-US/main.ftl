@@ -149,6 +149,9 @@ antialias = Smooth edges
 antialias-hint = Whether the edges of the graph are softened. The most expensive part of drawing a
     frame, and the one thing to turn off when the rate falls short of the display.
 antialias-restart = Takes effect the next time yumezu starts.
+
+leaning = lean onto pointed worlds
+leaning-hint = Pointing at a world in a list carries the view onto it, slowly. Turn it off to hold the view still.
 show-controls = Show controls
 clear-cache = Clear downloads
 clear-cache-hint = Empties the pictures kept between runs, so the next look at a world fetches it again

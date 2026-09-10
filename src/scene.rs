@@ -70,6 +70,10 @@ const EDGE_LEAF_BRIGHTNESS: f32 = 0.6;
 const EDGE_LUMINANCE_EVENNESS: f32 = 0.5;
 /// Warm and bright, for the edges of the route back to the origin world.
 const ROUTE_COLOR: Srgba = Srgba::new(255, 242, 194, 255);
+/// The steps home from the world that was picked, apart from the steps on into what hangs off it:
+/// one is how the player gets there and the other is where it takes them. Red rather than another
+/// pale one, the two having to be told apart at a glance across a graph.
+const ROUTE_HOME_COLOR: Srgba = Srgba::new(255, 58, 74, 255);
 /// Brightness left to everything off the highlighted route. Low enough to set the surrounding
 /// graph behind the route, high enough that it stays readable as context.
 const DIMMED_BRIGHTNESS: f32 = 0.25;
@@ -91,14 +95,14 @@ const UNREACHED_COLOR: Srgba = Srgba::new(110, 110, 120, 255);
 /// marching is the whole point of the dashes -- and there are [`EDGE_DASHES`] of them per
 /// connection, half again as many instances as there are solid lines in the whole graph.
 pub(super) struct DashRun {
-    /// Where the run starts, clear of the picture drawn on the world at that end.
+    /// Where the run starts, which is the world at that end, not short of it.
     origin: Vec3,
     /// From there to where the dash one slot ahead starts. A dash stands at `origin + travel * at`
     /// for its own `at` in `0.0..1.0`.
     travel: Vec3,
     /// The dash's orientation and size: everything about its transformation except the position,
-    /// which is written into the fourth column. Scaled to nothing for a connection whose ends are
-    /// closer together than their own pictures, there being no run to draw in.
+    /// which is written into the fourth column. Scaled to nothing for a connection whose two ends
+    /// are in the same place, there being no direction to lay a run along.
     basis: Mat4,
 }
 /// A free function rather than a method because it reads the dump the app holds and hands back
@@ -299,6 +303,22 @@ pub(super) fn entities(
         InstancedMesh::new(ctx, &dash_instances, &CpuMesh::cylinder(EDGE_SIDES)),
         ColorMaterial::default(),
     );
+    // What a selection lights, drawn again over the finished scene. The same materials as the
+    // scene's own: the overlay is put in front by the depth it is drawn against being cleared
+    // first, not by refusing the depth test, so two lit worlds that overlap settle it between
+    // them exactly as two unlit ones do.
+    let (lit_thumbnail_instances, lit_edge_instances) =
+        (Instances::default(), Instances::default());
+    let lit_thumbnails = Gm::new(
+        InstancedMesh::new(ctx, &lit_thumbnail_instances, &CpuMesh::square()),
+        ColorMaterial::default(),
+    );
+    // Solid lines and dashes together: the two differ in how long a cylinder they place and in
+    // nothing else, so one overlay holds both.
+    let lit_edges = Gm::new(
+        InstancedMesh::new(ctx, &lit_edge_instances, &CpuMesh::cylinder(EDGE_SIDES)),
+        ColorMaterial::default(),
+    );
 
     // Before the graph takes the names over.
     let mut unknown = vec![false; worlds.len()];
@@ -335,6 +355,7 @@ pub(super) fn entities(
         cursor: None,
         hover: None,
         pointed: None,
+        leaning_at: None,
         // A graph with worlds coming into it moves the camera onto them. A pan or an orbit takes
         // it back at any point.
         framing: arriving,
@@ -355,6 +376,13 @@ pub(super) fn entities(
         thumbnail_instances,
         edge_instances,
         dash_instances,
+        lit_thumbnails,
+        lit_edges,
+        lit_thumbnail_instances,
+        lit_edge_instances,
+        lit_nodes: Vec::new(),
+        lit_lines: Vec::new(),
+        lit_dashes: Vec::new(),
         dash_runs: Vec::new(),
         dash_runs_stale: true,
         recolored: true,
@@ -403,6 +431,14 @@ impl AppEntities {
             on_route[node] = true;
         }
         let lit = self.selected.is_some();
+        // The chain home, which a route colours apart from the rest of what it lights. Empty for
+        // every other selection, so the arm reading it below never fires for one.
+        let mut homeward = vec![false; self.titles.len()];
+        if matches!(self.selected, Some(Highlight::Route(_))) {
+            for node in self.route() {
+                homeward[node] = true;
+            }
+        }
 
         // White leaves a picture as itself, so a world is only ever painted to push it back behind
         // what a selection lights.
@@ -414,13 +450,25 @@ impl AppEntities {
                 dim(Srgba::WHITE)
             };
         }
+        self.lit_nodes.clear();
+        if lit {
+            self.lit_nodes.extend(
+                on_route
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(world, &on_route)| on_route.then_some(world)),
+            );
+        }
 
-        let (routes, on_route) = (&self.routes.parents, &on_route);
+        let (routes, on_route, homeward) = (&self.routes.parents, &on_route, &homeward);
         let (solid, dashed, base) = (
             self.edge_instances.colors.as_mut().unwrap(),
             self.dash_instances.colors.as_mut().unwrap(),
             &self.edge_colors,
         );
+        let (lit_lines, lit_dashes) = (&mut self.lit_lines, &mut self.lit_dashes);
+        lit_lines.clear();
+        lit_dashes.clear();
         // The same order, and the same split between the two, that [`Self::rebuild_instances`] and
         // [`Self::march_dashes`] write the transformations in.
         let (mut edge, mut line, mut dash) = (0, 0, 0);
@@ -428,15 +476,15 @@ impl AppEntities {
             let (a, b) = (a.index().index(), b.index().index());
             // Whether this edge is a canonical step: from one of its ends to that end's parent.
             let step = routes[a] == Some(b) || routes[b] == Some(a);
-            let color = match self.selected {
-                None => base[edge],
+            let (color, shown) = match self.selected {
+                None => (base[edge], false),
                 // The one line it is about, and not even the step home from either of its ends,
                 // which is a different way through the graph than the one the reader asked for.
                 Some(Highlight::Connection(at, far)) => {
                     if (a, b) == (at, far) || (a, b) == (far, at) {
-                        ROUTE_COLOR
+                        (ROUTE_COLOR, true)
                     } else {
-                        dim(base[edge])
+                        (dim(base[edge]), false)
                     }
                 }
                 // A layer is a shell rather than a walk, so what is worth seeing across it is
@@ -444,20 +492,27 @@ impl AppEntities {
                 // being lit is the whole test, and such an edge is never a canonical step -- a
                 // parent is always exactly one depth in -- so it keeps its own distance color and
                 // only escapes the dimming.
-                Some(Highlight::Layer(_)) if on_route[a] && on_route[b] => base[edge],
+                Some(Highlight::Layer(_)) if on_route[a] && on_route[b] => (base[edge], true),
                 // Both ends being lit is not enough: it also has to be the step from one of them
                 // to that end's parent, or a shortcut between two distant points of a route would
                 // light up as if the walk went through it.
-                Some(_) if step && on_route[a] && on_route[b] => ROUTE_COLOR,
-                Some(_) => dim(base[edge]),
+                Some(_) if step && homeward[a] && homeward[b] => (ROUTE_HOME_COLOR, true),
+                Some(_) if step && on_route[a] && on_route[b] => (ROUTE_COLOR, true),
+                Some(_) => (dim(base[edge]), false),
             };
             // Every dash of a one-way connection takes the same color, so it reads as the one
             // line it stands for.
             if data.user_data {
                 dashed[dash..dash + EDGE_DASHES].fill(color);
+                if shown {
+                    lit_dashes.extend(dash..dash + EDGE_DASHES);
+                }
                 dash += EDGE_DASHES;
             } else {
                 solid[line] = color;
+                if shown {
+                    lit_lines.push(line);
+                }
                 line += 1;
             }
             edge += 1;
@@ -466,6 +521,77 @@ impl AppEntities {
         self.thumbnails.set_instances(&self.thumbnail_instances);
         self.edges.set_instances(&self.edge_instances);
         self.dashes.set_instances(&self.dash_instances);
+        // Only where a dash is one of the lit ones: a march that nothing in the overlay copies
+        // from has nothing to hand it.
+        if !self.lit_dashes.is_empty() {
+            self.gather_lit();
+        }
+    }
+
+    /// Copies the lit slots of the scene's own buffers into the overlay's, which is what
+    /// [`AppEntities::drawn_lit`] draws over the finished frame.
+    ///
+    /// Called wherever those buffers are written, the overlay being a copy and nothing more: the
+    /// positions come from the layout, the colors and the atlas cells from the passes that own
+    /// them. An empty selection leaves the overlay empty and the two draws are skipped.
+    fn gather_lit(&mut self) {
+        let gather = |instances: &mut Instances, from: &[&Instances], at: &[&[usize]]| {
+            instances.transformations.clear();
+            let colors = instances.colors.get_or_insert_default();
+            colors.clear();
+            for (from, at) in from.iter().zip(at) {
+                instances
+                    .transformations
+                    .extend(at.iter().map(|&at| from.transformations[at]));
+                let source = from
+                    .colors
+                    .as_ref()
+                    .expect("the scene's own are all colored");
+                colors.extend(at.iter().map(|&at| source[at]));
+            }
+        };
+        gather(
+            &mut self.lit_edge_instances,
+            &[&self.edge_instances, &self.dash_instances],
+            &[&self.lit_lines, &self.lit_dashes],
+        );
+        gather(
+            &mut self.lit_thumbnail_instances,
+            &[&self.thumbnail_instances],
+            &[&self.lit_nodes],
+        );
+        // The atlas cells too, the quads being pictures rather than flat color. Absent until the
+        // atlas has arrived, which is also when the overlay's own texture is set.
+        self.lit_thumbnail_instances.texture_transformations = self
+            .thumbnail_instances
+            .texture_transformations
+            .as_ref()
+            .map(|cells| self.lit_nodes.iter().map(|&node| cells[node]).collect());
+        self.lit_edges.set_instances(&self.lit_edge_instances);
+        self.lit_thumbnails
+            .set_instances(&self.lit_thumbnail_instances);
+    }
+
+    /// The overlay, pictures before lines for the reason the scene's own passes are in that order:
+    /// the depth a picture writes drops the lines behind it unshaded.
+    ///
+    /// Empty while nothing is selected, and the pictures wait for the atlas as
+    /// [`Self::drawn_thumbnails`] does.
+    pub(super) fn drawn_lit(&self) -> impl Iterator<Item = &dyn Object> {
+        let pictures = self.lit_thumbnails.material.texture.is_some();
+        [
+            (pictures && !self.lit_nodes.is_empty()).then_some(&self.lit_thumbnails as &dyn Object),
+            (!self.lit_edge_instances.transformations.is_empty())
+                .then_some(&self.lit_edges as &dyn Object),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    /// Whether the overlay has anything at all to draw, and so whether the depth it wants out of
+    /// the way is worth clearing.
+    pub(super) fn lit_anything(&self) -> bool {
+        self.drawn_lit().next().is_some()
     }
 
     fn edge_radius(&self) -> f32 {
@@ -515,6 +641,7 @@ impl AppEntities {
         });
         self.thumbnails.set_instances(&self.thumbnail_instances);
         self.edges.set_instances(&self.edge_instances);
+        self.gather_lit();
         self.billboard = billboard;
     }
 
@@ -561,7 +688,6 @@ impl AppEntities {
     /// far along they have marched. See [`DashRun`].
     fn lay_dash_runs(&mut self) {
         let radius = self.edge_radius() * EDGE_DASH_WIDTH;
-        let radii = &self.node_radii;
         let arrivals = &self.arrivals;
         let runs = &mut self.dash_runs;
         runs.clear();
@@ -576,18 +702,14 @@ impl AppEntities {
                     .min(arrivals.grown(b.index().index()));
             let (from, to) = (world_pos(a.position()), world_pos(b.position()));
             let dir = to - from;
-            let along = rotation_matrix_from_dir_to_dir(vec3(1.0, 0.0, 0.0), dir.normalize());
-            // The run stops at the pictures rather than running under them: a dash reaching a
-            // world's own place would stand inside its quad and show through it. Held off by the
-            // half-width, the furthest a quad ever reaches from the world it draws, so a dash
-            // clears it whichever way the billboard has been turned. See
-            // [`Self::rebuild_instances`], which draws the quads that wide.
-            let clear = |node: usize| radii[node] * arrivals.grown(node) * thumbnails::ASPECT;
-            let start = clear(a.index().index());
-            let span = dir.magnitude() - start - clear(b.index().index());
-            // Two worlds closer together than their own pictures leave nothing to draw a run in.
-            // Collapsed rather than skipped: the count of dashes is fixed when the graph is built
-            // and the colors are written against it.
+            // World to world, as a solid line is drawn: the pictures are opaque and write their
+            // depth before any line is drawn at all, so what a dash lays inside one is hidden
+            // there rather than having to be held out of it. Anything short of the two ends reads
+            // as a line that has come loose from the worlds it joins.
+            let span = dir.magnitude();
+            // Two worlds in the same place leave no direction to lay a run along. Collapsed rather
+            // than skipped: the count of dashes is fixed when the graph is built and the colors
+            // are written against it.
             if span <= 0.0 {
                 runs.push(DashRun {
                     origin: vec3(0.0, 0.0, 0.0),
@@ -596,15 +718,16 @@ impl AppEntities {
                 });
                 return;
             }
+            let unit = dir / span;
+            let along = rotation_matrix_from_dir_to_dir(vec3(1.0, 0.0, 0.0), unit);
             // Each dash fills the front of its own slot, the gap behind it being what makes the
             // run read as dashed and what a dash marching off the far end comes back into at the
-            // near one. The run is one dash shorter than the span, so the leading dash ends where
-            // the span does rather than reaching into the picture.
+            // near one. The run is one dash shorter than the span, which puts the leading dash's
+            // own tip on the far world rather than a dash length past it.
             let run = span / (1.0 + EDGE_DASH_FILL / EDGE_DASHES as f32);
             let length = run * EDGE_DASH_FILL / EDGE_DASHES as f32;
-            let unit = dir / dir.magnitude();
             runs.push(DashRun {
-                origin: from + unit * start,
+                origin: from,
                 travel: unit * run,
                 basis: along * Mat4::from_nonuniform_scale(length, radius, radius),
             });
@@ -638,6 +761,11 @@ impl AppEntities {
             }
         }
         self.dashes.set_instances(&self.dash_instances);
+        // Only where a dash is one of the lit ones: a march that nothing in the overlay copies
+        // from has nothing to hand it.
+        if !self.lit_dashes.is_empty() {
+            self.gather_lit();
+        }
     }
 
     /// Points the thumbnail quads at their own cells of the atlas once it has arrived, and hands
@@ -679,8 +807,10 @@ impl AppEntities {
         // the clone costs a Mat3 and an atomic rather than a second copy of the atlas.
         let atlas = Texture2DRef::from_cpu_texture(context, &atlas);
         self.glow.material.texture = Some(atlas.clone());
+        self.lit_thumbnails.material.texture = Some(atlas.clone());
         // Last, being what [`Self::drawn_thumbnails`] reads to decide the quads are drawable.
         self.thumbnails.material.texture = Some(atlas);
+        self.gather_lit();
     }
 
     /// `None` before there is an atlas to sample: an untextured [`ColorMaterial`] would paint its
@@ -862,14 +992,23 @@ pub(super) fn panorama_transform(viewport: Viewport, device_pixel_ratio: f32, vi
     Mat3::from_translation(drift)
         * Mat3::from_nonuniform_scale(viewport.width as f32 / tile, viewport.height as f32 / tile)
 }
-/// A normalized distance from the origin on a cyan-green-amber-magenta ramp, so how far a world
-/// sits from the start of the game reads off its color. The stops stay bright, to hold up against
-/// [`BACKGROUND_COLOR`].
+/// A normalized distance from the origin around the hues, so how far a world sits from the start
+/// of the game reads off its color. Blue at the origin and on round through cyan, green, yellow
+/// and red to magenta: a turn of five sixths rather than a whole one, so the deepest connection
+/// is not painted the same blue as the shallowest.
+///
+/// Written as the corners themselves rather than as a hue swept through: neighbouring corners
+/// share a channel at the full, so interpolating between two of them stays as saturated as both,
+/// and no stop is a number this file would have to trust a conversion for. The stops stay bright
+/// to hold up against [`BACKGROUND_COLOR`], the blue lifted off a pure one -- which at this end
+/// of the range would read as unlit rather than as near.
 fn distance_color(distance: f32) -> Srgba {
-    const STOPS: [[f32; 3]; 4] = [
+    const STOPS: [[f32; 3]; 6] = [
+        [0.25, 0.35, 1.00],
         [0.10, 0.90, 1.00],
         [0.35, 1.00, 0.45],
-        [1.00, 0.82, 0.25],
+        [1.00, 0.95, 0.30],
+        [1.00, 0.35, 0.25],
         [1.00, 0.35, 0.75],
     ];
     let scaled = distance.clamp(0.0, 1.0) * (STOPS.len() - 1) as f32;

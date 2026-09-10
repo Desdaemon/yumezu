@@ -184,6 +184,48 @@ fn antialias_remember(on: bool) {
     store::write(ANTIALIAS, Some(if on { "on" } else { "off" }));
 }
 
+/// Whether the view leans onto a world a list row is pointing at, which the panel's switch sets.
+/// See [`AppStatics::lean_toward`].
+///
+/// What it opens on where the switch has never been touched is what the platform already says
+/// about motion: asking the person again for something they have said once is how a preference
+/// gets ignored.
+fn leaning_remembered() -> bool {
+    match store::read(LEANING).as_deref() {
+        Some("off") => false,
+        Some(_) => true,
+        None => !reduced_motion(),
+    }
+}
+
+fn leaning_remember(on: bool) {
+    store::write(LEANING, Some(if on { "on" } else { "off" }));
+}
+
+/// Whether the person has asked for less movement than an app would otherwise make.
+///
+/// The page has somewhere to read this from and nothing else here does: winit carries no such
+/// preference, and the platform APIs behind it are one per platform. So elsewhere the switch is
+/// the only answer, and it opens on.
+fn reduced_motion() -> bool {
+    #[cfg(target_family = "wasm")]
+    {
+        // A browser that will not answer is one that was never asked to hold back.
+        web_sys::window()
+            .and_then(|window| {
+                window
+                    .match_media("(prefers-reduced-motion: reduce)")
+                    .ok()
+                    .flatten()
+            })
+            .is_some_and(|query| query.matches())
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        false
+    }
+}
+
 /// When the next frame is wanted, which is what a frame ends by working out.
 ///
 /// The window is redrawn on demand rather than continuously: see [`App::wanted`] for what is
@@ -319,6 +361,9 @@ struct AppEntities {
     /// The world a sidebar list row is pointing at, brightened where it sits in the graph and
     /// cleared as soon as the pointer leaves the row. Only ever one: see `Panel::pointed`.
     pointed: Option<usize>,
+    /// The world the view is leaning onto, which outlives the pointing that asked for it. `None`
+    /// once the person has taken the camera back. See [`AppStatics::lean_toward`].
+    leaning_at: Option<usize>,
     /// Per world, every connection it has and which ways round it can be walked. The lines are
     /// built from it, and the panel reads a world's ways on out of it.
     connections: Vec<Vec<world::Step>>,
@@ -375,6 +420,19 @@ struct AppEntities {
     /// reaches the same slot of whichever of the two it belongs to.
     edge_instances: Instances,
     dash_instances: Instances,
+    /// What a selection lights, drawn again over the finished scene so the layout cannot bury it.
+    /// See [`AppEntities::gather_lit`].
+    lit_thumbnails: Gm<InstancedMesh, ColorMaterial>,
+    lit_edges: Gm<InstancedMesh, ColorMaterial>,
+    /// Compacted copies of the lit slots of the buffers above, rather than world-indexed as those
+    /// are: nothing but the overlay's own draw reads them.
+    lit_thumbnail_instances: Instances,
+    lit_edge_instances: Instances,
+    /// Which slots the overlay copies, decided where the lighting itself is decided. See
+    /// [`AppEntities::repaint`].
+    lit_nodes: Vec<usize>,
+    lit_lines: Vec<usize>,
+    lit_dashes: Vec<usize>,
     /// Where each one-way connection's dashes march, rebuilt only when the layout moves under
     /// them. See [`DashRun`].
     dash_runs: Vec<DashRun>,
@@ -494,6 +552,8 @@ struct AppContext {
 
 /// Whether the edges are smoothed. See [`antialias_remembered`].
 const ANTIALIAS: &str = "antialias";
+/// Whether the view leans onto a pointed world. See [`leaning_remembered`].
+const LEANING: &str = "leaning";
 impl ApplicationHandler for App {
     /// Makes a timed wake-up one-shot.
     ///
@@ -690,7 +750,10 @@ impl App {
             0.1,
             1000.0,
         );
-        let control = OrbitControl::new(camera.target(), 1.0, 500.0);
+        // Read out rather than off the control below, which is moved into place before the lean's
+        // own copy of it would be taken.
+        let centre = camera.target();
+        let control = OrbitControl::new(centre, 1.0, 500.0);
         // Nothing waits on this or holds it: it publishes what it loads where the app reads it.
         drop(fetch::spawn(world::load_pages()));
 
@@ -710,8 +773,7 @@ impl App {
                 cursor: CursorIcon::Default,
                 touches: Touches::default(),
                 walk: Walk::default(),
-                lean: vec3(0.0, 0.0, 0.0),
-                lean_goal: vec3(0.0, 0.0, 0.0),
+                lean_aim: centre,
                 focused: true,
             },
             data: None,
@@ -1028,9 +1090,12 @@ impl App {
             .control
             .handle_events(&mut self.statics.camera, &mut frame_input.events);
         // The camera belongs to whoever last touched it: an orbit, a pan or a zoom abandons the
-        // framing rather than fighting it for the rest of the move.
+        // framing and the lean rather than fighting either for the rest of the move. `panned`
+        // carries the walk keys and the dolly as well, so this is every way the camera is asked
+        // for by hand.
         if panned || orbited {
             data.framing = false;
+            data.leaning_at = None;
         }
         let orbiting = matches!(data.gesture, Some(Gesture::Orbiting))
             && data.graph.parameters().dimensions == Dimensions::Three;
@@ -1064,10 +1129,18 @@ impl App {
             };
         }
 
-        // A framing move owns the camera while it runs, so the lean gives its ground back rather
-        // than dragging on the goal that move is easing onto and leaving it never arrived.
+        // Latched rather than read off `pointed` each frame: a lean carries on to the world it was
+        // given after the pointer has left the row, so letting go of a row is not what stops it --
+        // taking the camera is.
+        if let Some(world) = data.pointed {
+            data.leaning_at = Some(world);
+        }
+        // A framing move owns the camera while it runs, so the lean waits rather than dragging on
+        // the goal that move is easing onto and leaving it never arrived.
         let leaning = self.statics.lean_toward(
-            (!data.framing).then(|| data.pointed_at()).flatten(),
+            (self.overlay.as_ref().unwrap().leaning && !data.framing)
+                .then(|| data.leaning_at.and_then(|world| data.world_at(world)))
+                .flatten(),
             data.graph.parameters().dimensions,
             dt,
         );
@@ -1179,6 +1252,20 @@ impl App {
                     .inspect(|_| calls += 1),
                 &[],
             );
+            calls
+        });
+        // What the selection lights, again, over everything the passes above drew. Nothing at all
+        // while nothing is selected, the clear included.
+        self.stats.timed("lit", ctx, || {
+            let mut calls = 0;
+            if data.lit_anything() {
+                // Depth only, and only the scene's own: what the overlay has to be in front of is
+                // whatever the layout parked between it and the eye, and clearing that is what
+                // lets the overlay keep a real depth test among its own worlds. A clear inside a
+                // pass is a tile op rather than a resolve, so this is cheap on a TBDR too.
+                screen.clear(ClearState::depth(1.0));
+                screen.render(camera, data.drawn_lit().inspect(|_| calls += 1), &[]);
+            }
             calls
         });
         // Last of the scene, because it brightens whichever pass above drew the world it is over.
