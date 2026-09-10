@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use image::DynamicImage;
 use three_d::renderer::*;
 
 use super::{fetch, thumbnails};
@@ -29,6 +30,12 @@ const ORIGIN: &str = "https://explorer.yume.wiki";
 /// radius: the two are otherwise coplanar and the depth test would pick between them per pixel.
 /// Small enough that the picture neither grows visibly nor pulls out of a crowded node.
 pub const LIFT: f32 = 0.02;
+/// What the art is drawn at.
+///
+/// The wiki asks for this and enforces nothing: four in five uploads are the same art at exactly
+/// 2x, 3x, 4x or 6x, which [`sieve`] takes back down. An odd size is left as it came -- a filter
+/// is the only way down from one, and on the page it costs more than the memory it saves.
+const NATIVE: [u32; 2] = [320, 240];
 
 enum Held {
     Loading(fetch::Pending<Option<CpuTexture>>),
@@ -60,6 +67,9 @@ struct Unvisited {
     /// `None` until the picture arrives, and forever if it cannot be had, which leaves these worlds
     /// their bare nodes.
     quads: Option<Gm<InstancedMesh, ColorMaterial>>,
+    /// The same picture again on the subset a selection lights, for the overlay -- see
+    /// [`Detail::drawn_lit`].
+    lit: Option<Gm<InstancedMesh, ColorMaterial>>,
 }
 
 pub struct Magnified {
@@ -84,6 +94,7 @@ impl Detail {
             unvisited: Unvisited {
                 loading: unvisited.then(thumbnails::placeholder),
                 quads: None,
+                lit: None,
             },
         }
     }
@@ -99,21 +110,35 @@ impl Detail {
                 .any(|held| matches!(held, Held::Loading(_)))
     }
 
-    pub fn place_unvisited(&mut self, context: &Context, quads: &Instances) {
+    pub fn place_unvisited(&mut self, context: &Context, quads: &Instances, lit: &Instances) {
         if let Some(loading) = &self.unvisited.loading
             && let Some(loaded) = loading.take()
         {
             self.unvisited.loading = None;
             // Failures are logged where they are found, and leave these worlds their bare nodes.
             if let Some(picture) = loaded {
+                // One upload behind both meshes: a [`Texture2DRef`] is a handle over a shared
+                // texture, so the clone is a Mat3 and an atomic.
+                let material = quad_material(context, &picture);
+                self.unvisited.lit = Some(Gm::new(
+                    InstancedMesh::new(context, lit, &CpuMesh::square()),
+                    material.clone(),
+                ));
                 self.unvisited.quads = Some(Gm::new(
                     InstancedMesh::new(context, quads, &CpuMesh::square()),
-                    quad_material(context, &picture),
+                    material,
                 ));
             }
         }
         if let Some(drawn) = &mut self.unvisited.quads {
             drawn.set_instances(quads);
+        }
+        // `set_instances` builds four fresh GPU buffers however many instances it is handed, so
+        // an empty overlay is worth not writing -- once to clear it, then not again.
+        if let Some(drawn) = &mut self.unvisited.lit
+            && (!lit.transformations.is_empty() || drawn.instance_count() > 0)
+        {
+            drawn.set_instances(lit);
         }
     }
 
@@ -181,8 +206,17 @@ impl Detail {
     /// falls back to the atlas quad underneath. Only the lit ones -- a magnified world outside the
     /// selection belongs under the overlay, not in it.
     pub fn drawn_lit<'a>(&'a self, lit: &'a [usize]) -> impl Iterator<Item = &'a dyn Object> {
-        self.pictures()
-            .filter_map(|(world, quad)| lit.contains(&world).then_some(quad))
+        self.unvisited
+            .lit
+            .iter()
+            // An empty mesh would still answer [`Detail::drawn_lit`], and the caller reads that as
+            // an overlay worth clearing the depth for.
+            .filter(|quads| quads.instance_count() > 0)
+            .map(|quads| quads as &dyn Object)
+            .chain(
+                self.pictures()
+                    .filter_map(|(world, quad)| lit.contains(&world).then_some(quad)),
+            )
     }
 
     fn pictures(&self) -> impl Iterator<Item = (usize, &dyn Object)> {
@@ -223,6 +257,10 @@ fn quad_material(context: &Context, picture: &CpuTexture) -> ColorMaterial {
             mipmap: Some(Mipmap::default()),
             wrap_s: Wrapping::ClampToEdge,
             wrap_t: Wrapping::ClampToEdge,
+            // The wiki serves these as 320x240 pixel art. Interpolating one up is a blur of the
+            // grid it is drawn on, which is the whole look. Minification keeps the mips above --
+            // nearest there crawls as the layout moves.
+            mag_filter: Interpolation::Nearest,
             ..picture.clone()
         },
     );
@@ -246,17 +284,65 @@ pub fn load(url: String) -> fetch::Pending<Option<CpuTexture>> {
                 return None;
             }
         };
-        // The same decoder the atlas goes through, which picks the format off the path.
-        let mut assets = three_d_asset::io::RawAssets::new();
-        assets.insert(&url, bytes);
-        match assets.deserialize::<CpuTexture>(&url) {
-            Ok(picture) => Some(picture),
+        // Not through `three_d_asset`, which hands back texels already arranged and leaves
+        // nowhere to decimate them. Same crate underneath, same guess at the format.
+        match image::load_from_memory(&bytes) {
+            Ok(picture) => Some(texture(picture)),
             Err(error) => {
                 log::warn!("{url} is not an image: {error}");
                 None
             }
         }
     })
+}
+
+/// RGB is kept as RGB, a JPEG being three quarters the size that way of the RGBA everything else
+/// widens to.
+fn texture(picture: DynamicImage) -> CpuTexture {
+    let (width, height) = (picture.width(), picture.height());
+    let by = whole_multiple(width, height);
+    let data = match picture {
+        DynamicImage::ImageRgb8(picture) => {
+            TextureData::RgbU8(sieve(picture.into_raw().as_chunks().0, width, by))
+        }
+        picture => TextureData::RgbaU8(sieve(
+            picture.into_rgba8().into_raw().as_chunks().0,
+            width,
+            by,
+        )),
+    };
+    CpuTexture {
+        data,
+        width: width / by,
+        height: height / by,
+        ..Default::default()
+    }
+}
+
+/// How many times over [`NATIVE`] the upload is, and 1 for anything that is not a whole multiple.
+fn whole_multiple(width: u32, height: u32) -> u32 {
+    let [wide, tall] = NATIVE;
+    let by = width / wide;
+    let whole =
+        by > 1 && by == height / tall && width.is_multiple_of(wide) && height.is_multiple_of(tall);
+    if whole { by } else { 1 }
+}
+
+/// Every `by`th texel of every `by`th row, and the whole picture at a `by` of 1.
+///
+/// Sound only where `by` divides both sides: the texels it steps over are copies of the one it
+/// keeps, the upload being the same art at a whole scale. Cheaper than the plain copy it replaces,
+/// reading a `by` squared share of the texels.
+fn sieve<T: Copy>(texels: &[T], width: u32, by: u32) -> Vec<T> {
+    if by == 1 {
+        return texels.to_vec();
+    }
+    let (width, by) = (width as usize, by as usize);
+    texels
+        .chunks_exact(width)
+        .step_by(by)
+        .flat_map(|row| row.iter().step_by(by).copied())
+        .collect()
 }
 
 async fn download(url: &str) -> Result<Vec<u8>, fetch::Error> {

@@ -20,13 +20,15 @@ xattr -dr com.apple.quarantine /Applications/yumezu.app
 
 ### From source
 
-Needs [`just`](https://github.com/casey/just) and, on Linux, fontconfig's headers.
+Needs [Rust and Cargo](https://doc.rust-lang.org/cargo/getting-started/installation.html).
+On Linux, [fontconfig](https://www.freedesktop.org/wiki/Software/fontconfig) headers are also needed.
 
 ```bash
 sudo apt install libfontconfig1-dev   # or fontconfig-devel, or fontconfig
 cargo install --git https://github.com/Desdaemon/yumezu.git --locked yumezu
 ```
 
+For development, [just](https://just.systems/man/en/packages.html) is highly recommended.
 `just test-wasm` additionally needs [`wasmtime`](https://wasmtime.dev) on PATH and the
 `wasm32-wasip2` target; `just test-arm` needs [`cross`](https://github.com/cross-rs/cross) and a
 running docker; `just apk` and the phone half of `just bench` need `ANDROID_HOME` and a device on

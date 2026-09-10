@@ -5,6 +5,7 @@
 //!
 //! Numbers are logged, never drawn: a counter the frame paints is a counter the frame pays for.
 
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use three_d::renderer::*;
@@ -35,17 +36,24 @@ fn row<'a>(cells: impl IntoIterator<Item = &'a str>) -> String {
         .collect()
 }
 
+/// Where the switches below start, for a run with nobody to click them: `YUMEZU_FRAMES` names
+/// them, comma separated. A starting position and nothing more -- the checkbox still moves them.
+fn asked(switch: &str) -> bool {
+    std::env::var("YUMEZU_FRAMES")
+        .is_ok_and(|frames| frames.split(',').any(|it| it.trim() == switch))
+}
+
 /// The GPU's timer will not nest, so the whole-frame clock stands down while this is on.
-static PARTS: AtomicBool = AtomicBool::new(false);
+static PARTS: LazyLock<AtomicBool> = LazyLock::new(|| AtomicBool::new(asked("parts")));
 /// Draws the way every frame was drawn before the demand was worked out, so that the two can be
 /// measured against each other in one binary: it redraws at the display's rate whatever is on
 /// screen, rebuilds the whole frame's geometry whether or not anything it is built from has
 /// changed, and lays the dash runs out again every frame. What it does not put back is the pair of
 /// matrix products a dash used to cost -- see [`super::DashRun`] -- so it reads as a floor on the
 /// old cost rather than the old cost itself.
-static EAGER: AtomicBool = AtomicBool::new(false);
+static EAGER: LazyLock<AtomicBool> = LazyLock::new(|| AtomicBool::new(asked("eager")));
 /// See [`pan_aside`].
-static DOLLY: AtomicBool = AtomicBool::new(false);
+static DOLLY: LazyLock<AtomicBool> = LazyLock::new(|| AtomicBool::new(asked("dolly")));
 
 /// Vsync is settled when the surface is made, so unlike the switches above this has to outlive
 /// the run that asked for it.

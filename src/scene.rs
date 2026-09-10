@@ -436,6 +436,10 @@ pub(super) fn entities(
             colors: Some(vec![Srgba::WHITE; unvisited.len()]),
             ..Default::default()
         },
+        lit_unvisited_quads: Instances {
+            colors: Some(Vec::new()),
+            ..Default::default()
+        },
         detail: detail::Detail::new(
             worlds.iter().map(|world| world.image.clone()).collect(),
             // Or one on its way out from under a placeholder, which needs the same picture for as
@@ -565,6 +569,16 @@ impl AppEntities {
     /// Called wherever the scene's own buffers are written, this being a copy of their lit slots
     /// and nothing more.
     fn gather_lit(&mut self) {
+        // Each upload builds four GPU buffers however many instances it is handed, so an overlay
+        // that is empty and was already empty is worth not writing.
+        let lighting =
+            !self.lit_nodes.is_empty() || !self.lit_lines.is_empty() || !self.lit_dashed.is_empty();
+        let standing = self.lit_thumbnails.instance_count() > 0
+            || self.lit_edges.instance_count() > 0
+            || self.lit_dashes.instance_count() > 0;
+        if !lighting && !standing {
+            return;
+        }
         let gather = |instances: &mut Instances, from: &[&Instances], at: &[&[usize]]| {
             instances.transformations.clear();
             let colors = instances.colors.get_or_insert_default();
@@ -639,9 +653,19 @@ impl AppEntities {
         EDGE_RADIUS
     }
 
-    pub(super) fn rebuild_instances(&mut self, camera: &Camera) {
+    /// `laid_out` is whether the layout itself moved. The node quads face the camera, so a turn
+    /// dates them over a layout that has not; the lines are only where the worlds are, so a turn
+    /// would lay the same bytes back over every connection in the graph.
+    pub(super) fn rebuild_instances(&mut self, camera: &Camera, laid_out: bool) {
+        self.rebuild_nodes(camera);
+        if laid_out {
+            self.rebuild_edges();
+        }
+        self.gather_lit();
+    }
+
+    fn rebuild_nodes(&mut self, camera: &Camera) {
         let billboard = billboard(camera);
-        let radius = self.edge_radius();
         let thumbnails = &mut self.thumbnail_instances.transformations;
         thumbnails.clear();
         let arrivals = &self.arrivals;
@@ -658,8 +682,15 @@ impl AppEntities {
                     * Mat4::from_nonuniform_scale(radius * thumbnails::ASPECT, radius, 1.0),
             );
         });
-        // The dash lines are laid here with the solid ones rather than once a frame: `DashMaterial`
-        // cuts the dashes out as it draws, so nothing about them moves unless the layout does.
+        self.thumbnails.set_instances(&self.thumbnail_instances);
+        self.billboard = billboard;
+    }
+
+    /// The dash lines are laid here with the solid ones rather than once a frame: `DashMaterial`
+    /// cuts the dashes out as it draws, so nothing about them moves unless the layout does.
+    fn rebuild_edges(&mut self) {
+        let radius = self.edge_radius();
+        let arrivals = &self.arrivals;
         let dash_radius = radius * EDGE_DASH_WIDTH;
         let (edges, dashes, spans) = (
             &mut self.edge_instances.transformations,
@@ -702,11 +733,8 @@ impl AppEntities {
                 }
             }
         });
-        self.thumbnails.set_instances(&self.thumbnail_instances);
         self.edges.set_instances(&self.edge_instances);
         self.dashes.set_instances(&self.dash_instances);
-        self.gather_lit();
-        self.billboard = billboard;
     }
 
     /// Stands the placeholder over every world the player has not been to.
@@ -732,18 +760,33 @@ impl AppEntities {
             &mut self.unvisited_quads.transformations,
             self.unvisited_quads.colors.as_mut().unwrap(),
         );
+        let (lit_transformations, lit_colors) = (
+            &mut self.lit_unvisited_quads.transformations,
+            self.lit_unvisited_quads.colors.as_mut().unwrap(),
+        );
+        let lit_nodes = &self.lit_nodes;
         transformations.clear();
         colors.clear();
+        lit_transformations.clear();
+        lit_colors.clear();
         for world in wearing {
             let Some(node) = nodes.transformations.get(world) else {
                 continue;
             };
-            transformations.push(
-                Mat4::from_translation(-forward * (self.node_radii[world] * detail::LIFT)) * node,
-            );
-            colors.push(painted.map_or(Srgba::WHITE, |painted| painted[world]));
+            let placed =
+                Mat4::from_translation(-forward * (self.node_radii[world] * detail::LIFT)) * node;
+            let color = painted.map_or(Srgba::WHITE, |painted| painted[world]);
+            // Searched rather than scanned: `lit_nodes` is in world order, being read off a flag
+            // per world, and this runs over every world wearing the placeholder.
+            if lit_nodes.binary_search(&world).is_ok() {
+                lit_transformations.push(placed);
+                lit_colors.push(color);
+            }
+            transformations.push(placed);
+            colors.push(color);
         }
-        self.detail.place_unvisited(context, &self.unvisited_quads);
+        self.detail
+            .place_unvisited(context, &self.unvisited_quads, &self.lit_unvisited_quads);
     }
 
     /// Every frame, unlike the rest of the geometry: the marching is the whole point of the

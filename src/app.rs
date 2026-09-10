@@ -458,6 +458,7 @@ struct AppEntities {
     /// The quads those are drawn on: the nodes' own, lifted toward the camera. Kept rather than
     /// built each frame, being one allocation the size of the frontier.
     unvisited_quads: Instances,
+    lit_unvisited_quads: Instances,
     detail: detail::Detail,
     /// How far the dashes have marched, in world units. Wrapped rather than
     /// counted up, so it stays exact however long the app runs.
@@ -1167,9 +1168,12 @@ impl App {
         // Everything below reads the node quads, the camera, or the instance colors, so this is
         // what says any of it has to be worked out again.
         let recolored = std::mem::take(&mut data.recolored);
-        let moved = stepped || turned || arriving || recolored || profile::eager();
-        if moved {
-            data.rebuild_instances(&self.statics.camera);
+        // A recolor is not in it: `repaint` writes the colors and uploads them itself, leaving
+        // the geometry as it was.
+        let laid_out = stepped || arriving || profile::eager();
+        let moved = laid_out || turned || recolored;
+        if laid_out || turned {
+            data.rebuild_instances(&self.statics.camera, laid_out);
         }
         // Whether or not anything else moved: see [`AppEntities::march_dashes`].
         data.march_dashes((frame_input.elapsed_time as f32 * 1e-3).min(0.05));

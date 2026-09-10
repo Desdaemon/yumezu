@@ -4947,6 +4947,7 @@ dependencies = [
  "force_graph_3d",
  "http",
  "http-cache-reqwest",
+ "image",
  "jni",
  "log",
  "ndk-context",
