@@ -24,8 +24,7 @@ Needs [`just`](https://github.com/casey/just) and, on Linux, fontconfig's header
 
 ```bash
 sudo apt install libfontconfig1-dev   # or fontconfig-devel, or fontconfig
-git clone https://github.com/Desdaemon/yumezu.git
-cargo install --path .
+cargo install --git https://github.com/Desdaemon/yumezu.git --locked yumezu
 ```
 
 `just test-wasm` additionally needs [`wasmtime`](https://wasmtime.dev) on PATH and the

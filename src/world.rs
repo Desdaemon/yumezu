@@ -27,18 +27,25 @@ const SERVER: &str = "https://explorer.yumemiru.dev";
 /// Authors whose yume2kki-t tag is not their name in the dump.
 ///
 /// TODO: corrections that belong on yume.wiki rather than here.
-static JAPANESE_AUTHOR_OVERRIDES: phf::Map<&str, &str> = phf::phf_map! {
-    "Bean" => "bean",
-    "窯良" => "窯良(oneirokamara)",
-    "コンテンツ" => "kontentsu",
-    "Ouri" => "ouri",
-    "sniperbob" => "Sniperbob",
-    "Mokaccino" => "Moka",
-    "◆gH8PoF17WqX" => "Ferdy",
-    "Nightmare" => "†Nightmare†",
-    "tKp9vEGEfhCD" => "◆tKp9vEGEfhCD",
-    "Nulsdodage" => "nulsdodage"
-};
+static JAPANESE_AUTHOR_OVERRIDES: [(&str, &str); 10] = [
+    ("Bean", "bean"),
+    ("窯良", "窯良(oneirokamara)"),
+    ("コンテンツ", "kontentsu"),
+    ("Ouri", "ouri"),
+    ("sniperbob", "Sniperbob"),
+    ("Mokaccino", "Moka"),
+    ("◆gH8PoF17WqX", "Ferdy"),
+    ("Nightmare", "†Nightmare†"),
+    ("tKp9vEGEfhCD", "◆tKp9vEGEfhCD"),
+    ("Nulsdodage", "nulsdodage"),
+];
+
+fn japanese_author(name: &str) -> &str {
+    JAPANESE_AUTHOR_OVERRIDES
+        .iter()
+        .find_map(|&(from, to)| (from == name).then_some(to))
+        .unwrap_or(name)
+}
 
 #[derive(Clone, Deserialize)]
 pub struct Dump {
@@ -259,7 +266,7 @@ impl Author {
     pub fn wiki_url(&self) -> String {
         if super::i18n::speaking_japanese() {
             let name = self.name.show();
-            yume2kki_t_author_url(JAPANESE_AUTHOR_OVERRIDES.get(name).copied().unwrap_or(name))
+            yume2kki_t_author_url(japanese_author(name))
         } else {
             author_url(&self.name.en)
         }
@@ -1669,7 +1676,7 @@ mod tests {
             "https://wikiwiki.jp/yume2kki-t/::cmd/taglist?tag=185%20Go%E6%B0%8F"
         );
         // And where the wiki writes a name differently from the dump, its own writing of it.
-        let bean = super::JAPANESE_AUTHOR_OVERRIDES["Bean"];
+        let bean = super::japanese_author("Bean");
         assert_eq!(
             super::yume2kki_t_author_url(bean),
             "https://wikiwiki.jp/yume2kki-t/::cmd/taglist?tag=bean%E6%B0%8F"

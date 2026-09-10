@@ -81,8 +81,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 three-d = { version = "0.20.0", git = "https://github.com/asny/three-d" }
 # explicitly depended to override features
-three-d-asset = { version = "0.10", features = ["jpeg", "png", "http-rustls"] }
-reqwest = { version = "0.13.4", default-features = false, features = ["charset", "http2", "system-proxy", "json", "query", "stream", "rustls-no-provider"] }
+three-d-asset = { version = "0.10", features = ["jpeg", "png"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["charset", "http2", "system-proxy", "rustls-no-provider"] }
 winit = "0.30"
 # `std::time::Instant` panics on the page; this is the same type everywhere else.
 web-time = "1"
@@ -97,7 +97,6 @@ egui-winit = { version = "0.35", default-features = false }
 egui_glow = { version = "0.35", default-features = false }
 # to help with measuring different fonts' baselines
 skrifa = "0.44"
-phf = { version = "0.14.0", features = ["macros"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 # Named only to pick the provider. Both are compiled in if anything in the graph asks for the
@@ -114,7 +113,7 @@ redb = "4.2"
 http = "1.5"
 
 [target.'cfg(all(not(target_family = "wasm"), not(target_os = "android")))'.dependencies]
-env_logger = { version = "0.11", default-features = false, features = ["humantime"] }
+env_logger = { version = "0.11", default-features = false }
 # The desktop packages replace themselves through this; see `src/update.rs`. It carries its own
 # reqwest, a major behind the one above, so the desktop binary holds two -- desktop being the one
 # target here with no size budget.
