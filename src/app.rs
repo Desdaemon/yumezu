@@ -381,9 +381,6 @@ struct AppEntities {
     /// The quads those are drawn on: the nodes' own, lifted toward the camera. Kept rather than
     /// built each frame, being one allocation the size of the frontier.
     unvisited_quads: Instances,
-    /// How many worlds the atlas was packed for, which is the whole dump however few of them this
-    /// graph draws. See [`world::Dump::packed`].
-    packed: usize,
     detail: detail::Detail,
     /// How far the dashes have marched along their slots, in `0.0..1.0`. Wrapped rather than
     /// counted up, so it stays exact however long the app runs.

@@ -3,11 +3,12 @@
 //! One image rather than a texture per world, because the nodes are drawn as a single instanced
 //! mesh: fifteen hundred textures would be fifteen hundred draw calls.
 //!
-//! A world's cell is its index in the *dump*, not its node index, so nothing has to travel
-//! alongside the atlas to say which picture belongs to which world -- a run drawing only what one
-//! player has seen numbers its nodes afresh. The last cell of the grid holds no world; it is the
-//! placeholder an unvisited world is drawn as. Both sides have to agree on [`CELL`], which
-//! [`cells`] checks rather than trusts.
+//! A world's cell is the one the dump gives it, which the server hands out once and never moves,
+//! so an atlas is still right about every world it was packed with however far the dump has moved
+//! on since. A world the atlas is too small to hold a cell for is simply one packed after it was:
+//! it draws the placeholder until the atlas is packed again. The last cell of the grid is that
+//! placeholder and holds no world. Both sides have to agree on [`CELL`], which [`grid`] checks
+//! rather than trusts.
 
 use three_d::renderer::*;
 
@@ -140,16 +141,13 @@ async fn read(path: &str) -> Result<Vec<u8>, String> {
 /// Per world, the uv transform landing its quad on its cell. `of` holds `None` for a world the
 /// player has not been to, which draws the placeholder.
 ///
-/// `packed` is how many worlds the atlas was packed for, which it must be big enough for however few
-/// of them this graph draws. `None` if it cannot hold that many, meaning it was packed against a
-/// different [`CELL`] or a different dump: sampling it anyway would give every world a picture of
-/// somewhere else.
-pub fn cells(packed: usize, of: &[Option<usize>], atlas: &CpuTexture) -> Option<Vec<Mat3>> {
-    let (columns, rows) = grid(packed, atlas)?;
-    let unknown = unknown(columns, rows);
+/// `None` for an atlas that is not whole cells of [`CELL`], which is one packed against a
+/// different cell size: sampling it would give every world a picture of somewhere else.
+pub fn cells(of: &[Option<usize>], atlas: &CpuTexture) -> Option<Vec<Mat3>> {
+    let (columns, rows) = grid(atlas)?;
     Some(
         of.iter()
-            .map(|cell| uv(cell.unwrap_or(unknown), columns, rows))
+            .map(|cell| uv(held(*cell, columns, rows), columns, rows))
             .collect(),
     )
 }
@@ -165,25 +163,25 @@ fn uv(cell: usize, columns: u32, rows: u32) -> Mat3 {
         * Mat3::from_nonuniform_scale(size.x, size.y)
 }
 
-/// The last cell of the grid rather than one counted off the worlds, so neither side carries a
-/// number the other could get wrong.
-fn unknown(columns: u32, rows: u32) -> usize {
-    (columns * rows) as usize - 1
+/// `cell` where this atlas holds one, and the placeholder where it does not -- a world packed
+/// into no atlas this old, or one the player has not been to.
+///
+/// The placeholder is the last cell of the grid rather than one counted off the worlds, so neither
+/// side carries a number the other could get wrong.
+fn held(cell: Option<usize>, columns: u32, rows: u32) -> usize {
+    let unknown = (columns * rows) as usize - 1;
+    cell.filter(|cell| *cell < unknown).unwrap_or(unknown)
 }
 
-/// `None` unless the atlas divides into enough cells for `packed` worlds and the placeholder after
-/// them.
-fn grid(packed: usize, atlas: &CpuTexture) -> Option<(u32, u32)> {
+/// `None` unless the atlas is whole cells of [`CELL`].
+fn grid(atlas: &CpuTexture) -> Option<(u32, u32)> {
     let (columns, rows) = (atlas.width / CELL[0], atlas.height / CELL[1]);
-    if columns * CELL[0] != atlas.width
-        || rows * CELL[1] != atlas.height
-        || ((columns * rows) as usize) < packed + 1
-    {
+    if columns * CELL[0] != atlas.width || rows * CELL[1] != atlas.height || columns * rows < 2 {
         log::warn!(
-            "{PATH} is {}x{}, which is not {} cells of {}x{}",
+            "{PATH} is {}x{}, which is not whole cells of {}x{} with one to spare for the \
+             placeholder",
             atlas.width,
             atlas.height,
-            packed + 1,
             CELL[0],
             CELL[1],
         );
@@ -215,8 +213,8 @@ pub struct Sheet {
 
 impl Sheet {
     /// `None` is survivable either way: the catalog lists worlds without pictures.
-    pub fn new(egui: &egui::Context, packed: usize, atlas: &CpuTexture) -> Option<Self> {
-        let (columns, rows) = grid(packed, atlas)?;
+    pub fn new(egui: &egui::Context, atlas: &CpuTexture) -> Option<Self> {
+        let (columns, rows) = grid(atlas)?;
         let Some(image) = color_image(atlas) else {
             log::warn!("{PATH} is not stored as bytes egui can show");
             return None;
@@ -232,12 +230,28 @@ impl Sheet {
     /// `cell` reads as in [`cells`] but counts from the top left: egui's images are the right way
     /// up.
     pub fn picture(&self, cell: Option<usize>, height: f32) -> egui::Image<'static> {
-        let cell = cell.unwrap_or_else(|| unknown(self.columns, self.rows));
+        let cell = held(cell, self.columns, self.rows);
         let (column, row) = (cell as u32 % self.columns, cell as u32 / self.columns);
         let cell = egui::vec2(1.0 / self.columns as f32, 1.0 / self.rows as f32);
         let at = egui::pos2(column as f32 * cell.x, row as f32 * cell.y);
         egui::Image::new((self.texture.id(), self.texture.size_vec2()))
             .uv(egui::Rect::from_min_size(at, cell))
             .fit_to_exact_size(egui::vec2(height * ASPECT, height))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // What makes an atlas outlive the dump it was packed from: a world packed into no atlas this
+    // old is a world without a picture, not a world wearing the last one's.
+    #[test]
+    fn a_cell_the_atlas_is_too_small_for_falls_back_to_the_placeholder() {
+        // 4x4, so the placeholder is cell 15 and the worlds run 0..15.
+        let (columns, rows) = (4, 4);
+        assert_eq!(super::held(Some(0), columns, rows), 0);
+        assert_eq!(super::held(Some(14), columns, rows), 14);
+        assert_eq!(super::held(Some(15), columns, rows), 15);
+        assert_eq!(super::held(Some(9000), columns, rows), 15);
+        assert_eq!(super::held(None, columns, rows), 15);
     }
 }

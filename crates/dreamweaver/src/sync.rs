@@ -37,8 +37,7 @@ pub struct Fetched {
 
 /// How much of the wiki a sync re-reads.
 pub enum Refresh {
-    /// Whatever the wiki says about itself: a sync with no dump to ask about, or one the wiki no
-    /// longer remembers that far back.
+    /// Whatever the wiki says about itself, without asking what has changed.
     Everything,
     /// Titles without the `Yume 2kki:` namespace prefix. An empty list never reaches here: the
     /// caller stands the sync down instead.
@@ -80,20 +79,6 @@ impl Refresh {
 /// is what makes those answers stale.
 const AUTHORS: &str = "Authors";
 const VERSION_HISTORY: &str = "Version History";
-
-/// The map the game starts the player on. The world built out of it opens the dump.
-///
-/// A map number rather than a title, the wiki renaming a world far more readily than the game
-/// renumbers a map.
-const ORIGIN_MAP: u32 = 2;
-
-/// A world built out of any of these is published as a secret, the dump's one way of saying "do not
-/// show this".
-///
-/// Map 1 is the debug room: the wiki documents it as a location like any other, but the game never
-/// walks the player into it and the wiki carries no property for that. Every other secret is an
-/// operator's own mark, from [`marked_secret`].
-const SECRET_MAPS: [u32; 1] = [1];
 
 /// `previous` is the last dump published, consulted only for what an operator has marked on the
 /// worlds and when the dump was last rebuilt without asking.
@@ -147,7 +132,7 @@ pub async fn run(
     /// than what it ended up holding.
     fn again(read: bool) -> &'static str {
         match read {
-            true => "read again",
+            true => "reread",
             false => "kept",
         }
     }
@@ -272,6 +257,13 @@ fn assemble<'a>(
             .collect()
     };
     let secret = marked_secret(previous);
+    let live: Vec<&str> = locations
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| published[*at].is_some())
+        .map(|(_, location)| location.title.as_str())
+        .collect();
+    let cells = cells(previous, &live, full);
     let worlds = locations
         .iter()
         .enumerate()
@@ -291,6 +283,7 @@ fn assemble<'a>(
 
             World {
                 id: published[at].expect("filtered to published worlds"),
+                cell: cells.get(location.title.as_str()).copied(),
                 title: location.title.clone(),
                 title_jp: text(location.original_name.as_deref()),
                 author: location.primary_author.clone().unwrap_or_default(),
@@ -299,7 +292,6 @@ fn assemble<'a>(
                 filename: encode_uri(&location.location_image),
                 map_url: joined(location.location_maps.iter().map(|map| map.path.clone())),
                 map_label: joined(location.location_maps.iter().map(|map| map.caption.clone())),
-                map_ids: location.map_ids.clone(),
                 bgm_url: joined(location.bgms.iter().map(|bgm| bgm.path.clone())),
                 // Two fields packed into one: the reader takes them apart together with the paths
                 // above, and a track with neither still has to hold its place in the list.
@@ -315,8 +307,7 @@ fn assemble<'a>(
                 ver_updated: versions::updates(&location.versions_updated.join(",")),
                 ver_gaps: versions::gaps(&location.version_gaps.join(",")),
                 removed: false,
-                secret: secret.contains(location.title.as_str())
-                    || location.map_ids.iter().any(|id| SECRET_MAPS.contains(id)),
+                secret: secret.contains(location.title.as_str()),
                 connections,
             }
         })
@@ -366,32 +357,67 @@ struct Attributes {
 /// Secrets included: the mark is carried from one dump to the next by title, so a dropped world is
 /// a mark forgotten at the next sync, and hiding is a question about a reader rather than the game.
 ///
-/// A world's published id is its index here, so the order is part of the interface -- what a
-/// client's caches are keyed by and what the thumbnail atlas is packed in. It is a property of the
-/// game rather than of this program's history: two runs reading the same wiki publish the same ids,
-/// whether either had a dump to start from or not.
+/// A world's published id is its index here, and the order is a property of the wiki rather than of
+/// this program's history: two runs reading the same wiki publish the same ids, whether either had
+/// a dump to start from or not.
 fn published_worlds(mut locations: Vec<smw::Location>) -> Vec<smw::Location> {
     locations.sort_by(|one, other| published_place(one).cmp(&published_place(other)));
     locations
 }
 
-/// The origin first, then by the earliest RPG Maker map the world is built out of, then by title.
+/// The origin first, then every other world by title.
 ///
-/// The map numbers are the game's own, handed out in the order the maps were made, so this is very
-/// nearly the order the worlds were added in: a published world moves only if the wiki corrects
-/// which maps it is, and one added next week lands at the end.
+/// Nothing reads a world's position: the app and [`crate::depth`] both find the origin by title,
+/// and a `targetId` only has to agree with the dump it was published in. The order used to be the
+/// game's map numbering, which put a world roughly where it was added and so kept the thumbnail
+/// atlas from shifting under an insertion -- a job the world's own `cell` now does, and does
+/// properly. What is left is a dump a person can read, which title alone gives.
 ///
-/// [`ORIGIN_MAP`] has to be named rather than left to that rule: the debug room is map 1 and would
-/// otherwise open the dump. It is also the one place in the order a reader depends on.
+/// The origin is named anyway. It costs a comparison, and a dump opening on `3D Structures Path`
+/// rather than the room the player wakes up in reads as a mistake.
+fn published_place(location: &smw::Location) -> (bool, &str) {
+    (location.title != depth::START, &location.title)
+}
+
+/// Every published world's cell in the thumbnail atlas, by title.
 ///
-/// Worlds sharing their earliest map are separated by title, and the worlds the wiki names no map
-/// for sort after everything by the same rule.
-fn published_place(location: &smw::Location) -> (bool, u32, &str) {
-    (
-        !location.map_ids.contains(&ORIGIN_MAP),
-        location.map_ids.iter().copied().min().unwrap_or(u32::MAX),
-        &location.title,
-    )
+/// A cell is handed out once and never moves: a world keeps whatever the last dump gave it, and one
+/// first seen now takes a cell above every cell in use. This is why the atlas is not packed by
+/// [`World::id`]. An id is a place in [`published_place`] order, and that order moves under a world
+/// already published -- the wiki documents an old area, or corrects which maps a world is -- which
+/// would leave every picture after the newcomer belonging to somebody else.
+///
+/// So an atlas is still right about every world it was packed with however far the dump has moved
+/// on, and a world it has no cell for draws the placeholder until the atlas is packed again.
+///
+/// Cells are not reused below the highest one held: a gap a dropped world leaves stays a gap, where
+/// handing it to the next world along would be the same wrong picture in miniature. A `full` run
+/// reclaims the tail, forgetting the cells of worlds the dump has stopped publishing -- held to the
+/// weekly pass so a world the wiki marks removed and then restores keeps its picture.
+///
+/// Title is the key, as it is for [`marked_secret`], and carries the same cost: a world the wiki
+/// renames is a world this has never seen, and takes a fresh cell. A cold build has nothing to
+/// carry and hands out cells in publish order, so the atlas has to be packed again after one.
+fn cells<'a>(previous: &Dump, live: &[&'a str], full: bool) -> HashMap<&'a str, usize> {
+    let mut held: HashMap<&str, usize> = previous
+        .worlds
+        .iter()
+        .filter_map(|world| Some((world.title.as_str(), world.cell?)))
+        .collect();
+    if full {
+        let still: std::collections::HashSet<&str> = live.iter().copied().collect();
+        held.retain(|title, _| still.contains(*title));
+    }
+    let mut next = held.values().map(|cell| cell + 1).max().unwrap_or(0);
+    live.iter()
+        .map(|&title| {
+            let cell = held.get(title).copied().unwrap_or_else(|| {
+                next += 1;
+                next - 1
+            });
+            (title, cell)
+        })
+        .collect()
 }
 
 /// Marked by an operator as a spoiler, which no sync should unmark.
@@ -523,10 +549,9 @@ mod tests {
     // Nothing about the published order reads the last dump, which is what makes a run coming up
     // with nothing publish the same ids as one that did not.
     #[test]
-    fn the_worlds_are_published_in_the_order_the_game_made_them() {
-        let world = |title: &str, map_ids: &[u32]| crate::smw::Location {
+    fn the_origin_opens_the_dump_and_the_rest_follow_by_title() {
+        let world = |title: &str| crate::smw::Location {
             title: title.to_owned(),
-            map_ids: map_ids.to_vec(),
             location_image: String::new(),
             original_name: None,
             primary_author: None,
@@ -538,17 +563,11 @@ mod tests {
             version_gaps: Vec::new(),
         };
         let published = super::published_worlds(vec![
-            // Map 1: the dump carries it as a secret and hiding it is the client's job.
-            world("Debug Room", &[1]),
-            world("Nexus", &[10, 11]),
-            // The earliest of its maps places it, not the first one the wiki lists.
-            world("Chocolate World", &[620, 12]),
-            world("Urotsuki's Room", &[2, 224]),
-            // Named no map at all: after everything, and after each other by title.
-            world("River Road", &[]),
-            world("FC Caverns", &[]),
-            // Shares its earliest map with Nexus, so the title separates the two.
-            world("Hand Hub", &[10, 99]),
+            world("Nexus"),
+            world("Chocolate World"),
+            world("Urotsuki's Room"),
+            world("Debug Room"),
+            world("FC Caverns"),
         ]);
         assert_eq!(
             published
@@ -556,17 +575,82 @@ mod tests {
                 .map(|location| location.title.as_str())
                 .collect::<Vec<_>>(),
             [
+                // Named rather than sorted to the front, where "Urotsuki's Room" does not belong.
                 "Urotsuki's Room",
-                // Map 1 is lower than the origin's map 2, so only the origin coming first by rule
-                // keeps the debug room from opening the dump.
-                "Debug Room",
-                "Hand Hub",
-                "Nexus",
                 "Chocolate World",
+                "Debug Room",
                 "FC Caverns",
-                "River Road",
+                "Nexus",
             ]
         );
+    }
+
+    /// A dump holding just what [`super::cells`] reads: the titles published last time and the
+    /// cells they were given. `None` is a dump written before cells existed.
+    fn previously(worlds: &[(&str, Option<usize>)]) -> crate::model::Dump {
+        serde_json::from_value(serde_json::json!({
+            "worldData": worlds
+                .iter()
+                .map(|(title, cell)| serde_json::json!({
+                    "id": 0,
+                    "cell": cell,
+                    "title": title,
+                    "titleJP": null,
+                    "author": "",
+                    "depth": 0,
+                    "minDepth": 0,
+                    "filename": "",
+                    "mapUrl": null,
+                    "mapLabel": null,
+                    "bgmUrl": null,
+                    "bgmLabel": null,
+                    "verAdded": null,
+                    "verRemoved": null,
+                    "verUpdated": null,
+                    "verGaps": null,
+                    "removed": false,
+                    "secret": false,
+                    "connections": [],
+                }))
+                .collect::<Vec<_>>(),
+            "authorInfoData": [],
+            "versionInfoData": [],
+            "effectData": [],
+            "menuThemeData": [],
+            "wallpaperData": [],
+            "bgmTrackData": [],
+            "lastUpdate": null,
+            "lastFullUpdate": null,
+            "isAdmin": false,
+        }))
+        .expect("the fixture is a dump")
+    }
+
+    // The whole point of a cell: a world already packed into the atlas keeps the picture it has,
+    // wherever the wiki has since moved it in the published order.
+    #[test]
+    fn a_world_keeps_the_cell_the_last_dump_gave_it() {
+        // Cell 5 belongs to a world dropped since, and is left where it is rather than handed on.
+        let previous = previously(&[("Nexus", Some(1)), ("Dropped", Some(5)), ("Hub", Some(0))]);
+        let cells = super::cells(&previous, &["New", "Hub", "Nexus", "Newer"], false);
+        assert_eq!(cells["Hub"], 0);
+        assert_eq!(cells["Nexus"], 1);
+        assert_eq!(cells["New"], 6);
+        assert_eq!(cells["Newer"], 7);
+    }
+
+    // Both are a first run in the only sense that matters: nothing to carry forward, so the cells
+    // are the publish order and the atlas has to be packed again.
+    #[test]
+    fn a_dump_with_no_cells_to_carry_hands_out_the_publish_order() {
+        for previous in [
+            previously(&[]),
+            previously(&[("Hub", None), ("Nexus", None)]),
+        ] {
+            let cells = super::cells(&previous, &["Hub", "Nexus"], false);
+            assert_eq!(cells["Hub"], 0);
+            assert_eq!(cells["Nexus"], 1);
+        }
     }
 
     // `lastFullUpdate` is the one thing a soft sync must not touch: it is how a reader tells a
@@ -615,6 +699,23 @@ mod tests {
         let everything = super::Refresh::Everything;
         assert!(everything.touches("anything at all"));
         assert_eq!(everything.shards(&letters), letters);
+    }
+
+    #[test]
+    fn a_full_run_reclaims_the_cells_above_the_worlds_it_still_publishes() {
+        let previous = previously(&[("Hub", Some(0)), ("Gap", Some(2)), ("Dropped", Some(5))]);
+        let full = super::cells(&previous, &["Hub", "Gap", "New"], true);
+        assert_eq!(full["Hub"], 0, "a world still published keeps its cell");
+        assert_eq!(full["Gap"], 2, "wherever the dropped world's cell sat");
+        assert_eq!(
+            full["New"], 3,
+            "and the next one out is above the highest still held, not in the gap at 1"
+        );
+        assert_eq!(
+            super::cells(&previous, &["Hub", "Gap", "New"], false)["New"],
+            6,
+            "where a soft sync holds the dropped world's cell and passes over it"
+        );
     }
 
     // Two corrections to "everything since the dump was built", both because trusting the wiki's

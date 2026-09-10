@@ -10,7 +10,7 @@ the structured data it holds -- which is nearly all of it -- and keeps the resul
 which is both what it serves and what it reads back when it restarts.
 
 ```
-dreamweaver [--listen 127.0.0.1:5000] [--data data.json] [--sync-every 6]
+dreamweaver [--listen 127.0.0.1:5000] [--data data.json] [--sync-every 1]
 ```
 
 `--listen` takes a `host:port` or, if it has a `/` in it, the path of a Unix socket -- so that
@@ -31,19 +31,19 @@ wrote.
 
 | route          | |
 |----------------|--|
-| `GET /data`    | the dump, byte for byte as the file holds it -- or `503 needs update` |
+| `GET /data`    | the dump, byte for byte as the file holds it |
 | `GET /data.json` | the same |
 | `GET /pollUpdate` | what the running sync is doing: `{"task": ..., "done": ...}` |
 
-There is no clock in the server, only requests. A `GET /data` arriving more than `--sync-every`
-hours after the wiki was last asked about starts a sync and answers `503 needs update` instead of
-the dump; every other one is answered from the file. A client that gets the 503 polls
-`/pollUpdate` until it says `done` and then asks again -- so the whole of the wait, including the
-minute a server with no dump at all takes to build its first, is one loop on the client's side.
+The server keeps the dump current on its own clock -- a sync every `--sync-every` hours, timed
+from when the dump on disk was built so a restart is not a way to make it re-read the wiki. Every
+`GET /data` is answered from the file, including the ones that arrive while a sync is running: the
+dump standing is what a pass that publishes nothing would hand back anyway.
 
-The 503 is also why a dump is never served while it is being rebuilt, and why an empty one is
-never served at all: an empty document is indistinguishable from a wiki with no worlds in it, and
-the reader on the other end would draw the second.
+The one thing never served is an empty dump, which is indistinguishable from a wiki with no worlds
+in it and would have the reader on the other end draw the second. A server that has not finished
+its first sync answers `503 needs update`, and the client polls `/pollUpdate` until it says `done`
+and then asks again.
 
 `/pollUpdate` is how the reader says what the wait is for -- it is the reference implementation's
 own route, answered in the reference's own JSON, with the stage named by one of its task names. This
@@ -87,8 +87,9 @@ identical down to its order.
 ## Keeping up with the wiki
 
 Every `--sync-every` hours the server does a **soft** sync: it asks the wiki which pages in the
-Yume 2kki namespace have been edited since the dump was built. Most days the answer is none, and
-the pass costs one small request and stops.
+Yume 2kki namespace have been edited since the dump was built. On most passes the answer is none
+and the pass costs one small request, which is why the interval is set by how soon an edit should
+show rather than by what the asking costs.
 
 When the answer is not none, the list of pages is also a list of which answers are now stale, and
 only those are asked for again. The author list is one page. The version history is a handful. A
@@ -114,13 +115,21 @@ literally would lose edits:
 
 There is one hole left in it, and it is the reference implementation's too: only Yume 2kki's
 namespace is watched, so a template or a file the worlds are built out of can change what the store
-answers without any page here being touched. The **full** sync is the backstop, and a sync with no
-dump to compare against is one: what a server does when it comes up with nothing on disk, and what
-it falls back to when the dump is older than the wiki's memory or the wiki cannot be asked. There is
-no route for demanding one -- deleting `--data` and restarting is the ask. That is also what
-`lastFullUpdate` marks: a soft sync carries the
-stamp over rather than moving it, so a reader can tell a dump that took the wiki at its word from
-one this program checked for itself.
+answers without any page here being touched. Worse, a soft sync that misses an edit misses it for
+good -- nothing later asks about that week again.
+
+So **once a week the sync is a full one**: it skips the question of what has changed and reads the
+whole wiki. `lastFullUpdate` is when that last happened, and what the week is counted from, so the
+schedule survives a restart -- a soft sync carries the stamp over rather than moving it.
+
+Three other cases read the whole wiki, and they are the same pass: a server coming up with nothing
+on disk, a dump older than the wiki's memory, and a wiki that cannot be asked what it changed.
+Deleting `--data` and restarting is the only way to demand one -- there is no route for it.
+
+A full run is also the only pass that gives up an [atlas cell](#the-atlas-cells), and only for a
+world the dump has stopped publishing. Nothing still published moves, so it never costs a repack:
+what it reclaims is the tail of the cell range, a gap inside staying a gap. Waiting for the weekly
+pass to do it gives a world the wiki marks removed and then restores a week to keep its picture.
 
 The wiki's edge answers a plain request with a challenge page, so every request carries
 `Origin: https://explorer.yume.wiki` -- the explorer this program stands in for.
@@ -144,51 +153,77 @@ worlds that use it. The store holds no width and no height for a map anywhere: `
 has, so the area cannot be had without scraping the same tables, which is the thing this program
 exists not to do.
 
-What the store does hold is which maps a world is, as subobjects on the world's own page, and those
-go out as **`mapIds`** -- a field the reference dump has no equivalent of. It answers for 1574 of
-1577 worlds: 3126 map numbers, 2765 of them distinct, 199 used by more than one world.
+The store does hold which maps a world is, as subobjects on the world's own page, and this used to
+publish them as a `mapIds` field of its own. Nothing read it. It ordered the dump, and it marked
+the debug room a secret, and the [atlas cells](#the-atlas-cells) took the first job away while the
+second turned out to be doing very little -- so the property is no longer asked for at all, and the
+dump is 31 KiB lighter for it.
 
 ## The order the worlds go out in
 
-A world's published id is its index in `worldData`, so the order is an interface: it is what a
-client's caches are keyed by and what the thumbnail atlas is packed in. It is the game's map
-numbering -- the origin first, then each world by the earliest map it is built out of, then by
-title where two worlds share that map.
+A world's published id is its index in `worldData`, and a connection names its far end with one, so
+the two have to agree within a dump. Nothing else reads a world's position: this program and
+`yumezu` both find the origin by title, and `yumezu` persists nothing keyed by an id.
 
-The origin is the world built on **map 2**, named by the number rather than by its title: the wiki
-renames a world far more readily than the game renumbers a map. **Map 1** is the debug room, which
-the wiki documents as a location like any other and the game never walks the player into; the dump
-carries it like any other world and marks it `secret`, which is the one thing it says about a world
-not meant to be shown. Nothing here acts on that mark -- see [what a secret is](#what-a-secret-is).
+So the order is **the origin first, then every other world by title**. The origin is named rather
+than sorted to the front, where `Urotsuki's Room` does not belong: a dump opening on
+`3D Structures Path` reads as a mistake, and it is the same title `depth` measures every distance
+from.
 
 The point is that nothing in it reads the last dump. The reference's ids are its database's insert
 order, which cannot be reproduced by anything but that database; this program used to imitate it by
 carrying the previous dump's order forward, which meant a run that came up with nothing published a
-different dump from one that did not -- alphabetical, opening on `3D Structures Path` rather than
-the room the player wakes up in. Map numbers are handed out by the game in the order the maps were
-made, so ordering by them is very nearly ordering by when the world was added, and it is the same
-answer every time: a cold build and a warm build of the same wiki publish byte-identical ids.
+different dump from one that did not. Title is a property of the wiki, so a cold build and a warm
+build of the same wiki publish byte-identical ids.
 
-"Relatively" stable, because a world already published moves if the wiki corrects which maps it is.
-A world added next week takes map numbers above every number now in use and lands at the end,
-moving nothing.
+The order was the game's map numbering until the [atlas cells](#the-atlas-cells) arrived. That put
+a world roughly where it was added, which mattered only because the thumbnail atlas was packed in
+this order and could not survive an insertion -- and it did not really survive one anyway, a world
+moving whenever the wiki corrected which maps it was built out of. A cell does that job properly,
+and title is the same key the cells and the secret marks are already carried by.
 
-Map 2 is named explicitly and has to be: map 1 is lower, so the debug room would otherwise open the
-dump. It is also the one place in the order a reader depends on.
+## The atlas cells
+
+The thumbnail atlas is one image holding a small picture of every world, and **`cell`** is where in
+it a world's picture sits. It is a separate field from the id because the two want opposite things:
+an id is a place in an order the wiki can move a world within, and a cell must never move at all. A
+world documented late, or one whose maps the wiki corrects, shifts every id above it -- and would,
+if the atlas were packed by id, hand every world after it somebody else's picture until the atlas
+was packed again.
+
+So a cell is handed out once. A world keeps whatever the last dump gave it; one first seen now takes
+a cell above every cell in use; a world dropped from the dump leaves a gap rather than freeing it
+for the next world along, and only the [weekly full run](#keeping-up-with-the-wiki) reclaims the
+cells above the last world still published. An atlas is then still right about every world it was packed
+with however far the dump has moved on, and a world it has no cell for draws the placeholder until
+`yumezu`'s `just thumbnails` is run again.
+
+This is the one part of the dump that does read the last one, for the same reason the secret marks
+do -- there is nowhere else to remember it -- and it carries the same two costs. A world the wiki
+renames is a world this has never seen, and takes a fresh cell. And a cold build has nothing to
+carry forward, so it hands out cells in publish order and the atlas has to be packed again after
+one.
+
+Secrets are given a cell like any other world, and `tools/atlas` packs it black rather than with
+their picture: a mark meaning "do not show this" is worth little if the picture ships anyway. The
+cell stays theirs, so unmarking one costs a repack and moves nothing.
 
 ## What a secret is
 
-`secret` on a world means a reader is not meant to be shown it. Two things set it: a world built out
-of map 1, and whatever an operator has marked by hand in `data.json`, which every later sync carries
-forward by title.
+`secret` on a world means a reader is not meant to be shown it. An operator sets it by hand in
+`data.json` and every later sync carries it forward by title.
+
+The debug room used to be marked automatically, by being built out of map 1. That guarded one of
+the thirteen marks and only on a cold build -- the run that has no previous dump to carry the other
+twelve forward either. A cold build needs its marks put back by hand whatever this does, so the
+rule bought nothing and is gone.
 
 A secret is published and marked rather than dropped. Dropping it would forget the mark -- the last
 dump is where the marks are read from, so a world left out of one sync is unmarked by the next --
 and hiding is a question about a reader rather than about the game. So a secret keeps its id, stays
 in the graph the depths are measured on, and stays an end of the connections that reach it. The
 client is what leaves it out: `yumezu` drops secret worlds as it reads the dump and renumbers the
-connections behind them, and `tools/atlas` drops the same worlds so the thumbnail cells still line
-up.
+connections behind them.
 
 [Yume-2kki-Explorer]: https://github.com/Yume-2kki-Explorer/Yume-2kki-Explorer
 [ynoproject/wikiwrapper]: https://github.com/ynoproject/wikiwrapper

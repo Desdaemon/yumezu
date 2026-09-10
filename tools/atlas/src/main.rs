@@ -3,10 +3,14 @@
 //! Run from the repository root, through `just thumbnails`. Downloads are cached under
 //! `tools/atlas/cache`, so a re-run after a layout change costs nothing but the packing.
 //!
-//! A world's cell is its index among the worlds the app draws, which the app derives from the atlas
-//! it loads, so there is no manifest to keep in step. What the two sides share is [`CELL`], which
-//! the app checks the atlas against on load, and which worlds are left out -- the secrets, which
-//! this has to drop where the app does, or every cell after the first of them is off by one.
+//! A world's cell is the `cell` the dump gives it, which `dreamweaver` hands out once and never
+//! moves, so an atlas keeps holding the right picture for every world it was packed with however
+//! far the dump has since moved on. The app reads the same field. What else the two sides share is
+//! [`CELL`], which the app checks the atlas against on load.
+//!
+//! Secret worlds are the one gap: their cell is packed black rather than with their picture, a
+//! mark meaning "do not show this" being worth little if the picture ships anyway. The cell is
+//! still theirs, so unmarking one costs a repack and moves nothing.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -37,13 +41,22 @@ fn main() {
 
     let dump = std::fs::read(repo.join("data.json")).expect("data.json is missing");
     let dump: serde_json::Value = serde_json::from_slice(&dump).expect("data.json is malformed");
-    let urls: Vec<String> = dump["worldData"]
+    let worlds = dump["worldData"]
         .as_array()
-        .expect("data.json has no worldData")
+        .expect("data.json has no worldData");
+    let (cells, urls): (Vec<usize>, Vec<String>) = worlds
         .iter()
         .filter(|world| !world["secret"].as_bool().unwrap_or(false))
-        .map(|world| world["filename"].as_str().unwrap_or_default().to_owned())
-        .collect();
+        .map(|world| {
+            let cell = world["cell"]
+                .as_u64()
+                .expect("data.json gives a world no cell: sync it once before packing");
+            (
+                cell as usize,
+                world["filename"].as_str().unwrap_or_default().to_owned(),
+            )
+        })
+        .unzip();
 
     let images = fetch_all(&urls, &cache);
     let unknown_bytes = fetch_all(&[UNKNOWN.to_owned()], &cache)
@@ -67,10 +80,7 @@ fn main() {
         .expect("cannot write the placeholder");
     let unknown = thumbnail(&unknown_bytes).expect("the placeholder is not an image");
 
-    // Square-ish, so neither dimension runs into a driver's texture size limit. Sized for the
-    // worlds *and* the placeholder, so there is always a last cell left over for it.
-    let columns = ((images.len() + 1) as f64).sqrt().ceil() as u32;
-    let rows = (images.len() + 1).div_ceil(columns as usize) as u32;
+    let (columns, rows) = grid(cells.iter().copied().max());
     let mut atlas = image::RgbImage::new(columns * CELL[0], rows * CELL[1]);
     let mut packed = 0;
     for (world, bytes) in images.iter().enumerate() {
@@ -79,7 +89,7 @@ fn main() {
             // picture rather than a hole in the atlas.
             continue;
         };
-        let cell = (world as u32 % columns, world as u32 / columns);
+        let cell = (cells[world] as u32 % columns, cells[world] as u32 / columns);
         image::imageops::replace(
             &mut atlas,
             &thumbnail,
@@ -123,6 +133,18 @@ fn main() {
         out.display(),
         size as f64 / (1 << 20) as f64,
     );
+}
+
+/// The grid holding every cell up to `highest`, and the placeholder after them.
+///
+/// Sized by the highest cell rather than by how many worlds there are: cells are handed out once
+/// and never reused, so a world dropped from the dump leaves a hole where its picture was.
+///
+/// Square-ish, so neither dimension runs into a driver's texture size limit.
+fn grid(highest: Option<usize>) -> (u32, u32) {
+    let slots = highest.map_or(1, |highest| highest + 2);
+    let columns = (slots as f64).sqrt().ceil() as u32;
+    (columns, slots.div_ceil(columns as usize) as u32)
 }
 
 /// Cropped to the cell's aspect ratio about its centre, then scaled. Cropping rather than
@@ -220,4 +242,20 @@ fn fetch(client: &reqwest::blocking::Client, url: &str, cache: &Path) -> Option<
     // Not fatal: a cache that cannot be written only costs the next run its downloads.
     let _ = std::fs::write(&cached, &bytes);
     Some(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    // The app reads the placeholder out of the last cell of whatever grid the atlas divides into,
+    // so a grid one cell too small hands a world's picture out as the placeholder and loses it.
+    #[test]
+    fn the_last_cell_is_the_placeholder_and_no_world_reaches_it() {
+        for highest in [0, 1, 2, 3, 8, 15, 16, 1578] {
+            let (columns, rows) = super::grid(Some(highest));
+            let last = (columns * rows) as usize - 1;
+            assert!(last > highest, "{highest} of {columns}x{rows}");
+        }
+        // No world at all is still an atlas: one cell, holding the placeholder.
+        assert_eq!(super::grid(None), (1, 1));
+    }
 }

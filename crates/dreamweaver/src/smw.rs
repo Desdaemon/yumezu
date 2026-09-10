@@ -119,8 +119,8 @@ pub async fn locations(http: &reqwest::Client) -> Result<Vec<Location>> {
     let rows = askargs::<LocationRow>(
         http,
         "Category:Yume 2kki Locations",
-        "Has location image|Has primary author|Japanese name|Has BGM|Has location map|Map \
-         IDs|Version added|Versions updated|Version removed|Version gaps",
+        "Has location image|Has primary author|Japanese name|Has BGM|Has location map|Version \
+         added|Versions updated|Version removed|Version gaps",
         "",
     )
     .await?;
@@ -224,9 +224,6 @@ pub struct Location {
     pub primary_author: Option<String>,
     pub bgms: Vec<Bgm>,
     pub location_maps: Vec<LocationMap>,
-    /// The RPG Maker maps the world is built out of, by the number the game gives each. Empty for
-    /// the three pages in the category whose infobox names none.
-    pub map_ids: Vec<u32>,
     /// As the version history names it. Empty for a page in the category with no infobox at all.
     pub version_added: String,
     /// Every release that changed it, each optionally suffixed with what kind of change it was.
@@ -500,8 +497,6 @@ struct LocationRow {
     bgms: Vec<BgmRow>,
     #[serde(rename = "Has location map", default)]
     maps: Vec<MapRow>,
-    #[serde(rename = "Map IDs", default)]
-    map_ids: Vec<MapIdRow>,
     #[serde(rename = "Version added", default, deserialize_with = "first")]
     added: Option<String>,
     #[serde(rename = "Versions updated", default)]
@@ -523,7 +518,6 @@ impl LocationRow {
             primary_author: (!self.authors.is_empty()).then(|| self.authors.join(", ")),
             bgms: self.bgms.into_iter().map(BgmRow::bgm).collect(),
             location_maps: self.maps.into_iter().map(MapRow::map).collect(),
-            map_ids: self.map_ids.into_iter().filter_map(|row| row.id).collect(),
             // Empty rather than absent for the pages with no infobox at all: worlds the wiki has
             // not written up, not worlds this failed to read.
             version_added: self.added.unwrap_or_default(),
@@ -532,14 +526,6 @@ impl LocationRow {
             version_gaps: self.gaps,
         }
     }
-}
-
-/// The store also writes an annotation beside the number naming which part of the world that map
-/// is. Not read: nothing published names maps one at a time.
-#[derive(Deserialize)]
-struct MapIdRow {
-    #[serde(rename = "Has map ID", default, deserialize_with = "first_in_cell")]
-    id: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -722,12 +708,6 @@ mod tests {
                     "item":["Map of 3D Structures Path"]},
                 "Has image path":{"label":"Has image path","typeid":"_uri",
                     "item":["https://yume.wiki/images/3/3c/3D_Structures_Path_map.png"]}}],
-            "Map IDs":[{
-                "Has map ID":{"label":"Has map ID","typeid":"_num","item":[1344]},
-                "Map ID annotation":{"label":"Map ID annotation","typeid":"_txt","item":[]}},{
-                "Has map ID":{"label":"Has map ID","typeid":"_num","item":[884]},
-                "Map ID annotation":{"label":"Map ID annotation","typeid":"_txt",
-                    "item":["Main Area"]}}],
             "Version added":["0.116a"],
             "Versions updated":["0.122g","0.124f patch 2"],
             "Version removed":[],
@@ -755,8 +735,6 @@ mod tests {
         let map = world.location_maps.first().expect("the one map");
         assert_eq!(map.caption, "Map of 3D Structures Path");
         assert!(map.path.ends_with("3D_Structures_Path_map.png"));
-        // A number rather than a string, in the order the wiki lists them.
-        assert_eq!(world.map_ids, [1344, 884]);
     }
 
     /// The dump publishes one string and a reader groups the worlds by it. The wrapper joined them
@@ -768,7 +746,6 @@ mod tests {
             authors: authors.iter().map(|name| (*name).to_owned()).collect(),
             japanese: None,
             bgms: Vec::new(),
-            map_ids: Vec::new(),
             maps: Vec::new(),
             added: None,
             updated: Vec::new(),

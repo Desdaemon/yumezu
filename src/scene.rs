@@ -362,7 +362,6 @@ pub(super) fn entities(
         atlas: Some(thumbnails::load()),
         sheet: None,
         cells: worlds.iter().map(world::World::cell).collect(),
-        packed: dump.packed,
         unvisited: unvisited.clone(),
         // White until the first `place_unvisited`, the same fan-out the thumbnails' colors take.
         unvisited_quads: Instances {
@@ -651,8 +650,8 @@ impl AppEntities {
         // Both failures are logged where they are found, and both leave the graph drawn as it was
         // before thumbnails existed.
         let Some(atlas) = loaded else { return };
-        self.sheet = thumbnails::Sheet::new(egui, self.packed, &atlas);
-        let Some(cells) = thumbnails::cells(self.packed, &self.cells, &atlas) else {
+        self.sheet = thumbnails::Sheet::new(egui, &atlas);
+        let Some(cells) = thumbnails::cells(&self.cells, &atlas) else {
             return;
         };
         self.thumbnail_instances.texture_transformations = Some(cells);

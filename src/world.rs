@@ -20,8 +20,8 @@ const SERVER: &str = "http://127.0.0.1:5000";
 /// This project's own `dreamweaver`, deployed.
 ///
 /// The reference explorer at `explorer.yume.wiki` answers the same two routes but is not a
-/// fallback: its ids are its database's insert order and `dreamweaver`'s are the game's map
-/// numbering, so a thumbnail atlas packed against one does not fit the other.
+/// fallback: it publishes no `cell`, so every world would come out of it wearing the
+/// placeholder.
 #[cfg(all(not(target_family = "wasm"), feature = "production"))]
 const SERVER: &str = "https://explorer.yumemiru.dev";
 
@@ -45,11 +45,6 @@ static JAPANESE_AUTHOR_OVERRIDES: phf::Map<&str, &str> = phf::phf_map! {
 pub struct Dump {
     #[serde(rename = "worldData")]
     pub worlds: Vec<World>,
-    /// How many cells the thumbnail atlas has to hold. Carried through [`Dump::showing`] rather
-    /// than measured again: a world's cell is its place in the whole dump, and a frontier keeps
-    /// only part of it.
-    #[serde(skip)]
-    pub packed: usize,
     /// Newest first. Most added no world at all, so the catalog is built out of
     /// [`Dump::versions`] rather than this directly.
     #[serde(rename = "versionInfoData")]
@@ -101,10 +96,14 @@ pub struct World {
     #[serde(default)]
     secret: bool,
     pub connections: Vec<Connection>,
-    /// Its place among the worlds the app draws, fixed when the dump was read and kept through
-    /// every later filtering of it. Written by [`parse`] and nothing else.
-    #[serde(skip)]
-    packed_at: usize,
+    /// Its cell in the thumbnail atlas, as the server hands it out: once, and never moved again,
+    /// so an atlas packed before this world existed is still right about every world it does
+    /// hold. Read through [`World::cell`].
+    ///
+    /// `None` from a server old enough not to publish one, which costs that run its thumbnails
+    /// rather than giving every world somebody else's.
+    #[serde(default)]
+    cell: Option<usize>,
     /// Whether the player has never stood here, in a run showing only where they have been. Such a
     /// world is drawn because it touches one they have: named for what it is rather than where,
     /// wearing the placeholder picture, with no maps and no page to open. See [`Dump::showing`].
@@ -206,9 +205,10 @@ impl World {
         }
     }
 
-    /// `None` for a world the player has not been to, which wears the atlas's placeholder.
+    /// `None` for a world the player has not been to, which wears the atlas's placeholder, and for
+    /// one the dump gives no cell.
     pub fn cell(&self) -> Option<usize> {
-        (!self.unknown).then_some(self.packed_at)
+        self.cell.filter(|_| !self.unknown)
     }
 
     /// In the order the wiki lists them, and empty for the few hundred worlds it has drawn none
@@ -668,12 +668,6 @@ async fn download(url: &str) -> Result<String, super::fetch::Error> {
 fn parse(json: &str) -> serde_json::Result<Dump> {
     let mut dump = serde_json::from_str::<Dump>(json)?;
     hide(&mut dump.worlds);
-    // After the secrets have gone and before anything else can take a world out: this is the
-    // numbering `tools/atlas` packed the thumbnails against.
-    dump.packed = dump.worlds.len();
-    for (at, world) in dump.worlds.iter_mut().enumerate() {
-        world.packed_at = at;
-    }
     // Every picture address the app fetches at runtime passes through here and only here.
     // `tools/atlas` reads `data.json` itself and rightly misses this: it runs at build time and has
     // no page to be on.
@@ -693,9 +687,6 @@ fn parse(json: &str) -> serde_json::Result<Dump> {
 /// A connection names the world it leads to by index, so taking one out moves every index above it
 /// and a reference left pointing at the old one draws a line somewhere else entirely. Done where
 /// the dump becomes the app's, so nothing downstream ever sees those worlds.
-///
-/// `tools/atlas` drops the same worlds, the atlas being packed by index too: the two agree on what
-/// a cell counts, or every picture after the first secret is somewhere else's.
 fn hide(worlds: &mut Vec<World>) {
     let keep: Vec<bool> = worlds.iter().map(|world| !world.secret).collect();
     let dropped = keep.iter().filter(|kept| !**kept).count();
@@ -815,7 +806,6 @@ impl Dump {
         retain(&mut worlds, &shown);
         Dump {
             worlds,
-            packed: self.packed,
             releases: self.releases.clone(),
             credits: self.credits.clone(),
             last_update: self.last_update.clone(),
@@ -1266,7 +1256,7 @@ mod tests {
             map_url: None,
             map_label: None,
             secret,
-            packed_at: 0,
+            cell: None,
             unknown: false,
             connections: out
                 .iter()
@@ -1306,11 +1296,7 @@ mod tests {
     #[test]
     fn a_frontier_keeps_one_step_past_what_was_visited() {
         // Each links only the step onward, so the step back is read off the far side's listing.
-        let mut dump = chain(&["Nexus", "Sofa Room", "Far Room", "Farther Room"], 0);
-        dump.packed = dump.worlds.len();
-        for (at, world) in dump.worlds.iter_mut().enumerate() {
-            world.packed_at = at;
-        }
+        let dump = chain(&["Nexus", "Sofa Room", "Far Room", "Farther Room"], 0);
         let visited = ["Nexus".to_owned()].into_iter().collect();
         let shown = dump.showing(&visited);
 
@@ -1337,19 +1323,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             [vec![1], vec![]]
         );
-        // The atlas is packed against the whole dump, so a frontier keeps part of that numbering
-        // rather than one of its own.
-        assert_eq!(shown.packed, 4);
     }
 
     #[test]
     fn a_frontier_does_not_reach_through_a_passage_it_cannot_be_walked_down() {
         // Every listed step is one-way *into* the world listing it, so Nexus has no way onward.
-        let mut dump = chain(
+        let dump = chain(
             &["Nexus", "Sofa Room", "Far Room", "Farther Room"],
             super::flag::NO_ENTRY,
         );
-        dump.packed = dump.worlds.len();
         let visited = ["Nexus".to_owned()].into_iter().collect();
 
         assert_eq!(
@@ -1377,7 +1359,7 @@ mod tests {
                 map_url: None,
                 map_label: None,
                 secret: false,
-                packed_at: 0,
+                cell: Some(at),
                 unknown: false,
                 connections: (at + 1 < titles.len())
                     .then(|| super::Connection {
@@ -1391,7 +1373,6 @@ mod tests {
             .collect();
         super::Dump {
             worlds,
-            packed: 0,
             releases: Vec::new(),
             credits: Vec::new(),
             last_update: None,

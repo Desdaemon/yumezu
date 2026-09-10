@@ -187,6 +187,9 @@ pub struct Author {
 #[derive(Serialize, Deserialize)]
 pub struct World {
     pub id: usize,
+    /// Like `id`, but is assigned from a monotonic counter. See `cells` in [`crate::sync`].
+    #[serde(default)]
+    pub cell: Option<usize>,
     pub title: String,
     #[serde(rename = "titleJP")]
     pub title_jp: Option<String>,
@@ -218,13 +221,6 @@ pub struct World {
     pub ver_updated: Option<Vec<VerUpdated>>,
     #[serde(rename = "verGaps")]
     pub ver_gaps: Option<Vec<VerGap>>,
-    /// The RPG Maker maps the world is built out of, by the number the game gives each.
-    ///
-    /// Not a field the reference dump carries: it publishes only `size`, the area they add up to,
-    /// which cannot be had from a store that holds which maps a world is but not how big any of
-    /// them is. Absent rather than empty for the three pages whose infobox names no map at all.
-    #[serde(rename = "mapIds", default, skip_serializing_if = "Vec::is_empty")]
-    pub map_ids: Vec<u32>,
     pub removed: bool,
     /// Set for the debug room and whatever else an operator has marked as a spoiler. Published
     /// rather than acted on: the world stays in the dump, in the graph and in the numbering, and
@@ -268,4 +264,29 @@ pub struct TypeParams {
     pub params: String,
     #[serde(rename = "paramsJP")]
     pub params_jp: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    // The last dump is where the secret marks and the atlas cells are read from, and a sync that
+    // cannot parse it silently starts from nothing: marks forgotten, cells handed out afresh. So
+    // every field this has ever published has to stay readable, whether it is still published or
+    // not.
+    #[test]
+    fn a_dump_written_before_the_fields_moved_is_still_read() {
+        // As published before `cell` existed and while `mapIds` still did.
+        let json = r#"{"worldData":[{"id":0,"title":"Debug Room","titleJP":null,"author":"20",
+            "depth":1,"minDepth":1,"filename":"","mapUrl":null,"mapLabel":null,"bgmUrl":null,
+            "bgmLabel":null,"verAdded":"0.036","verRemoved":null,"verUpdated":null,
+            "verGaps":null,"mapIds":[1],"removed":false,"secret":true,"connections":[]}],
+            "authorInfoData":[],"versionInfoData":[],"effectData":[],"menuThemeData":[],
+            "wallpaperData":[],"bgmTrackData":[],"lastUpdate":null,"lastFullUpdate":null,
+            "isAdmin":false}"#;
+        let dump: super::Dump = serde_json::from_str(json).expect("a dump this once wrote");
+        let world = dump.worlds.first().expect("the one world");
+        // The mark survives, which is what a sync carries forward.
+        assert!(world.secret);
+        // No cell to carry: this world takes a fresh one.
+        assert_eq!(world.cell, None);
+    }
 }

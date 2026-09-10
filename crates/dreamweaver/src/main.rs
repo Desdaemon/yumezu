@@ -9,10 +9,11 @@
 //! are published empty. Nothing here parses HTML, and nothing here should: none of those four says
 //! anything about how the worlds join up.
 //!
-//! The dump is kept current out of the requests for it: a `GET /data` arriving more than
-//! `--sync-every` hours after the wiki was last asked starts a sync and answers `503 needs update`
-//! instead, and the client waits that sync out on `GET /pollUpdate`. A sync re-reads only the parts
-//! of the wiki whose pages have been edited; a run with no dump to compare against reads all of it.
+//! The dump is kept current on the server's own clock: a sync runs every `--sync-every` hours, and
+//! `GET /data` is answered from the file whether or not one is running. A sync re-reads only the
+//! parts of the wiki whose pages have been edited; once a week one reads the whole of it instead
+//! of asking what has changed -- see [`FULL_EVERY`]. Until the first sync lands there is nothing to
+//! serve, so `/data` answers `503 needs update` and the client waits on `GET /pollUpdate`.
 //!
 //! ```text
 //! dreamweaver [--listen ADDR|PATH] [--data PATH] [--sync-every HOURS]
@@ -50,23 +51,22 @@ const DATA: &str = "data.json";
 /// Where the server listens with no `--listen`.
 const LISTEN: &str = "127.0.0.1:5000";
 
-/// A world appears every few days at most, so this is not a race. Six hours is the reference
-/// implementation's own interval. It is also the window the wiki is asked about, so a shorter
-/// interval means more passes each covering less, not more of the wiki read.
-const SYNC_EVERY: u64 = 6;
+/// A pass that finds the wiki unmoved costs one small request, so what sets this is how soon an edit
+/// should show rather than what the asking costs. It is also the window the wiki is asked about: a
+/// shorter interval means more passes each covering less, not more of the wiki read.
+const SYNC_EVERY: u64 = 2;
 
-/// The lock around the last refresh's fetches is also what keeps two refreshes from running at
-/// once: a scheduled sync and a `GET /update` arriving together would otherwise both build a dump,
-/// and the slower would publish over the newer.
+/// A soft sync takes the wiki's account of its own edits at its word, and an edit that account
+/// misses -- a template the worlds are built out of, outside the one namespace that is watched --
+/// is missed for good: nothing later asks about that week again.
+const FULL_EVERY: time::Duration = time::Duration::weeks(1);
+
 #[derive(Clone)]
 struct Server {
     store: Arc<store::Store>,
     http: reqwest::Client,
-    fetched: Arc<tokio::sync::Mutex<sync::Fetched>>,
     /// Where the running sync has got to. See [`progress`].
     progress: Arc<progress::Progress>,
-    /// Whether the wiki is worth asking about again. See [`Due`].
-    due: Arc<Due>,
 }
 
 #[tokio::main]
@@ -84,17 +84,12 @@ async fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
 
-    let store = Arc::new(store::Store::open(&options.data));
-    // A run that read a dump off disk is as up to date as that dump says. One that read nothing
-    // is due immediately.
-    let due = Arc::new(Due::new(options.sync_every, &store.snapshot().dump));
     let server = Server {
-        store,
+        store: Arc::new(store::Store::open(&options.data)),
         http: http(),
-        fetched: Arc::default(),
         progress: Arc::default(),
-        due,
     };
+    tokio::spawn(refresh(server.clone(), options.sync_every));
     serve(server, options).await;
     std::process::ExitCode::SUCCESS
 }
@@ -114,7 +109,6 @@ struct Options {
     /// A `host:port` or a socket path; [`Listen`] is which.
     listen: String,
     data: String,
-    /// How long a sync stands for. See [`Due`].
     sync_every: u64,
 }
 
@@ -156,68 +150,40 @@ impl Options {
     }
 }
 
-/// Whether the wiki is worth asking about again, and so whether the next `GET /data` is answered
-/// with the dump or with `needs update`.
+/// Keeps the dump current, for as long as the server runs: one sync every `--sync-every` hours.
 ///
-/// The mark is when a sync last *ran*, not when the dump last changed: most syncs find the wiki
-/// unmoved and publish nothing, so dating this from the dump's stamp would leave every one of those
-/// due again immediately.
+/// Each sync is awaited before the next interval begins. Two at once would both build a dump, and
+/// the slower would publish over the newer.
 ///
-/// A run coming up with a dump on disk inherits that dump's stamp, so restarting the server is not
-/// a way to make it re-read the wiki.
-struct Due {
-    /// When the wiki was last asked, or `None` for a server that has never asked it.
-    asked: std::sync::Mutex<Option<time::OffsetDateTime>>,
-    /// How long that answer stands for: `--sync-every`.
-    every: time::Duration,
-}
-
-impl Due {
-    fn new(hours: u64, previous: &model::Dump) -> Self {
-        Due {
-            asked: std::sync::Mutex::new(previous.last_update.as_deref().and_then(sync::moment)),
-            every: time::Duration::hours(hours as i64),
-        }
-    }
-
-    /// Whether a sync is due now.
-    fn now(&self) -> bool {
-        match *self.asked.lock().unwrap() {
-            Some(asked) => time::OffsetDateTime::now_utc() - asked >= self.every,
-            None => true,
-        }
-    }
-
-    /// A failed sync counts: a server retrying every request would answer `needs update` to all of
-    /// them while hammering a host already having a bad day.
-    fn met(&self) {
-        *self.asked.lock().unwrap() = Some(time::OffsetDateTime::now_utc());
-    }
-}
-
-/// The lock the sync holds is taken here, so "is one running" and "what keeps two from running"
-/// are one fact rather than two that can disagree. A caller that does not get it has nothing to do.
-///
-/// `Ok(None)` from [`build`] means the wiki had nothing to say: the dump already published is still
-/// the right one, down to the byte.
-fn start(server: &Server) {
-    let Ok(mut fetched) = server.fetched.clone().try_lock_owned() else {
-        return;
-    };
-    let server = server.clone();
-    tokio::spawn(async move {
-        let built = build(&server, &mut fetched).await;
-        // However it went, the wiki has been asked and nothing is being fetched any more.
-        server.due.met();
-        server.progress.done();
-        match built {
+/// The first is timed from the dump on disk rather than from startup, so restarting the server is
+/// not a way to make it re-read the wiki.
+async fn refresh(server: Server, hours: u64) {
+    let every = std::time::Duration::from_secs(hours * 3600);
+    tokio::time::sleep(first_sync(&server.store.snapshot().dump, every)).await;
+    let mut fetched = sync::Fetched::default();
+    loop {
+        match build(&server, &mut fetched).await {
             Ok(Some(worlds)) => tracing::info!("published {worlds} worlds"),
             Ok(None) => tracing::info!("the wiki has not changed; the dump stands"),
             // Debug rather than Display: only Debug says which field of the answer it could not
             // read, which on a failed sync is the whole of what there is to go on.
             Err(error) => tracing::error!("sync failed: {error:?}"),
         }
-    });
+        server.progress.done();
+        tokio::time::sleep(every).await;
+    }
+}
+
+/// How long a run waits before its first sync: whatever is left of the interval the dump it came up
+/// with was built in, and nothing at all for a run that came up with no dump.
+fn first_sync(previous: &model::Dump, every: std::time::Duration) -> std::time::Duration {
+    let Some(built) = previous.last_update.as_deref().and_then(sync::moment) else {
+        return std::time::Duration::ZERO;
+    };
+    let age = time::OffsetDateTime::now_utc() - built;
+    // A stamp in the future has no age. Waiting the interval out is the reading that cannot become
+    // a sync per restart.
+    every.saturating_sub(age.try_into().unwrap_or(every))
 }
 
 /// Split out so every way out -- nothing to do, a failed fetch, a published dump -- passes back
@@ -241,16 +207,21 @@ async fn build(server: &Server, fetched: &mut sync::Fetched) -> smw::Result<Opti
 
 /// How much of the wiki this refresh should read, or `None` for one that need not run at all.
 ///
-/// Only a sync with a dump to compare against has a choice to make. Three answers stand it down or
-/// widen it: nothing has changed; the dump is older than the wiki remembers, so all of it is read;
-/// and the wiki cannot be asked at all, which reads all of it too.
+/// Only a sync with a dump to compare against, and a week not yet up, has a choice to make. Three
+/// answers stand it down or widen it: nothing has changed; the dump is older than the wiki
+/// remembers, so all of it is read; and the wiki cannot be asked at all, which reads all of it too.
 async fn plan(server: &Server, previous: &model::Dump) -> Option<sync::Refresh> {
     server.progress.at(progress::CHANGES);
     // Nothing to compare against is a first sync, and a first sync reads all of it.
-    let Some(built) = previous.last_update.as_deref() else {
+    let Some(built) = previous
+        .last_update
+        .as_deref()
+        .filter(|_| !previous.worlds.is_empty())
+    else {
         return Some(sync::Refresh::Everything);
     };
-    if previous.worlds.is_empty() {
+    if full_due(previous) {
+        tracing::info!("the week is up; reading the whole wiki rather than asking what changed");
         return Some(sync::Refresh::Everything);
     }
     let Some(since) = sync::asked_from(built, time::OffsetDateTime::now_utc()) else {
@@ -272,10 +243,18 @@ async fn plan(server: &Server, previous: &model::Dump) -> Option<sync::Refresh> 
     }
 }
 
+/// `lastFullUpdate` is the dump's own record of when the whole wiki was last read, so the week
+/// survives a restart.
+fn full_due(previous: &model::Dump) -> bool {
+    match previous.last_full_update.as_deref().and_then(sync::moment) {
+        Some(last) => time::OffsetDateTime::now_utc() - last >= FULL_EVERY,
+        None => true,
+    }
+}
+
 /// nginx reaches an upstream by `proxy_pass http://127.0.0.1:5000` or by
 /// `proxy_pass http://unix:/run/dreamweaver.sock:`. A socket in a directory only nginx and this
-/// program can enter needs no loopback port left open, which for a server whose `/update` is
-/// unguarded is the safer half.
+/// program can enter needs no loopback port left open.
 ///
 /// The two are told apart by the `/`, no `host:port` having one -- not even an IPv6 literal, which
 /// brackets its colons instead.
@@ -373,21 +352,14 @@ where
     }
 }
 
-/// `GET /data` -- the dump, exactly as it sits on disk, or `503 needs update`.
-///
-/// That `503` is what makes the server keep up at all: there is no clock in here, only requests,
-/// and a request arriving after the last sync has gone stale is what starts the next one. The
-/// client is told to wait rather than handed the old dump so it has one story for both waits --
-/// the first sync of a server with nothing to serve, and a routine refresh.
+/// `GET /data` -- the dump, exactly as it sits on disk, or `503 needs update` before there is one.
 ///
 /// An empty dump is never served: a client cannot tell it from a wiki with no worlds in it and
-/// would draw the second.
+/// would draw the second. A sync under way is no reason to withhold the dump standing: on a pass
+/// that publishes nothing, that is the same document the client would be handed a minute later.
 async fn data(State(server): State<Server>) -> axum::response::Response {
     let snapshot = server.store.snapshot();
-    if server.due.now() || snapshot.dump.worlds.is_empty() {
-        // Nothing is awaited: the sync outlives this request, rather than holding the connection
-        // open for the minute it takes.
-        start(&server);
+    if snapshot.dump.worlds.is_empty() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "5")],

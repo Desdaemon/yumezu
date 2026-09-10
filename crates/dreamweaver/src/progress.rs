@@ -1,7 +1,7 @@
 //! What a sync is doing, for whoever is waiting on it.
 //!
-//! A sync takes a minute or so, and `GET /data` answers `needs update` for the whole of it. The app
-//! has nothing to draw and nothing to say about why, so `GET /pollUpdate` reads this.
+//! A sync takes a minute or so, and until the first one lands `GET /data` answers `needs update`.
+//! The app has nothing to draw and nothing to say about why, so `GET /pollUpdate` reads this.
 //!
 //! The stage names are the reference implementation's own, so a reader written against its
 //! `/pollUpdate` reads these unchanged. They are coarser than its worker gives: this program

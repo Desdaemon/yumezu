@@ -12,7 +12,7 @@
 use crate::model::ConnType;
 
 /// The world the game starts in, and so the world every distance is measured from.
-const START: &str = "Urotsuki's Room";
+pub(crate) const START: &str = "Urotsuki's Room";
 
 pub struct Node {
     pub title: String,
