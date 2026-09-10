@@ -335,7 +335,10 @@ impl TextAgent {
         let x = (caret.x * zoom).clamp(0.0, self.canvas.width() as f32 / ratio);
         let y = (caret.y * zoom).clamp(0.0, self.canvas.height() as f32 / ratio);
         let style = self.agent.input.style();
-        let _ = style.set_property("left", &format!("{}px", self.canvas.offset_left() as f32 + x));
+        let _ = style.set_property(
+            "left",
+            &format!("{}px", self.canvas.offset_left() as f32 + x),
+        );
         let _ = style.set_property("top", &format!("{}px", self.canvas.offset_top() as f32 + y));
     }
 
@@ -369,7 +372,11 @@ fn focus(element: &web_sys::HtmlElement) {
 /// The device's own pixels per CSS pixel, which is what the canvas' size is counted in.
 fn pixel_ratio() -> f32 {
     let ratio = web_sys::window().unwrap().device_pixel_ratio() as f32;
-    if ratio > 0.0 && ratio.is_finite() { ratio } else { 1.0 }
+    if ratio > 0.0 && ratio.is_finite() {
+        ratio
+    } else {
+        1.0
+    }
 }
 
 /// Keeps the closure alive in `kept`. Handlers are typed by the event each wants and the DOM only

@@ -411,7 +411,7 @@ struct AppEntities {
     edges: Gm<InstancedMesh, ColorMaterial>,
     /// `EDGE_DASHES` per one-way connection, standing in for a solid line. See
     /// [`AppEntities::march_dashes`].
-    dashes: Gm<InstancedMesh, ColorMaterial>,
+    dashes: Gm<InstancedMesh, DashMaterial>,
     /// Kept so each frame can rewrite the transformations while keeping the colors:
     /// `set_instances` replaces the whole [`Instances`] struct.
     thumbnail_instances: Instances,
@@ -424,20 +424,19 @@ struct AppEntities {
     /// See [`AppEntities::gather_lit`].
     lit_thumbnails: Gm<InstancedMesh, ColorMaterial>,
     lit_edges: Gm<InstancedMesh, ColorMaterial>,
+    /// Apart from `lit_edges` so a lit one-way connection still reads as one-way: the overlay's
+    /// solid lines carry no dash material.
+    lit_dashes: Gm<InstancedMesh, DashMaterial>,
     /// Compacted copies of the lit slots of the buffers above, rather than world-indexed as those
     /// are: nothing but the overlay's own draw reads them.
     lit_thumbnail_instances: Instances,
     lit_edge_instances: Instances,
+    lit_dash_instances: Instances,
     /// Which slots the overlay copies, decided where the lighting itself is decided. See
     /// [`AppEntities::repaint`].
     lit_nodes: Vec<usize>,
     lit_lines: Vec<usize>,
-    lit_dashes: Vec<usize>,
-    /// Where each one-way connection's dashes march, rebuilt only when the layout moves under
-    /// them. See [`DashRun`].
-    dash_runs: Vec<DashRun>,
-    /// Whether [`AppEntities::dash_runs`] still describes where the nodes are.
-    dash_runs_stale: bool,
+    lit_dashed: Vec<usize>,
     /// Whether [`AppEntities::repaint`] has changed an instance colour since the last frame was
     /// built. A highlight moves no node, so nothing else in a settled graph would say so.
     recolored: bool,
@@ -460,7 +459,7 @@ struct AppEntities {
     /// built each frame, being one allocation the size of the frontier.
     unvisited_quads: Instances,
     detail: detail::Detail,
-    /// How far the dashes have marched along their slots, in `0.0..1.0`. Wrapped rather than
+    /// How far the dashes have marched, in world units. Wrapped rather than
     /// counted up, so it stays exact however long the app runs.
     dash_phase: f32,
     /// The rotation that stood the quads square to the camera when their transformations were last
@@ -1172,9 +1171,6 @@ impl App {
         if moved {
             data.rebuild_instances(&self.statics.camera);
         }
-        // Not `turned`: a dash is a solid in the scene rather than a quad held square to the
-        // camera, so only the layout dates the runs it marches along.
-        data.dash_runs_stale |= stepped || arriving || profile::eager();
         // Whether or not anything else moved: see [`AppEntities::march_dashes`].
         data.march_dashes((frame_input.elapsed_time as f32 * 1e-3).min(0.05));
         // Both of these are also where a picture that has arrived is taken out of its fetch, and a
@@ -1328,7 +1324,7 @@ impl App {
                 (self.yno.asking()
                     || matches!(data.atlas, Atlas::Loading(_))
                     || data.detail.pending())
-                    .then(|| Wanted::after_hz(POLL_REDRAW_HZ)),
+                .then(|| Wanted::after_hz(POLL_REDRAW_HZ)),
             ]
             .into_iter()
             .flatten()

@@ -317,10 +317,9 @@ pub struct Ask {
 }
 
 impl Ask {
-    /// The same demand read for a player who has never been to `destination`. Prose is all there
-    /// is to go on: no flag separates the condition on a shortcut back in -- which names the world
-    /// it leads to -- from one a first-time visitor could meet. `destination` is that world's
-    /// English title, the only one the wiki writes these sentences in.
+    /// Prose is all there is to go on: no flag separates the condition on a shortcut back in from
+    /// one a first-time visitor could meet. `destination` is that world's English title, the only
+    /// one the wiki writes these sentences in.
     fn first_visit(mut self, destination: &str) -> Self {
         let names_destination = self
             .detail
@@ -419,9 +418,9 @@ pub enum Gate {
     /// The far side of a [`Gate::DeadEnd`]: the way back is reachable only from that isolated
     /// section.
     Isolated,
-    /// A condition naming the world the connection leads to, which only a player who has already
-    /// been there can meet. Harsher than anything the wiki flags, since it is not a way in at all
-    /// -- but still a step, so a world it is the only way to is reached rather than lost.
+    /// A condition naming the world it leads to, which only a player already there can meet.
+    /// Harsher than anything the wiki flags, since it is no way in -- but still a step, so a world
+    /// it is the only way to is reached rather than lost.
     Revisit,
 }
 
@@ -1154,13 +1153,11 @@ pub fn canonical_routes(worlds: &[World]) -> Routes {
     let origin = origin_world(worlds);
     let steps = walkable_steps(worlds);
 
-    // Dijkstra over (gate, depth, demands): the route settled for a world is always its parent's
-    // route with one step added, so the parent chain and the depth cannot disagree. `demands`
-    // counts the steps that ask for anything and cannot move a world's depth, sitting after it in
-    // the key; it decides between the several equally short routes that share one harshest
-    // condition, and picks the one asking least of the player. Reversed because `BinaryHeap` is a
-    // max-heap. The world and the parent ride in the key rather than beside it, so ties resolve
-    // the same way on every run.
+    // Dijkstra over (gate, depth, demands): a world settles on its parent's route plus one step,
+    // so the parent chain and the depth cannot disagree. `demands` sits after the depth and so
+    // cannot move it -- it only picks the least demanding of the equally short routes that share
+    // one harshest condition. Reversed because `BinaryHeap` is a max-heap; the world and the
+    // parent ride in the key so ties resolve the same way on every run.
     let mut queue =
         std::collections::BinaryHeap::from([std::cmp::Reverse((Gate::Free, 0, 0, origin, origin))]);
     while let Some(std::cmp::Reverse((gate, depth, demands, world, parent))) = queue.pop() {
@@ -1490,9 +1487,7 @@ mod tests {
         );
     }
 
-    // The order the reference gives conditions up in, which is what decides between two routes
-    // that are both conditional. Reading it off `dreamweaver`'s `give_up`: conditional, then
-    // locked, then a shortcut's exit, then the isolated pair.
+    // `dreamweaver`'s `give_up` is the reference for this order.
     #[test]
     fn a_route_gives_conditions_up_in_the_references_order() {
         use super::Gate;
@@ -1810,8 +1805,6 @@ mod tests {
         );
     }
 
-    // A shortcut that only opens once the world has been visited is not how the world is first
-    // reached, and the wiki says so only in the words of the condition.
     #[test]
     fn a_condition_naming_where_it_leads_is_not_a_way_in() {
         use super::{Ask, Gate};
@@ -1834,8 +1827,6 @@ mod tests {
                 .gate,
             Gate::LockedCondition
         );
-        // Only a condition is read this way: the words on an effect name what to bring, not where
-        // the player has been.
         assert_eq!(
             ask(Gate::Effect, "Chainsaw the Tree of Life in Blood Cell Sea")
                 .first_visit("Blood Cell Sea")
@@ -1844,8 +1835,7 @@ mod tests {
         );
     }
 
-    // The dump has no world whose only way in is such a shortcut, so none should be walked. One
-    // appearing here is a world the wiki documents no honest way into, not a fault in the rule.
+    // A world appearing here is one the wiki documents no unvisited way into, not a rule at fault.
     #[test]
     fn no_route_is_walked_in_through_a_revisit() {
         let Some(worlds) = load().map(|dump| dump.worlds) else {
@@ -1868,8 +1858,7 @@ mod tests {
         assert_eq!(walked_in, [] as [&str; 0]);
     }
 
-    // The panel reads a route's demands off `connections`, one step per row, so a canonical step
-    // missing there would drop a condition silently rather than loudly.
+    // The panel reads a step's demand off `connections`; one missing there drops it silently.
     #[test]
     fn every_canonical_step_is_walkable_where_the_panel_reads_it() {
         let Some(worlds) = load().map(|dump| dump.worlds) else {

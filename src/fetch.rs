@@ -161,11 +161,10 @@ fn transport() -> reqwest::Client {
     // roots instead, at the cost of only changing when a build does. Every other platform keeps
     // the OS verifier. <https://github.com/seanmonstar/reqwest/pull/2891>
     #[cfg(target_os = "android")]
-    let builder = builder.tls_certs_only(
-        webpki_root_certs::TLS_SERVER_ROOT_CERTS
-            .iter()
-            .map(|root| reqwest::Certificate::from_der(root).expect("a compiled-in root is a cert")),
-    );
+    let builder =
+        builder.tls_certs_only(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().map(|root| {
+            reqwest::Certificate::from_der(root).expect("a compiled-in root is a cert")
+        }));
     builder.build().expect("cannot build an http client")
 }
 

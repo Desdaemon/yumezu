@@ -313,16 +313,13 @@ impl AppStatics {
         self.control.target = bounds.center;
     }
 
-    /// Carries what the camera looks at toward `at`. Returns whether it still has ground to cover.
+    /// Returns whether it still has ground to cover.
     ///
-    /// In three dimensions the eye stays where it is and turns onto the world, which is the whole
-    /// of the move: a look, not a journey. A flat view has no such turn to make -- the camera is
-    /// held square to the plane -- so there the eye travels with what it looks at and the lean
-    /// reads as a pan.
+    /// In three dimensions the eye stays put and turns onto the world; a flat view is held square
+    /// to the plane and has no such turn to make, so there the eye travels with what it looks at.
     ///
-    /// Nothing is given back when the pointing stops. Where the lean left the view is where the
-    /// person is now looking from, and taking that back under them would be the app moving the
-    /// camera at the one moment they have taken it over.
+    /// Nothing is given back when the pointing stops -- that would be the app moving the camera
+    /// at the one moment the person has taken it over.
     pub(super) fn lean_toward(
         &mut self,
         at: Option<Vec3>,
@@ -330,8 +327,8 @@ impl AppStatics {
         dt: f32,
     ) -> bool {
         let Some(at) = at else {
-            // Primed at where the view now is, so the next lean starts from rest rather than from
-            // wherever the last one was heading.
+            // Primed at the view, so the next lean starts from rest rather than from wherever the
+            // last one was heading.
             self.lean_aim = self.control.target;
             return false;
         };
@@ -341,8 +338,8 @@ impl AppStatics {
             // off the eye stands: only as near as the orbit will stand it.
             Dimensions::Three => self.within_orbit(at),
         };
-        // Against the goal itself rather than against what the first ease has reached, which
-        // starts out level with the centre and would read as arrived before either had moved.
+        // Against the goal, not against what the first ease has reached: that starts out level
+        // with the centre and would read as arrived before either had moved.
         if goal.distance(self.control.target)
             < self.control.target.distance(self.camera.position()) * LEAN_ARRIVAL_TOLERANCE
         {

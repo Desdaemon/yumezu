@@ -8,19 +8,19 @@ const EDGE_RADIUS: f32 = 0.05;
 /// Sides of the tube a connection is drawn as. Tens of thousands of them come out a pixel wide, so
 /// the cost is triangle setup rather than fill and the sides are very nearly the whole of it.
 const EDGE_SIDES: u32 = 3;
-/// A connection a player can only walk one way is drawn as marching dashes. A fixed count rather
-/// than a fixed dash length, so it is settled when the graph is built and never moves with the
-/// layout -- the dashes stretch with the connection instead.
-const EDGE_DASHES: usize = 7;
-/// How much of its own slot a dash fills. Short, because a dash is only seen to move against the
-/// gap it leaves behind.
-const EDGE_DASH_FILL: f32 = 0.25;
+/// World units rather than a share of the connection: `layout::edge_reach` lets a one-way
+/// connection stretch as far as the layout wants, so a share of one is no fixed size at all.
+/// Against `NODE_LEAF_RADIUS` for scale.
+const EDGE_DASH_LENGTH: f32 = 1.0;
+/// Start of one dash to the start of the next; the gap is what is left over.
+const EDGE_DASH_PERIOD: f32 = 3.0;
 /// Wider than a solid line because it is so much shorter: a dash as thin as the line it stands in
 /// for reads as a worn-away line rather than a mark travelling along one.
 const EDGE_DASH_WIDTH: f32 = 1.6;
 /// Slots a second: at `1.0` a dash takes a second to reach where the dash ahead of it started. The
 /// marching carries the direction on its own, so nothing about a still frame points anywhere.
-const EDGE_DASH_SPEED: f32 = 0.8;
+/// World units a second.
+const EDGE_DASH_SPEED: f32 = 3.0;
 /// sRGB, which is what both the clear and [`panorama_texture`]'s glows over it want.
 pub(super) const BACKGROUND_COLOR: [f32; 3] = [0.03, 0.03, 0.05];
 /// Side of the backdrop's repeating tile in texels, and the spacing of the lattice of glows inside
@@ -70,9 +70,8 @@ const EDGE_LEAF_BRIGHTNESS: f32 = 0.6;
 const EDGE_LUMINANCE_EVENNESS: f32 = 0.5;
 /// Warm and bright, for the edges of the route back to the origin world.
 const ROUTE_COLOR: Srgba = Srgba::new(255, 242, 194, 255);
-/// The steps home from the world that was picked, apart from the steps on into what hangs off it:
-/// one is how the player gets there and the other is where it takes them. Red rather than another
-/// pale one, the two having to be told apart at a glance across a graph.
+/// The steps home from the world that was picked, told apart from the steps on into what hangs
+/// off it. Red rather than a second pale one: the two have to be read apart across a whole graph.
 const ROUTE_HOME_COLOR: Srgba = Srgba::new(255, 58, 74, 255);
 /// Brightness left to everything off the highlighted route. Low enough to set the surrounding
 /// graph behind the route, high enough that it stays readable as context.
@@ -87,23 +86,54 @@ const POINTED_BRIGHTNESS: f32 = 0.85;
 /// all rather than at a large one, and reading them as the far end of the ramp would be a lie.
 const UNREACHED_COLOR: Srgba = Srgba::new(110, 110, 120, 255);
 /// How long the panel counts frames over before saying how many there were, in milliseconds. The
-/// One one-way connection's dashes, less where along the connection each of them has marched to.
-///
-/// The marching moves a dash along its own slot and changes nothing else about it, so a settled
-/// layout can keep the orientation and the size and write only the position. That matters because
-/// this is the one piece of geometry rebuilt on every frame however still the graph is -- the
-/// marching is the whole point of the dashes -- and there are [`EDGE_DASHES`] of them per
-/// connection, half again as many instances as there are solid lines in the whole graph.
-pub(super) struct DashRun {
-    /// Where the run starts, which is the world at that end, not short of it.
-    origin: Vec3,
-    /// From there to where the dash one slot ahead starts. A dash stands at `origin + travel * at`
-    /// for its own `at` in `0.0..1.0`.
-    travel: Vec3,
-    /// The dash's orientation and size: everything about its transformation except the position,
-    /// which is written into the fourth column. Scaled to nothing for a connection whose two ends
-    /// are in the same place, there being no direction to lay a run along.
-    basis: Mat4,
+/// Cuts the dashes out of a solid line as it is drawn, so one instance is a whole connection
+/// whatever its length and however many dashes fit along it.
+pub(super) struct DashMaterial {
+    /// World units.
+    phase: f32,
+    render_states: RenderStates,
+}
+
+impl Material for DashMaterial {
+    /// Borrowed: `EffectMaterialId` has no slot for a material from outside three-d, and it keys
+    /// the shader program cache. A second such material has to take a different one.
+    fn id(&self) -> EffectMaterialId {
+        EffectMaterialId::WireframeMaterial
+    }
+
+    fn fragment_shader_source(&self, _lights: &[&dyn Light]) -> String {
+        format!(
+            "{}{}",
+            ColorMapping::fragment_shader_source(),
+            include_str!("dash.frag")
+        )
+    }
+
+    fn use_uniforms(&self, program: &Program, viewer: &dyn Viewer, _lights: &[&dyn Light]) {
+        viewer.color_mapping().use_uniforms(program);
+        program.use_uniform("dashLength", EDGE_DASH_LENGTH);
+        program.use_uniform("dashPeriod", EDGE_DASH_PERIOD);
+        program.use_uniform("dashPhase", self.phase);
+    }
+
+    fn render_states(&self) -> RenderStates {
+        self.render_states
+    }
+
+    fn material_type(&self) -> MaterialType {
+        MaterialType::Opaque
+    }
+}
+
+fn dash_line() -> CpuMesh {
+    let mut mesh = CpuMesh::cylinder(EDGE_SIDES);
+    let Positions::F32(positions) = &mesh.positions else {
+        unreachable!("`cylinder` builds its positions as f32");
+    };
+    // `cylinder` carries no uvs of its own. `u` is the fraction along the line, which each
+    // instance scales into world units for `dash.frag` to measure the pattern against.
+    mesh.uvs = Some(positions.iter().map(|at| vec2(at.x, 0.0)).collect());
+    mesh
 }
 /// A free function rather than a method because it reads the dump the app holds and hands back
 /// what the app is about to hold beside it: two borrows of one [`App`] that do not overlap in fact
@@ -176,7 +206,7 @@ pub(super) fn entities(
     // Counted off the same connections the edges are built from, so the panel calls a world a
     // junction on exactly the lines it draws for it.
     let mut degrees = vec![0; worlds.len()];
-    // What fixes how many dash instances there are. See [`EDGE_DASHES`].
+    // One dash instance per one-way connection.
     let mut dashed = 0;
     for (from, steps) in connections.iter().enumerate() {
         for step in steps {
@@ -249,9 +279,10 @@ pub(super) fn entities(
         ..Default::default()
     };
     let dash_instances = Instances {
-        transformations: vec![Mat4::identity(); dashed * EDGE_DASHES],
-        colors: Some(vec![Srgba::WHITE; dashed * EDGE_DASHES]),
-        ..Default::default()
+        transformations: vec![Mat4::identity(); dashed],
+        colors: Some(vec![Srgba::WHITE; dashed]),
+        // Not a texture: each line's own length, which `dash.frag` measures the pattern against.
+        texture_transformations: Some(vec![Mat3::identity(); dashed]),
     };
     let backdrop = ColorMaterial {
         color: Srgba::WHITE,
@@ -298,26 +329,33 @@ pub(super) fn entities(
         InstancedMesh::new(ctx, &edge_instances, &CpuMesh::cylinder(EDGE_SIDES)),
         ColorMaterial::default(),
     );
-    // The same cylinder as a solid line, placed the same way, only shorter.
+    let dash_material = || DashMaterial {
+        phase: 0.0,
+        render_states: RenderStates::default(),
+    };
     let dashes = Gm::new(
-        InstancedMesh::new(ctx, &dash_instances, &CpuMesh::cylinder(EDGE_SIDES)),
-        ColorMaterial::default(),
+        InstancedMesh::new(ctx, &dash_instances, &dash_line()),
+        dash_material(),
     );
-    // What a selection lights, drawn again over the finished scene. The same materials as the
-    // scene's own: the overlay is put in front by the depth it is drawn against being cleared
-    // first, not by refusing the depth test, so two lit worlds that overlap settle it between
-    // them exactly as two unlit ones do.
+    // The scene's own materials: the overlay is put in front by its depth being cleared first,
+    // not by refusing the depth test, so two lit worlds that overlap settle it as any two do.
     let (lit_thumbnail_instances, lit_edge_instances) =
         (Instances::default(), Instances::default());
     let lit_thumbnails = Gm::new(
         InstancedMesh::new(ctx, &lit_thumbnail_instances, &CpuMesh::square()),
         ColorMaterial::default(),
     );
-    // Solid lines and dashes together: the two differ in how long a cylinder they place and in
-    // nothing else, so one overlay holds both.
     let lit_edges = Gm::new(
         InstancedMesh::new(ctx, &lit_edge_instances, &CpuMesh::cylinder(EDGE_SIDES)),
         ColorMaterial::default(),
+    );
+    let lit_dash_instances = Instances {
+        texture_transformations: Some(Vec::new()),
+        ..Default::default()
+    };
+    let lit_dashes = Gm::new(
+        InstancedMesh::new(ctx, &lit_dash_instances, &dash_line()),
+        dash_material(),
     );
 
     // Before the graph takes the names over.
@@ -378,13 +416,14 @@ pub(super) fn entities(
         dash_instances,
         lit_thumbnails,
         lit_edges,
+        lit_dashes,
         lit_thumbnail_instances,
         lit_edge_instances,
+        lit_dash_instances,
         lit_nodes: Vec::new(),
         lit_lines: Vec::new(),
-        lit_dashes: Vec::new(),
-        dash_runs: Vec::new(),
-        dash_runs_stale: true,
+        lit_dashed: Vec::new(),
+
         recolored: true,
         glowing: None,
         atlas: Atlas::Loading(thumbnails::load()),
@@ -431,8 +470,7 @@ impl AppEntities {
             on_route[node] = true;
         }
         let lit = self.selected.is_some();
-        // The chain home, which a route colours apart from the rest of what it lights. Empty for
-        // every other selection, so the arm reading it below never fires for one.
+        // Empty for every selection but a route, so the match arm below never fires for one.
         let mut homeward = vec![false; self.titles.len()];
         if matches!(self.selected, Some(Highlight::Route(_))) {
             for node in self.route() {
@@ -466,9 +504,9 @@ impl AppEntities {
             self.dash_instances.colors.as_mut().unwrap(),
             &self.edge_colors,
         );
-        let (lit_lines, lit_dashes) = (&mut self.lit_lines, &mut self.lit_dashes);
+        let (lit_lines, lit_dashed) = (&mut self.lit_lines, &mut self.lit_dashed);
         lit_lines.clear();
-        lit_dashes.clear();
+        lit_dashed.clear();
         // The same order, and the same split between the two, that [`Self::rebuild_instances`] and
         // [`Self::march_dashes`] write the transformations in.
         let (mut edge, mut line, mut dash) = (0, 0, 0);
@@ -503,11 +541,11 @@ impl AppEntities {
             // Every dash of a one-way connection takes the same color, so it reads as the one
             // line it stands for.
             if data.user_data {
-                dashed[dash..dash + EDGE_DASHES].fill(color);
+                dashed[dash] = color;
                 if shown {
-                    lit_dashes.extend(dash..dash + EDGE_DASHES);
+                    lit_dashed.push(dash);
                 }
-                dash += EDGE_DASHES;
+                dash += 1;
             } else {
                 solid[line] = color;
                 if shown {
@@ -521,19 +559,11 @@ impl AppEntities {
         self.thumbnails.set_instances(&self.thumbnail_instances);
         self.edges.set_instances(&self.edge_instances);
         self.dashes.set_instances(&self.dash_instances);
-        // Only where a dash is one of the lit ones: a march that nothing in the overlay copies
-        // from has nothing to hand it.
-        if !self.lit_dashes.is_empty() {
-            self.gather_lit();
-        }
+        self.gather_lit();
     }
 
-    /// Copies the lit slots of the scene's own buffers into the overlay's, which is what
-    /// [`AppEntities::drawn_lit`] draws over the finished frame.
-    ///
-    /// Called wherever those buffers are written, the overlay being a copy and nothing more: the
-    /// positions come from the layout, the colors and the atlas cells from the passes that own
-    /// them. An empty selection leaves the overlay empty and the two draws are skipped.
+    /// Called wherever the scene's own buffers are written, this being a copy of their lit slots
+    /// and nothing more.
     fn gather_lit(&mut self) {
         let gather = |instances: &mut Instances, from: &[&Instances], at: &[&[usize]]| {
             instances.transformations.clear();
@@ -552,22 +582,32 @@ impl AppEntities {
         };
         gather(
             &mut self.lit_edge_instances,
-            &[&self.edge_instances, &self.dash_instances],
-            &[&self.lit_lines, &self.lit_dashes],
+            &[&self.edge_instances],
+            &[&self.lit_lines],
+        );
+        gather(
+            &mut self.lit_dash_instances,
+            &[&self.dash_instances],
+            &[&self.lit_dashed],
         );
         gather(
             &mut self.lit_thumbnail_instances,
             &[&self.thumbnail_instances],
             &[&self.lit_nodes],
         );
-        // The atlas cells too, the quads being pictures rather than flat color. Absent until the
-        // atlas has arrived, which is also when the overlay's own texture is set.
-        self.lit_thumbnail_instances.texture_transformations = self
-            .thumbnail_instances
-            .texture_transformations
-            .as_ref()
-            .map(|cells| self.lit_nodes.iter().map(|&node| cells[node]).collect());
+        let picked = |from: Option<&Vec<Mat3>>, at: &[usize]| {
+            from.map(|from| at.iter().map(|&at| from[at]).collect())
+        };
+        self.lit_thumbnail_instances.texture_transformations = picked(
+            self.thumbnail_instances.texture_transformations.as_ref(),
+            &self.lit_nodes,
+        );
+        self.lit_dash_instances.texture_transformations = picked(
+            self.dash_instances.texture_transformations.as_ref(),
+            &self.lit_dashed,
+        );
         self.lit_edges.set_instances(&self.lit_edge_instances);
+        self.lit_dashes.set_instances(&self.lit_dash_instances);
         self.lit_thumbnails
             .set_instances(&self.lit_thumbnail_instances);
     }
@@ -581,8 +621,8 @@ impl AppEntities {
         let pictures = self.lit_thumbnails.material.texture.is_some();
         [
             (pictures && !self.lit_nodes.is_empty()).then_some(&self.lit_thumbnails as &dyn Object),
-            (!self.lit_edge_instances.transformations.is_empty())
-                .then_some(&self.lit_edges as &dyn Object),
+            (!self.lit_lines.is_empty()).then_some(&self.lit_edges as &dyn Object),
+            (!self.lit_dashed.is_empty()).then_some(&self.lit_dashes as &dyn Object),
         ]
         .into_iter()
         .flatten()
@@ -617,30 +657,53 @@ impl AppEntities {
                     * Mat4::from_nonuniform_scale(radius * thumbnails::ASPECT, radius, 1.0),
             );
         });
-        let edges = &mut self.edge_instances.transformations;
+        // The dash lines are laid here with the solid ones rather than once a frame: `DashMaterial`
+        // cuts the dashes out as it draws, so nothing about them moves unless the layout does.
+        let dash_radius = radius * EDGE_DASH_WIDTH;
+        let (edges, dashes, spans) = (
+            &mut self.edge_instances.transformations,
+            &mut self.dash_instances.transformations,
+            self.dash_instances
+                .texture_transformations
+                .as_mut()
+                .expect("the dash lines are built carrying their own lengths"),
+        );
         edges.clear();
+        dashes.clear();
+        spans.clear();
         self.graph.visit_edges(|a, b, data| {
-            // The one-way connections belong to [`Self::march_dashes`], which rebuilds them every
-            // frame rather than only the frames the layout moves in.
-            if data.user_data {
-                return;
-            }
             let (from, to) = (world_pos(a.position()), world_pos(b.position()));
             let dir = to - from;
+            let span = dir.magnitude();
             // As thin as the later of the two worlds it joins is small, so a line is not drawn to
             // somewhere that is not there yet.
-            let radius = radius
-                * arrivals
-                    .grown(a.index().index())
-                    .min(arrivals.grown(b.index().index()));
-            edges.push(
-                Mat4::from_translation(from)
-                    * rotation_matrix_from_dir_to_dir(vec3(1.0, 0.0, 0.0), dir.normalize())
-                    * Mat4::from_nonuniform_scale(dir.magnitude(), radius, radius),
-            );
+            let grown = arrivals
+                .grown(a.index().index())
+                .min(arrivals.grown(b.index().index()));
+            let one_way = data.user_data;
+            let radius = grown * if one_way { dash_radius } else { radius };
+            // World to world: the pictures are opaque and write their depth first, so what a line
+            // lays inside one is hidden there rather than having to be held out of it.
+            let placed = match span > 0.0 {
+                true => {
+                    Mat4::from_translation(from)
+                        * rotation_matrix_from_dir_to_dir(vec3(1.0, 0.0, 0.0), dir / span)
+                        * Mat4::from_nonuniform_scale(span, radius, radius)
+                }
+                // Two worlds in the same place point a line nowhere; collapsed, not left a NaN.
+                false => Mat4::from_scale(0.0),
+            };
+            match one_way {
+                false => edges.push(placed),
+                true => {
+                    dashes.push(placed);
+                    spans.push(Mat3::from_nonuniform_scale(span, 1.0));
+                }
+            }
         });
         self.thumbnails.set_instances(&self.thumbnail_instances);
         self.edges.set_instances(&self.edge_instances);
+        self.dashes.set_instances(&self.dash_instances);
         self.gather_lit();
         self.billboard = billboard;
     }
@@ -684,88 +747,12 @@ impl AppEntities {
 
     /// Every frame, unlike the rest of the geometry: the marching is the whole point of the
     /// dashes, and a settled layout is exactly when it has to carry on regardless.
-    /// Works out where each connection's dashes run, which is everything about them except how
-    /// far along they have marched. See [`DashRun`].
-    fn lay_dash_runs(&mut self) {
-        let radius = self.edge_radius() * EDGE_DASH_WIDTH;
-        let arrivals = &self.arrivals;
-        let runs = &mut self.dash_runs;
-        runs.clear();
-        self.graph.visit_edges(|a, b, data| {
-            if !data.user_data {
-                return;
-            }
-            // Thin with whichever end is later, as the plain lines are.
-            let radius = radius
-                * arrivals
-                    .grown(a.index().index())
-                    .min(arrivals.grown(b.index().index()));
-            let (from, to) = (world_pos(a.position()), world_pos(b.position()));
-            let dir = to - from;
-            // World to world, as a solid line is drawn: the pictures are opaque and write their
-            // depth before any line is drawn at all, so what a dash lays inside one is hidden
-            // there rather than having to be held out of it. Anything short of the two ends reads
-            // as a line that has come loose from the worlds it joins.
-            let span = dir.magnitude();
-            // Two worlds in the same place leave no direction to lay a run along. Collapsed rather
-            // than skipped: the count of dashes is fixed when the graph is built and the colors
-            // are written against it.
-            if span <= 0.0 {
-                runs.push(DashRun {
-                    origin: vec3(0.0, 0.0, 0.0),
-                    travel: vec3(0.0, 0.0, 0.0),
-                    basis: Mat4::from_scale(0.0),
-                });
-                return;
-            }
-            let unit = dir / span;
-            let along = rotation_matrix_from_dir_to_dir(vec3(1.0, 0.0, 0.0), unit);
-            // Each dash fills the front of its own slot, the gap behind it being what makes the
-            // run read as dashed and what a dash marching off the far end comes back into at the
-            // near one. The run is one dash shorter than the span, which puts the leading dash's
-            // own tip on the far world rather than a dash length past it.
-            let run = span / (1.0 + EDGE_DASH_FILL / EDGE_DASHES as f32);
-            let length = run * EDGE_DASH_FILL / EDGE_DASHES as f32;
-            runs.push(DashRun {
-                origin: from,
-                travel: unit * run,
-                basis: along * Mat4::from_nonuniform_scale(length, radius, radius),
-            });
-        });
-        self.dash_runs_stale = false;
-    }
-
     pub(super) fn march_dashes(&mut self, dt: f32) {
-        // Kept inside a single slot: past the end of one, every dash stands where the dash ahead
-        // of it stood, so the phase can simply start over.
-        self.dash_phase = (self.dash_phase + dt * EDGE_DASH_SPEED).fract();
-        if self.dash_instances.transformations.is_empty() {
-            return;
-        }
-        if self.dash_runs_stale {
-            self.lay_dash_runs();
-        }
-        let phase = self.dash_phase;
-        let (slots, _) = self
-            .dash_instances
-            .transformations
-            .as_chunks_mut::<EDGE_DASHES>();
-        for (run, dashes) in self.dash_runs.iter().zip(slots) {
-            for (dash, out) in dashes.iter_mut().enumerate() {
-                let at = ((dash as f32 + phase) / EDGE_DASHES as f32).fract();
-                let at = run.origin + run.travel * at;
-                // Composing the translation by hand: `basis` carries no translation of its own, so
-                // the product is exactly `basis` with the position written into the last column.
-                *out = run.basis;
-                out.w = at.extend(1.0);
-            }
-        }
-        self.dashes.set_instances(&self.dash_instances);
-        // Only where a dash is one of the lit ones: a march that nothing in the overlay copies
-        // from has nothing to hand it.
-        if !self.lit_dashes.is_empty() {
-            self.gather_lit();
-        }
+        // Past one period every dash stands where the dash ahead of it stood, so the phase can
+        // start over rather than growing until it loses its precision.
+        self.dash_phase = (self.dash_phase + dt * EDGE_DASH_SPEED).rem_euclid(EDGE_DASH_PERIOD);
+        self.dashes.material.phase = self.dash_phase;
+        self.lit_dashes.material.phase = self.dash_phase;
     }
 
     /// Points the thumbnail quads at their own cells of the atlas once it has arrived, and hands

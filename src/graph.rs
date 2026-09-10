@@ -394,10 +394,9 @@ impl AppEntities {
     pub(super) fn highlighted(&self) -> Vec<usize> {
         match self.selected {
             None => Vec::new(),
-            // Both ways from the world that was picked: the chain home, and the worlds one step
-            // on from it. One step rather than the whole subtree -- that is what
-            // [`Highlight::Descendants`] is for. The two meet at that world and nowhere else,
-            // which is what lets [`AppEntities::repaint`] colour them apart.
+            // One step on rather than the whole subtree, which is `Highlight::Descendants`. The
+            // chain and the children meet at that world and nowhere else, so `repaint` can colour
+            // them apart.
             Some(Highlight::Route(world)) => {
                 let mut lit = self.route();
                 lit.extend(
@@ -483,8 +482,8 @@ impl AppEntities {
             None => self
                 .opening
                 .map_or_else(Vec::new, |root| self.routes.subtree(root)),
-            // The chain home rather than everything a route lights: what the button asks to be
-            // shown whole is the way there, not however much of the game hangs off its end.
+            // The chain home, not everything a route lights: the button asks for the way there,
+            // not for however much of the game hangs off its end.
             Some(Highlight::Route(_)) => self.route(),
             _ => self.highlighted(),
         }
@@ -526,8 +525,6 @@ impl AppEntities {
         self.bounds_of(&wanted)
     }
 
-    /// Where one world sits, which is what the view leans onto. See
-    /// [`AppStatics::lean_toward`].
     pub(super) fn world_at(&self, world: usize) -> Option<Vec3> {
         let mut wanted = vec![false; self.titles.len()];
         *wanted.get_mut(world)? = true;
