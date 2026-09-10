@@ -17,6 +17,15 @@ const FRAMING_MARGIN: f32 = 1.1;
 /// How near the goal the camera has to be to count as arrived, as a fraction of the framed radius
 /// and of the framing distance. The ease is asymptotic, so it needs a floor to stop at.
 const FRAMING_ARRIVAL_TOLERANCE: f32 = 0.01;
+
+/// Time constant of each of the lean's two eases, in milliseconds. Far longer than
+/// [`FRAMING_WINDOW_MS`]: a framing move is asked for and should feel like travel, where a lean is
+/// only a row under the pointer and should barely register as motion at all.
+const LEAN_WINDOW_MS: f32 = 1200.0;
+/// How near its goal the lean has to be to stop, as a fraction of how far the camera stands off
+/// its centre -- the yardstick that keeps the floor the same size on screen however far out the
+/// view is. Asymptotic as the framing ease is, and needing a floor for the same reason.
+const LEAN_ARRIVAL_TOLERANCE: f32 = 0.001;
 pub(super) struct AppStatics {
     pub(super) control: OrbitControl,
     pub(super) camera: Camera,
@@ -27,6 +36,14 @@ pub(super) struct AppStatics {
     pub(super) cursor: CursorIcon,
     pub(super) touches: Touches,
     pub(super) walk: Walk,
+    /// How far the orbit centre has been carried toward what a list row is pointing at. Kept so
+    /// the same ground can be given back: a nudge that stayed would walk the view across the graph
+    /// one pointed row at a time.
+    pub(super) lean: Vec3,
+    /// What [`Self::lean`] is easing onto, itself easing onto where the pointed world is. Two
+    /// eases in series rather than one: a single ease is at its fastest the instant it starts,
+    /// which is the jolt a row under the pointer should never give.
+    pub(super) lean_goal: Vec3,
     /// Whether the window is the one being typed at. What the dashes march for is somebody
     /// watching them, so this is what lets a settled layout stop being drawn at all rather than
     /// go on at [`IDLE_REDRAW_HZ`] for as long as the app is open.
@@ -298,6 +315,70 @@ impl AppStatics {
             up,
         );
         self.control.target = bounds.center;
+    }
+
+    /// Carries what the camera looks at a little of the way toward `at`, and gives that ground
+    /// back once nothing is pointed at. Returns whether it still has ground to cover.
+    ///
+    /// In three dimensions the eye stays where it is and turns onto the world, which is the whole
+    /// of the move: a look, not a journey. A flat view has no such turn to make -- the camera is
+    /// held square to the plane -- so there the eye travels with what it looks at and the lean
+    /// reads as a pan.
+    ///
+    /// What has been given is remembered rather than read back off the camera, which a pan, a
+    /// dolly and a framing move are all writing to as well.
+    pub(super) fn lean_toward(
+        &mut self,
+        at: Option<Vec3>,
+        dimensions: Dimensions,
+        dt: f32,
+    ) -> bool {
+        let centre = self.control.target - self.lean;
+        let goal = match (at, dimensions) {
+            (None, _) => vec3(0.0, 0.0, 0.0),
+            (Some(at), Dimensions::Two) => at - centre,
+            // The eye does not travel here, so the centre landing on the world also sets how far
+            // off the eye stands: only as near as the orbit will stand it.
+            (Some(at), Dimensions::Three) => self.within_orbit(at) - centre,
+        };
+        // Against the goal itself rather than what the first ease has reached, which starts out
+        // level with the lean and would read as arrived before either had moved.
+        if (goal - self.lean).magnitude()
+            < self.control.target.distance(self.camera.position()) * LEAN_ARRIVAL_TOLERANCE
+        {
+            return false;
+        }
+
+        // A fixed fraction of what is left per unit of time, as a framing move eases, and applied
+        // twice over: see [`Self::lean_goal`].
+        let step = 1.0 - (-dt / (LEAN_WINDOW_MS * 1e-3)).exp();
+        self.lean_goal += (goal - self.lean_goal) * step;
+        let travel = (self.lean_goal - self.lean) * step;
+        if dimensions == Dimensions::Two {
+            self.camera.translate(travel);
+        }
+        self.control.target += travel;
+        self.lean += travel;
+        if dimensions == Dimensions::Three {
+            let (eye, up) = (self.camera.position(), self.camera.up());
+            self.camera.set_view(eye, self.control.target, up);
+        }
+        true
+    }
+
+    /// `at`, pulled along the line the eye sees it on to the nearest point the orbit's own zoom
+    /// limits allow a centre. A centre nearer than the zoom can go turns the view inside out, and
+    /// one on the eye leaves no direction to look at all.
+    fn within_orbit(&self, at: Vec3) -> Vec3 {
+        let eye = self.camera.position();
+        let reach = at - eye;
+        let span = reach.magnitude();
+        let direction = match span > f32::EPSILON {
+            true => reach / span,
+            // A world sitting on the eye: the way it already looks is the only honest answer.
+            false => self.camera.view_direction(),
+        };
+        eye + direction * span.clamp(self.control.min_distance, self.control.max_distance)
     }
 
     /// Returns whether the camera still has ground to cover.

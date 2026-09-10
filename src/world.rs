@@ -317,6 +317,21 @@ pub struct Ask {
 }
 
 impl Ask {
+    /// The same demand read for a player who has never been to `destination`. Prose is all there
+    /// is to go on: no flag separates the condition on a shortcut back in -- which names the world
+    /// it leads to -- from one a first-time visitor could meet. `destination` is that world's
+    /// English title, the only one the wiki writes these sentences in.
+    fn first_visit(mut self, destination: &str) -> Self {
+        let names_destination = self
+            .detail
+            .as_deref()
+            .is_some_and(|words| words.to_lowercase().contains(&destination.to_lowercase()));
+        if self.gate == Gate::LockedCondition && names_destination {
+            self.gate = Gate::Revisit;
+        }
+        self
+    }
+
     #[cfg(test)]
     pub fn free() -> Self {
         Self {
@@ -338,7 +353,7 @@ impl Ask {
             Gate::Chance => t!("gate-chance-detail", chance = detail),
             Gate::Seasonal => t!("gate-seasonal-detail", season = detail),
             // The wiki's own sentence, which it writes in English and publishes no Japanese for.
-            Gate::LockedCondition => detail.to_owned(),
+            Gate::LockedCondition | Gate::Revisit => detail.to_owned(),
             _ => self.gate.asks(),
         }
     }
@@ -348,7 +363,8 @@ impl Ask {
             Gate::Effect => "✨",
             Gate::Chance => "🍀",
             Gate::Locked => "🔒",
-            Gate::LockedCondition => "🔐",
+            Gate::LockedCondition | Gate::Revisit => "🔐",
+            Gate::ExitPoint => "🚪",
             Gate::DeadEnd => "↩",
             Gate::Isolated => "🚩",
             Gate::Seasonal => match self.detail.as_deref() {
@@ -385,38 +401,40 @@ pub mod flag {
 }
 
 /// Ordered by how readily a canonical route accepts it: [`Gate::Free`] demands nothing, and the
-/// rest follow in the order the wiki's own path finder falls back through them.
+/// rest follow in the order the wiki's own path finder falls back through them -- conditional
+/// before locked, and a shortcut's exit only once both of those are already allowed.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Gate {
     Free,
     Effect,
     Chance,
     Seasonal,
+    LockedCondition,
     /// Unlocked from the opposite entrance.
     Locked,
-    /// Also where a shortcut comes out. The reference only ever admits [`flag::EXIT_POINT`]
-    /// together with the whole locked group, so it belongs at that group's strictest end: beside
-    /// [`Gate::Locked`] it would let a route through sooner than the reference would.
-    LockedCondition,
+    /// Where a shortcut comes out, walked backwards into the shortcut.
+    ExitPoint,
     /// Leads to an isolated section of the world at the far end.
     DeadEnd,
     /// The far side of a [`Gate::DeadEnd`]: the way back is reachable only from that isolated
     /// section.
     Isolated,
+    /// A condition naming the world the connection leads to, which only a player who has already
+    /// been there can meet. Harsher than anything the wiki flags, since it is not a way in at all
+    /// -- but still a step, so a world it is the only way to is reached rather than lost.
+    Revisit,
 }
 
 impl Gate {
     /// Harshest wins: several flags are demands to be met together, so the route is only as free
-    /// as its strictest one.
+    /// as its strictest one. Listed strictest first: the enum's order, backwards.
     fn of(flags: u16) -> Gate {
         [
-            (flag::DEAD_END, Gate::DeadEnd),
             (flag::ISOLATED, Gate::Isolated),
-            (
-                flag::LOCKED_CONDITION | flag::EXIT_POINT,
-                Gate::LockedCondition,
-            ),
+            (flag::DEAD_END, Gate::DeadEnd),
+            (flag::EXIT_POINT, Gate::ExitPoint),
             (flag::LOCKED, Gate::Locked),
+            (flag::LOCKED_CONDITION, Gate::LockedCondition),
             (flag::SEASONAL, Gate::Seasonal),
             (flag::CHANCE, Gate::Chance),
             (flag::EFFECT, Gate::Effect),
@@ -432,8 +450,8 @@ impl Gate {
             Gate::Effect => Some(flag::EFFECT),
             Gate::Chance => Some(flag::CHANCE),
             Gate::Seasonal => Some(flag::SEASONAL),
-            Gate::LockedCondition => Some(flag::LOCKED_CONDITION),
-            Gate::Free | Gate::Locked | Gate::DeadEnd | Gate::Isolated => None,
+            Gate::LockedCondition | Gate::Revisit => Some(flag::LOCKED_CONDITION),
+            Gate::Free | Gate::Locked | Gate::ExitPoint | Gate::DeadEnd | Gate::Isolated => None,
         }
     }
 
@@ -446,7 +464,8 @@ impl Gate {
             Gate::Chance => t!("gate-chance"),
             Gate::Seasonal => t!("gate-seasonal"),
             Gate::Locked => t!("gate-locked"),
-            Gate::LockedCondition => t!("gate-locked-condition"),
+            Gate::LockedCondition | Gate::Revisit => t!("gate-locked-condition"),
+            Gate::ExitPoint => t!("gate-exit-point"),
             Gate::DeadEnd => t!("gate-dead-end"),
             Gate::Isolated => t!("gate-isolated"),
         }
@@ -1118,9 +1137,10 @@ impl Routes {
 
 /// Walks the route to every world a player could actually be expected to walk.
 ///
-/// Routes are ordered by the harshest [`Gate`] anywhere along them and only then by length, so an
-/// unconditional route wins however long it is. That is why the depth reported here is the higher,
-/// honest one: a locked or chance-gated shortcut no longer makes a world look shallow.
+/// Routes are ordered by the harshest [`Gate`] anywhere along them, then by length, then by how
+/// many steps demand anything at all, so an unconditional route wins however long it is. That is
+/// why the depth reported here is the higher, honest one: a locked or chance-gated shortcut no
+/// longer makes a world look shallow.
 ///
 /// Directed, like the lines drawn: a connection the player can only walk one way is not a way in.
 pub fn canonical_routes(worlds: &[World]) -> Routes {
@@ -1134,13 +1154,16 @@ pub fn canonical_routes(worlds: &[World]) -> Routes {
     let origin = origin_world(worlds);
     let steps = walkable_steps(worlds);
 
-    // Dijkstra over (gate, depth): the route settled for a world is always its parent's route with
-    // one step added, so the parent chain and the depth cannot disagree. Reversed because
-    // `BinaryHeap` is a max-heap. The world and the parent ride in the key rather than beside it,
-    // so ties resolve the same way on every run.
+    // Dijkstra over (gate, depth, demands): the route settled for a world is always its parent's
+    // route with one step added, so the parent chain and the depth cannot disagree. `demands`
+    // counts the steps that ask for anything and cannot move a world's depth, sitting after it in
+    // the key; it decides between the several equally short routes that share one harshest
+    // condition, and picks the one asking least of the player. Reversed because `BinaryHeap` is a
+    // max-heap. The world and the parent ride in the key rather than beside it, so ties resolve
+    // the same way on every run.
     let mut queue =
-        std::collections::BinaryHeap::from([std::cmp::Reverse((Gate::Free, 0, origin, origin))]);
-    while let Some(std::cmp::Reverse((gate, depth, world, parent))) = queue.pop() {
+        std::collections::BinaryHeap::from([std::cmp::Reverse((Gate::Free, 0, 0, origin, origin))]);
+    while let Some(std::cmp::Reverse((gate, depth, demands, world, parent))) = queue.pop() {
         if routes.depth[world].is_some() {
             continue;
         }
@@ -1151,6 +1174,7 @@ pub fn canonical_routes(worlds: &[World]) -> Routes {
                 queue.push(std::cmp::Reverse((
                     gate.max(step.gate),
                     depth + 1,
+                    demands + u32::from(step.gate != Gate::Free),
                     *next,
                     world,
                 )));
@@ -1207,7 +1231,7 @@ fn walkable_steps(worlds: &[World]) -> Vec<Vec<(usize, Ask)>> {
                 continue;
             }
             if flags & flag::NO_ENTRY == 0 {
-                steps[from].push((to, connection.ask()));
+                steps[from].push((to, connection.ask().first_visit(&worlds[to].title)));
             }
             if !listed.contains(&(to, from)) && flags & flag::ONE_WAY == 0 {
                 let gate = if flags & flag::UNLOCK != 0 {
@@ -1460,7 +1484,30 @@ mod tests {
             Gate::of(flag::CHANCE | flag::LOCKED_CONDITION),
             Gate::LockedCondition
         );
-        assert!(Gate::Free < Gate::Effect && Gate::Effect < Gate::LockedCondition);
+        assert_eq!(
+            Gate::of(flag::LOCKED_CONDITION | flag::EXIT_POINT),
+            Gate::ExitPoint
+        );
+    }
+
+    // The order the reference gives conditions up in, which is what decides between two routes
+    // that are both conditional. Reading it off `dreamweaver`'s `give_up`: conditional, then
+    // locked, then a shortcut's exit, then the isolated pair.
+    #[test]
+    fn a_route_gives_conditions_up_in_the_references_order() {
+        use super::Gate;
+        let order = [
+            Gate::Free,
+            Gate::Effect,
+            Gate::Chance,
+            Gate::Seasonal,
+            Gate::LockedCondition,
+            Gate::Locked,
+            Gate::ExitPoint,
+            Gate::DeadEnd,
+            Gate::Isolated,
+        ];
+        assert!(order.is_sorted());
     }
 
     #[test]
@@ -1761,5 +1808,87 @@ mod tests {
             None,
             "a stage with no words"
         );
+    }
+
+    // A shortcut that only opens once the world has been visited is not how the world is first
+    // reached, and the wiki says so only in the words of the condition.
+    #[test]
+    fn a_condition_naming_where_it_leads_is_not_a_way_in() {
+        use super::{Ask, Gate};
+        let ask = |gate, detail: &str| Ask {
+            gate,
+            detail: Some(detail.to_owned()),
+        };
+        assert_eq!(
+            ask(
+                Gate::LockedCondition,
+                "If Fluorescent Halls has been visited before"
+            )
+            .first_visit("Fluorescent Halls")
+            .gate,
+            Gate::Revisit
+        );
+        assert_eq!(
+            ask(Gate::LockedCondition, "View Ending #1 at least once")
+                .first_visit("Oil Puddle World B")
+                .gate,
+            Gate::LockedCondition
+        );
+        // Only a condition is read this way: the words on an effect name what to bring, not where
+        // the player has been.
+        assert_eq!(
+            ask(Gate::Effect, "Chainsaw the Tree of Life in Blood Cell Sea")
+                .first_visit("Blood Cell Sea")
+                .gate,
+            Gate::Effect
+        );
+    }
+
+    // The dump has no world whose only way in is such a shortcut, so none should be walked. One
+    // appearing here is a world the wiki documents no honest way into, not a fault in the rule.
+    #[test]
+    fn no_route_is_walked_in_through_a_revisit() {
+        let Some(worlds) = load().map(|dump| dump.worlds) else {
+            return;
+        };
+        let routes = super::canonical_routes(&worlds);
+        let steps = super::walkable_steps(&worlds);
+        let walked_in: Vec<_> = routes
+            .parents
+            .iter()
+            .enumerate()
+            .filter_map(|(world, parent)| Some((world, (*parent)?)))
+            .filter(|(world, parent)| {
+                !steps[*parent]
+                    .iter()
+                    .any(|(next, step)| next == world && step.gate != super::Gate::Revisit)
+            })
+            .map(|(world, _)| worlds[world].title.as_str())
+            .collect();
+        assert_eq!(walked_in, [] as [&str; 0]);
+    }
+
+    // The panel reads a route's demands off `connections`, one step per row, so a canonical step
+    // missing there would drop a condition silently rather than loudly.
+    #[test]
+    fn every_canonical_step_is_walkable_where_the_panel_reads_it() {
+        let Some(worlds) = load().map(|dump| dump.worlds) else {
+            return;
+        };
+        let routes = super::canonical_routes(&worlds);
+        let connections = super::connections(&worlds);
+        for (world, parent) in routes.parents.iter().enumerate() {
+            let Some(parent) = *parent else { continue };
+            let step = connections[parent]
+                .iter()
+                .find(|step| step.world == world)
+                .unwrap_or_else(|| panic!("{} is joined to no parent", worlds[world].title));
+            assert!(
+                step.out.is_some(),
+                "{} is walked in from {} and no way there",
+                worlds[world].title,
+                worlds[parent].title
+            );
+        }
     }
 }

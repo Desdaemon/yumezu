@@ -242,6 +242,7 @@ gate-chance = by chance
 gate-seasonal = seasonal
 gate-locked = unlocked from opposite entrance
 gate-locked-condition = locked, conditional
+gate-exit-point = back out through a shortcut
 gate-dead-end = only from isolated section
 gate-isolated = leads to isolated section
 

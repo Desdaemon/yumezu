@@ -202,6 +202,7 @@ gate-chance = 確率あり
 gate-seasonal = 季節限定
 gate-locked = 反対側の入口から解除
 gate-locked-condition = 条件付きで解除
+gate-exit-point = ショートカットの出口から逆走
 gate-dead-end = 反対側の孤立エリアからのみ
 gate-isolated = 反対側の孤立エリアにて通行
 

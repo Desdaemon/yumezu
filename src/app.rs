@@ -710,6 +710,8 @@ impl App {
                 cursor: CursorIcon::Default,
                 touches: Touches::default(),
                 walk: Walk::default(),
+                lean: vec3(0.0, 0.0, 0.0),
+                lean_goal: vec3(0.0, 0.0, 0.0),
                 focused: true,
             },
             data: None,
@@ -1034,11 +1036,11 @@ impl App {
             && data.graph.parameters().dimensions == Dimensions::Three;
         self.statics
             .track_cursor(self.ctx.window.as_ref().unwrap(), orbiting);
+        let dt = (frame_input.elapsed_time as f32 * 1e-3).min(0.05);
         if data.framing {
             // Recomputed every frame rather than fixed when the selection was made: the layout is
             // usually still moving, and a goal taken once would be stale before the camera got
             // there.
-            let dt = (frame_input.elapsed_time as f32 * 1e-3).min(0.05);
             // What is arriving comes first: while a refresh is coming in, the camera moves onto it
             // rather than onto whatever was lit before. Once it is over the selection has the
             // camera back, and a run with neither stops framing.
@@ -1061,6 +1063,14 @@ impl App {
                 },
             };
         }
+
+        // A framing move owns the camera while it runs, so the lean gives its ground back rather
+        // than dragging on the goal that move is easing onto and leaving it never arrived.
+        let leaning = self.statics.lean_toward(
+            (!data.framing).then(|| data.pointed_at()).flatten(),
+            data.graph.parameters().dimensions,
+            dt,
+        );
 
         data.pull_grabbed_node(&self.statics.camera);
         data.receive_atlas(
@@ -1195,10 +1205,13 @@ impl App {
         // `moved` is what the geometry was rebuilt for, which covers the layout stepping, the
         // camera turning and a selection repainting; the rest is movement that leaves the frame
         // it started in looking the same -- a pan or a dolly, which turn nothing, and the reveal.
+        // A lean turns in three dimensions and pans in two, and either way carries on easing after
+        // the turn it is making has grown too small to date a billboard.
         let moving = moved
             || panned
             || orbited
             || walking
+            || leaning
             || self.veil > 0.0
             || data.framing
             || data.gesture.is_some()

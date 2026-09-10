@@ -508,6 +508,14 @@ impl AppEntities {
         self.bounds_of(&wanted)
     }
 
+    /// Where the world a list row is pointing at sits, which is what the view leans onto. `None`
+    /// whenever no row is pointing at one. See [`AppStatics::lean_toward`].
+    pub(super) fn pointed_at(&self) -> Option<Vec3> {
+        let mut wanted = vec![false; self.titles.len()];
+        wanted[self.pointed?] = true;
+        Some(self.bounds_of(&wanted)?.center)
+    }
+
     /// The sphere holding a set of worlds, pictures and all. See [`Self::framing_bounds`].
     fn bounds_of(&self, wanted: &[bool]) -> Option<Bounds> {
         // Paired with the radius, both ends of the reach below needing the two together.

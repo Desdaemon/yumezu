@@ -1116,7 +1116,21 @@ impl Panel {
                 });
                 // Origin first, so the list reads in the order it is walked.
                 for &world in read.route.iter().rev() {
-                    self.world_row(ui, world, false, data.titles[world].show());
+                    // What the step into this world asks, in the direction the route walks it.
+                    let asks = data.routes.parents[world]
+                        .and_then(|from| {
+                            data.connections[from]
+                                .iter()
+                                .find(|step| step.world == world)
+                        })
+                        .and_then(|step| step.out.as_ref())
+                        .filter(|ask| ask.gate != Gate::Free);
+                    ui.horizontal(|ui| {
+                        self.world_row(ui, world, false, data.titles[world].show());
+                        if let Some(ask) = asks {
+                            ui.label(ask.asks_emoji()).on_hover_text(ask.asks());
+                        }
+                    });
                 }
             }
             // The connection is the subject, but the ways on are still listed for the world it is
