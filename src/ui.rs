@@ -848,14 +848,19 @@ impl Panel {
             open_in_browser("https://github.com/Desdaemon/yumezu");
         }
 
-        if ui
-            .hyperlink_to(
-                format!("{}  {}", ICON_ANDROID.codepoint, t!("android-link")),
-                "https://explorer.yumemiru.dev/android",
-            )
-            .clicked()
+        if let Some(platform) = download::Platform::detected()
+            && ui
+                .hyperlink_to(
+                    format!(
+                        "{}  {}",
+                        platform.icon().codepoint,
+                        t!("download-for", platform = platform.name())
+                    ),
+                    download::RELEASES,
+                )
+                .clicked()
         {
-            open_in_browser("https://explorer.yumemiru.dev/android");
+            open_in_browser(download::RELEASES);
         }
     }
 

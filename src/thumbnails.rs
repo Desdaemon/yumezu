@@ -110,6 +110,10 @@ fn installed(path: &str) -> Option<std::path::PathBuf> {
         }),
         // NSIS, which installs resources beside the binary.
         exe.parent().map(|dir| dir.join(path)),
+        // A macOS bundle, whose binary is in `Contents/MacOS` and whose resources are a level up.
+        exe.parent()
+            .and_then(|macos| macos.parent())
+            .map(|contents| contents.join("Resources").join(path)),
     ];
     candidates
         .into_iter()

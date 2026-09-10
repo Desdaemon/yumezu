@@ -158,7 +158,7 @@ frontier = 探検者モード
 frontier-hint = まだ訪れていないマップを隠し、訪問済みのマップから通行できるマップを探検目標として扱われています。
 unvisited-location = 未訪問の場所
 github-link = GitHubで見る
-android-link = Android版をダウンロード
+download-for = {$platform}版をダウンロード
 
 ## The controls, named on the first run.
 
@@ -183,9 +183,9 @@ guide-rocker-body = 右下の2つの矢印は、グラフの層をまとめて�
 guide-got-it = わかった
 dont-show-again = 今後から非表示にする
 
-## The Android app, offered to the phone reading the page.
+## The app, offered to a page whose browser has a package to install.
 
-download-android = Androidアプリを入手
+download-app = {$platform}アプリを入手
 
 ## The wiki's maps.
 

@@ -64,6 +64,7 @@ mod guide;
 pub(crate) mod i18n;
 mod japanese;
 mod layout;
+mod link;
 mod map;
 #[cfg(all(feature = "profile", not(target_family = "wasm")))]
 mod profile;
@@ -239,6 +240,9 @@ pub(super) struct App {
     /// the reader's rather than the surface's. The layout underneath is built afresh, so the
     /// camera is sent to the selection again rather than left where it was.
     selected: Option<Highlight>,
+    /// The world the link asked to open on, until there is a graph to find it in. Taken by the
+    /// first [`App::build`], which turns it into a selection like any other.
+    asked_for: Option<String>,
     /// The line the loading frame was last showing, which the fade carries out over the graph: a
     /// line that changed on the way out would read as a new thing to look at, and what is waited
     /// for is not the same thing throughout. See [`App::veil`].
@@ -696,6 +700,7 @@ impl App {
             overlay: None,
             building: Building::default(),
             selected: None,
+            asked_for: link::location(),
             said: String::new(),
             veil: 1.0,
             wanted: Wanted::Now,
@@ -772,6 +777,16 @@ impl App {
             self.statics.face_plane();
         }
 
+        // A link's world is lit the way picking it out of the search box would light it. A name
+        // this graph has not got is not an error: a stale link opens on the tree.
+        if let Some(name) = self.asked_for.take()
+            && self.selected.is_none()
+        {
+            self.selected = data.world_named(&name).map(Highlight::Route);
+            if self.selected.is_none() {
+                log::warn!("no world is named {name}");
+            }
+        }
         // Lit again where a resume dropped it, which also aims the camera: this is a selection in
         // a new layout, so where the camera was looking is nowhere in particular.
         if self.selected.is_some() {

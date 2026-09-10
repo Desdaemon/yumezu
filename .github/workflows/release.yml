@@ -1,5 +1,5 @@
-# One release per `v*` tag, carrying the three packages a person installs -- an AppImage, an NSIS
-# installer, a signed apk -- and `latest.json`, which is the whole of the update server: an
+# One release per `v*` tag, carrying the four packages a person installs -- an AppImage, an NSIS
+# installer, a dmg, a signed apk -- and `latest.json`, which is the whole of the update server: an
 # installed desktop copy asks the release itself. See `src/update.rs`.
 #
 # The tests are `ci.yml` and none of them run here. A tag is pushed at a commit that has already
@@ -19,7 +19,7 @@ env:
   PACKAGER: cargo-packager@0.11.8
 
 jobs:
-  # Everything that can be known before three runners spend twenty minutes each.
+  # Everything that can be known before four runners spend twenty minutes each.
   plan:
     runs-on: ubuntu-latest
     outputs:
@@ -46,7 +46,7 @@ jobs:
       # nothing about it looks wrong; without the private key it gets no `.sig`, which the release
       # job then cannot quote; without the keystore `android/build.sh` falls back to the debug key,
       # and an apk signed with that can never upgrade one signed with the release key.
-      - name: The keys have to be here before three runners spend an hour
+      - name: The keys have to be here before four runners spend an hour
         env:
           PUBKEY: ${{ vars.YUMEZU_UPDATE_PUBKEY }}
           SIGN_KEY: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY }}
@@ -69,18 +69,28 @@ jobs:
           printf '%s' "$KEYSTORE" | base64 -d > /dev/null 2>&1 \
             || { echo "::error::ANDROID_KEYSTORE does not decode as base64"; exit 1; }
 
-  # One package per host: linuxdeploy and NSIS both run only on the system they package for.
+  # One package per host: linuxdeploy, NSIS and `create-dmg` each run only on the system they
+  # package for. macOS is arm64 only, as the apk is -- `macos-15` is that, and pinned for the
+  # reason the other two are.
+  #
+  # macOS gets two formats: a dmg is what a person installs and `.app` is what the updater
+  # replaces, so signing tars the bundle to `yumezu.app.tar.gz` and `latest.json` points there.
   desktop:
     needs: plan
     strategy:
-      # Both are wanted, and one platform failing should still say whether the other did.
+      # All of them are wanted, and one platform failing should still say whether the others did.
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
-            format: appimage
+            name: appimage
+            formats: appimage
           - os: windows-latest
-            format: nsis
+            name: nsis
+            formats: nsis
+          - os: macos-15
+            name: macos
+            formats: app,dmg
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -103,7 +113,7 @@ jobs:
 
       # The private key is what writes the `.sig` beside each package, and an installed copy
       # installs nothing that key did not sign.
-      - run: cargo packager --release --formats ${{ matrix.format }}
+      - run: cargo packager --release --formats ${{ matrix.formats }}
         env:
           CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY }}
           CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD }}
@@ -115,12 +125,15 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.format }}
-          # Each host matches one of these. The signatures come along: they are what a person
-          # verifying a download by hand needs, as well as what `latest.json` quotes.
+          name: ${{ matrix.name }}
+          # Each host matches one or more of these. The signatures come along: they are what a
+          # person verifying a download by hand needs, as well as what `latest.json` quotes. The
+          # `.app` the tarball was made from is left behind -- nothing downloads a directory.
           path: |
             target/packages/*.AppImage*
             target/packages/*setup.exe*
+            target/packages/*.app.tar.gz*
+            target/packages/*.dmg*
           if-no-files-found: error
 
   # `android/build.sh` wants no Gradle and no Java source, so this is the SDK the runner image
@@ -187,12 +200,16 @@ jobs:
           set -euo pipefail
           appimage=$(basename packages/*.AppImage)
           nsis=$(basename packages/*setup.exe)
+          dmg=$(basename packages/*.dmg)
+          # Not the dmg: the updater replaces a `.app` in place and cannot mount an image, so the
+          # macOS entry below points at the tarball signing made of the bundle instead.
+          app=$(basename packages/*.app.tar.gz)
 
           # An installed copy reads this off the newest release, which is what `latest/download`
           # resolves to, so uploading it here is the whole server side. The keys are the `OS-ARCH`
           # the updater asks for and each signature is the `.sig` the packager wrote beside its
           # package -- quoted rather than linked, which is what the updater expects.
-          python3 - "$appimage" "$nsis" > latest.json <<'PY'
+          python3 - "$appimage" "$nsis" "$app" > latest.json <<'PY'
           import datetime, json, os, pathlib, sys
 
           def platform(name, format):
@@ -202,13 +219,14 @@ jobs:
                   "format": format,
               }
 
-          appimage, nsis = sys.argv[1:3]
+          appimage, nsis, app = sys.argv[1:4]
           print(json.dumps({
               "version": os.environ["VERSION"],
               "pub_date": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
               "platforms": {
                   "linux-x86_64": platform(appimage, "appimage"),
                   "windows-x86_64": platform(nsis, "nsis"),
+                  "macos-aarch64": platform(app, "app"),
               },
           }, indent=2))
           PY
@@ -217,10 +235,10 @@ jobs:
           previous=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
           changes=$(git log --no-merges --format='- %s' "${previous:+$previous..}$GITHUB_REF_NAME")
 
-          # The words are `.github/release-notes.md` and these three are what it leaves blank. A
+          # The words are `.github/release-notes.md` and these four are what it leaves blank. A
           # `$` of its own in that file has to be written `$$`, and `substitute` refuses a name it
           # was not given rather than filling in nothing.
-          APPIMAGE="$appimage" NSIS="$nsis" CHANGES="$changes" python3 - > notes.md <<'PY'
+          APPIMAGE="$appimage" NSIS="$nsis" DMG="$dmg" CHANGES="$changes" python3 - > notes.md <<'PY'
           import os, pathlib, string
 
           template = string.Template(pathlib.Path(".github/release-notes.md").read_text())
@@ -228,6 +246,7 @@ jobs:
               template.substitute(
                   appimage=os.environ["APPIMAGE"],
                   nsis=os.environ["NSIS"],
+                  dmg=os.environ["DMG"],
                   changes=os.environ["CHANGES"],
               ),
               end="",

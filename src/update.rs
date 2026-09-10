@@ -1,6 +1,6 @@
-//! Replacing this build with a newer one, for the two desktop packages `cargo packager` makes.
+//! Replacing this build with a newer one, for the desktop packages `cargo packager` makes.
 //!
-//! Only those two: the page reloads and the apk goes through the store, so neither compiles this
+//! Only those: the page reloads and the apk goes through the store, so neither compiles this
 //! module -- see the stand-in in `app.rs`.
 //!
 //! The manifest is a file on the release rather than a service, `latest/download` always resolving

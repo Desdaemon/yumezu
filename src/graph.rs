@@ -564,6 +564,15 @@ impl AppEntities {
         hits.into_iter().map(|(_, _, world)| world).collect()
     }
 
+    /// The world a name names, by either of its names and in whatever case. A world the player has
+    /// not been to is named nothing and so cannot be found here, as in [`AppEntities::search`].
+    pub(super) fn world_named(&self, name: &str) -> Option<usize> {
+        let name = name.trim();
+        self.titles
+            .iter()
+            .position(|title| title.names().any(|have| have.eq_ignore_ascii_case(name)))
+    }
+
     pub(super) fn select(&mut self, selected: Option<Highlight>) {
         if selected != self.selected {
             self.selected = selected;

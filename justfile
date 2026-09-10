@@ -82,7 +82,11 @@ assets:
     done
 
 # Builds this host's desktop package into `target/packages`: an AppImage on Linux, an NSIS
-# installer on Windows. `cargo packager` only packages, so the binary is built first.
+# installer on Windows, a dmg and the `.app` beside it on macOS. `cargo packager` only packages, so
+# the binary is built first.
+#
+# The formats are named here rather than left to `Cargo.toml`, which lists all of them: two are not
+# gated on the host and would write a broken package on the wrong one.
 #
 # Unsigned unless CARGO_PACKAGER_SIGN_PRIVATE_KEY is set, and an unsigned package is one no
 # installed copy will take as an update -- see `src/update.rs`. Signed or not, a package built
@@ -91,5 +95,12 @@ assets:
 # NO_STRIP is linuxdeploy's: its own strip cannot read the `.relr.dyn` section that every library a
 # current toolchain built has, and it treats that failure as fatal.
 package: assets
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$(uname -s)" in
+        Linux) formats=appimage ;;
+        Darwin) formats=app,dmg ;;
+        *) formats=nsis ;;
+    esac
     cargo build --release --locked --bin yumezu_main --features production
-    NO_STRIP=1 APPIMAGE_EXTRACT_AND_RUN=1 cargo packager --release
+    NO_STRIP=1 APPIMAGE_EXTRACT_AND_RUN=1 cargo packager --release --formats "$formats"

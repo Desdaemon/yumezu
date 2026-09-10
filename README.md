@@ -7,7 +7,7 @@
 ## Install
 
 Check [Releases](https://github.com/Desdaemon/yumezu/releases) for the latest version.
-Available for Linux, Windows and Android, or visit <https://explorer.yumemiru.dev>.
+Available for Linux, Windows, macOS and Android, or visit <https://explorer.yumemiru.dev>.
 
 ### From source
 

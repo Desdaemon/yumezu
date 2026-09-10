@@ -193,7 +193,7 @@ frontier = Frontier Mode
 frontier-hint = Only shows worlds you've been to, and those immediately connected become unvisited locations.
 unvisited-location = Unvisited Location
 github-link = yumezu on github
-android-link = Download for Android
+download-for = Download for {$platform}
 
 ## The controls, named on the first run.
 
@@ -221,9 +221,9 @@ guide-rocker-body =
 guide-got-it = Got it
 dont-show-again = Don't show this again
 
-## The Android app, offered to the phone reading the page.
+## The app, offered to a page whose browser has a package to install.
 
-download-android = Get the Android app
+download-app = Get the {$platform} app
 
 ## The wiki's maps.
 

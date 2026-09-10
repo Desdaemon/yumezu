@@ -22,7 +22,8 @@
       // The same choice `src/i18n.rs` makes, made before the code that makes it is here. The words
       // are `dump-loading` in `locales/`, written out again because a `.ftl` cannot be read without
       // the app that reads it.
-      if ((navigator.language || "").startsWith("ja"))
+      const asked = new URLSearchParams(location.search).get("lang");
+      if ((asked || navigator.language || "").startsWith("ja"))
         document.getElementById("loading-text").textContent = "読み込み中...";
     </script>
   </body>

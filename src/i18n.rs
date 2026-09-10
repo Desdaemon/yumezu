@@ -182,8 +182,10 @@ pub(super) fn speak_english() {
 }
 
 fn chosen() -> Language {
-    super::store::read(LANGUAGE)
+    // The link first: it is the one of the three that was written for this run in particular.
+    super::link::language()
         .and_then(|tag| matching(&tag))
+        .or_else(|| super::store::read(LANGUAGE).and_then(|tag| matching(&tag)))
         // In the order the device prefers them, so one asking for two this app has is answered in
         // the one it would rather read.
         .or_else(|| sys_locale::get_locales().find_map(|tag| matching(&tag)))
@@ -271,7 +273,7 @@ mod tests {
         }
         for worded in [
             "fps", "pixels", "worlds", "name", "released", "title", "kind", "out", "back",
-            "effects", "chance", "season", "percent", "when", "version",
+            "effects", "chance", "season", "percent", "when", "version", "platform",
         ] {
             args.set(worded, "x");
         }
