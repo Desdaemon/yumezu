@@ -24,3 +24,16 @@ backend = "http://127.0.0.1:5000/yno/"
 [[proxy]]
 rewrite = "/ynoauth/"
 backend = "http://127.0.0.1:5000/ynoauth/"
+
+# The hi-LOD pictures, which `world.rs` rewrites off `https://yume.wiki/images/` and onto this
+# route -- see its `proxied_images`. Straight at the wiki rather than through `dreamweaver`, which
+# has no route for them.
+#
+# The header is the whole point of the route. The wiki's edge answers 403 to a request carrying any
+# other `Origin` and to one carrying none, so a browser -- which sets that header itself and will
+# not be talked out of it -- cannot ask for these at all. Hence a proxy, which is not a browser and
+# says what `detail::ORIGIN` says on native.
+[[proxy]]
+rewrite = "/img/"
+backend = "https://yume.wiki/images/"
+request_headers = { origin = "https://explorer.yume.wiki" }

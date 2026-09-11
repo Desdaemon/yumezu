@@ -70,15 +70,15 @@ mod japanese;
 mod layout;
 mod link;
 mod map;
-#[cfg(all(feature = "profile", not(target_family = "wasm")))]
+#[cfg(feature = "profile")]
 mod profile;
 
 /// What [`profile`] is everywhere it is not compiled: the same surface, all of it nothing, so no
 /// other file has to know which build this is and the frame that ships has no counters, no timer
 /// queries and no branches on either.
-#[cfg(not(all(feature = "profile", not(target_family = "wasm"))))]
+#[cfg(not(feature = "profile"))]
 mod profile {
-    use three_d::{Camera, Context};
+    use three_d::Context;
 
     pub(super) fn eager() -> bool {
         false
@@ -88,7 +88,12 @@ mod profile {
         false
     }
 
-    pub(super) fn pan_aside(_camera: &mut Camera) {}
+    pub(super) fn pan_aside(
+        _statics: &mut super::camera::AppStatics,
+        _data: &super::AppEntities,
+    ) -> bool {
+        false
+    }
 
     pub(super) fn controls(_ui: &mut egui::Ui) {}
 
@@ -1024,7 +1029,7 @@ impl App {
         let fading = (self.veil > 0.0).then(|| (self.said.clone(), self.veil));
         let data = self.data.as_mut().unwrap();
         self.statics.camera.set_viewport(frame_input.viewport);
-        profile::pan_aside(&mut self.statics.camera);
+        let dollied = profile::pan_aside(&mut self.statics, data);
         let account = &mut self.yno;
         // The whole game, which is the yardstick the settings tab measures one person's share
         // against: the graph beside it may be only the frontier.
@@ -1297,6 +1302,8 @@ impl App {
         let moving = moved
             || panned
             || orbited
+            // Nothing on screen, but the switch that moves it needs the frame it moves in.
+            || dollied
             || walking
             || leaning
             || self.veil > 0.0

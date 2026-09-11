@@ -23,7 +23,8 @@ path = "src/main.rs"
 [features]
 # Builds `src/profile.rs` in place of its do-nothing stand-in: a report of what a frame cost every
 # couple of seconds, the GPU's own clock over the whole frame or over each pass, and the switches
-# for both in the settings tab. Native only, and never shipped.
+# for both in the settings tab. Never shipped. The page gets all of it but the GPU's clock,
+# which needs a timer query only some browsers hand out -- see `profile::readable`.
 profile = []
 
 # Desktop packaging. `cargo packager` reads this table but does not build anything: the binary has

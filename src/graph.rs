@@ -510,6 +510,16 @@ impl AppEntities {
         self.bounds_of(&on_route)
     }
 
+    /// The sphere every world sits in, whatever is selected and whatever the run opened on.
+    ///
+    /// For `profile` alone: a run being measured wants the graph on screen rather than the pose a
+    /// reader would have opened on, which is one world filling the window. See
+    /// [`super::profile::pan_aside`].
+    #[cfg(feature = "profile")]
+    pub(super) fn whole_bounds(&self) -> Option<Bounds> {
+        self.bounds_of(&vec![true; self.titles.len()])
+    }
+
     /// What a refresh turned up is what a person pressed refresh to see, and it may be nowhere
     /// near the part of the map they were looking at. `None` once the arrival is over, which is
     /// what hands the camera back.

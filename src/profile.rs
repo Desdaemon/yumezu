@@ -1,7 +1,8 @@
 //! What a frame costs, and the switches that make one comparable with another.
 //!
-//! Native `profile` builds only; `super` stands in for it everywhere else. Native because the page
-//! has no timer query -- browsers do not hand one out.
+//! `profile` builds only; `super` stands in for it everywhere else. The page gets everything here
+//! but the GPU's own clock, which needs a timer query a browser only hands out where
+//! `EXT_disjoint_timer_query_webgl2` is advertised -- see [`readable`].
 //!
 //! Numbers are logged, never drawn: a counter the frame paints is a counter the frame pays for.
 
@@ -9,6 +10,9 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use three_d::renderer::*;
+
+use super::AppEntities;
+use super::camera::AppStatics;
 
 /// How often [`FrameStats`] says what it has counted.
 const FRAME_STATS_SECONDS: f64 = 2.0;
@@ -37,10 +41,36 @@ fn row<'a>(cells: impl IntoIterator<Item = &'a str>) -> String {
 }
 
 /// Where the switches below start, for a run with nobody to click them: `YUMEZU_FRAMES` names
-/// them, comma separated. A starting position and nothing more -- the checkbox still moves them.
+/// them, comma separated, and `?frames=` does on a page -- which has no environment to read and an
+/// address instead. A starting position and nothing more -- the checkbox still moves them.
 fn asked(switch: &str) -> bool {
-    std::env::var("YUMEZU_FRAMES")
-        .is_ok_and(|frames| frames.split(',').any(|it| it.trim() == switch))
+    #[cfg(not(target_family = "wasm"))]
+    let frames = std::env::var("YUMEZU_FRAMES").ok();
+    #[cfg(target_family = "wasm")]
+    let frames = super::link::frames();
+    frames.is_some_and(|frames| frames.split(',').any(|it| it.trim() == switch))
+}
+
+/// Where a run being measured points the camera, as `eye` then `target`: six numbers, comma
+/// separated, named by `YUMEZU_CAMERA` or by `?camera=` on a page.
+///
+/// The same six the `camera in ... dimensions` log line prints, so a pose that read badly in one
+/// run is handed straight to the next. Unasked, [`pan_aside`] frames the whole graph instead --
+/// which is a view of everything at once, and not the view a close pose is slow in.
+fn asked_pose() -> Option<(Vec3, Vec3)> {
+    #[cfg(not(target_family = "wasm"))]
+    let asked = std::env::var("YUMEZU_CAMERA").ok()?;
+    #[cfg(target_family = "wasm")]
+    let asked = super::link::camera()?;
+    let numbers: Vec<f32> = asked
+        .split(',')
+        .filter_map(|it| it.trim().parse().ok())
+        .collect();
+    let [ex, ey, ez, ax, ay, az] = numbers[..] else {
+        log::warn!("{asked:?} is not six numbers, so the camera is framed on the graph instead");
+        return None;
+    };
+    Some((vec3(ex, ey, ez), vec3(ax, ay, az)))
 }
 
 /// The GPU's timer will not nest, so the whole-frame clock stands down while this is on.
@@ -56,7 +86,8 @@ static EAGER: LazyLock<AtomicBool> = LazyLock::new(|| AtomicBool::new(asked("eag
 static DOLLY: LazyLock<AtomicBool> = LazyLock::new(|| AtomicBool::new(asked("dolly")));
 
 /// Vsync is settled when the surface is made, so unlike the switches above this has to outlive
-/// the run that asked for it.
+/// the run that asked for it. Native's alone -- see [`unlocked`].
+#[cfg(not(target_family = "wasm"))]
 const UNLOCKED: &str = "frames-unlocked";
 
 pub(super) fn eager() -> bool {
@@ -64,9 +95,17 @@ pub(super) fn eager() -> bool {
 }
 
 /// Latched at the first ask, which is when the surface is made.
+///
+/// Always off on a page: the display's rate is the browser's to pace -- a frame comes when
+/// `requestAnimationFrame` says it does -- and nothing this asks for changes that.
 pub(super) fn unlocked() -> bool {
-    static RUNNING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *RUNNING.get_or_init(|| super::store::read(UNLOCKED).as_deref() == Some("on"))
+    #[cfg(target_family = "wasm")]
+    return false;
+    #[cfg(not(target_family = "wasm"))]
+    {
+        static RUNNING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *RUNNING.get_or_init(|| super::store::read(UNLOCKED).as_deref() == Some("on"))
+    }
 }
 
 /// Labels are untranslated: a `profile` build never reaches anybody who would read them.
@@ -90,19 +129,24 @@ pub(super) fn controls(ui: &mut egui::Ui) {
         ui,
         &DOLLY,
         "pan on a schedule",
-        "Holds the pose the run opened on and steps the camera sideways once a report, so two \
-         windows differ by what they were drawing and nothing else.",
+        "Frames the whole graph, or the pose YUMEZU_CAMERA names, and steps the camera sideways \
+         and back once a report, so two windows differ by what they were drawing and nothing \
+         else.",
     );
-    let mut asked = super::store::read(UNLOCKED).as_deref() == Some("on");
-    if ui
-        .checkbox(&mut asked, "run past the display")
-        .on_hover_text("Turns vsync off, which is the only way to watch the GPU's cost move.")
-        .changed()
+    // Nothing to offer on a page: the browser paces the frames and keeps the pacing.
+    #[cfg(not(target_family = "wasm"))]
     {
-        super::store::write(UNLOCKED, Some(if asked { "on" } else { "off" }));
-    }
-    if asked != unlocked() {
-        ui.label("restart to apply");
+        let mut asked = super::store::read(UNLOCKED).as_deref() == Some("on");
+        if ui
+            .checkbox(&mut asked, "run past the display")
+            .on_hover_text("Turns vsync off, which is the only way to watch the GPU's cost move.")
+            .changed()
+        {
+            super::store::write(UNLOCKED, Some(if asked { "on" } else { "off" }));
+        }
+        if asked != unlocked() {
+            ui.label("restart to apply");
+        }
     }
 }
 
@@ -113,10 +157,20 @@ fn switch(ui: &mut egui::Ui, flag: &AtomicBool, label: &str, hint: &str) {
     }
 }
 
-/// How far each step of [`pan_aside`] moves, and how long it waits for the layout to
-/// stop growing first.
-const PAN_ASIDE_STEP: f32 = 40.0;
+/// How long [`pan_aside`] waits for the layout to stop growing before it frames anything.
 const PAN_ASIDE_SETTLES_SECONDS: f64 = 8.0;
+/// How far the pan reaches to either side of the framed middle, as a fraction of the radius it
+/// framed.
+///
+/// Short of the whole radius: the worlds pile up near the middle, and a window drawn out at the
+/// rim is a window of empty space. Bounded at all because the reach used to be unbounded -- a step
+/// a report, in one direction, forever -- so a run left going long enough walked off the graph and
+/// spent its last windows timing the background.
+const PAN_ASIDE_REACH: f32 = 0.5;
+/// Reports in one there-and-back-again. The reach is divided across these rather than stepped by a
+/// fixed distance, so the path takes the same time on any graph, and two runs of the same length
+/// draw the same views in the same order.
+const PAN_ASIDE_REPORTS: f32 = 16.0;
 
 /// How many frames of queries are kept, and so how many frames late an answer may be without
 /// being thrown away. The GPU is a few frames behind the processor and asking it for an answer it
@@ -172,14 +226,26 @@ mod answers {
 }
 
 /// Whether an answer can be read at all, which is the one thing [`GpuClock`] cannot recover from
-/// finding out late: glow panics rather than answers.
-fn readable() -> bool {
+/// finding out late: glow panics rather than answers, and a page answers zero rather than either.
+fn readable(context: &Context) -> bool {
     #[cfg(unix)]
     {
+        let _ = context;
         answers::UIV.is_some() && answers::UI64V.is_some()
     }
-    #[cfg(not(unix))]
+    /// `TIME_ELAPSED` is this extension's own enum rather than WebGL2's. A context without it
+    /// takes `begin_query` without complaint and then reads every answer back as zero, which is a
+    /// column of `0.00` where the honest answer is a dash -- so the queries are not made at all.
+    /// Chromium advertises it on a desktop GPU; Firefox and Safari do not advertise it anywhere.
+    #[cfg(all(not(unix), target_family = "wasm"))]
+    const TIMER: &str = "EXT_disjoint_timer_query_webgl2";
+    #[cfg(all(not(unix), target_family = "wasm"))]
     {
+        context.supported_extensions().contains(TIMER)
+    }
+    #[cfg(all(not(unix), not(target_family = "wasm")))]
+    {
+        let _ = context;
         true
     }
 }
@@ -242,7 +308,7 @@ impl GpuClock {
     fn new(context: &Context) -> Self {
         // SAFETY: names no object and reads no memory. A refusal comes back as an error.
         #[allow(unsafe_code)]
-        let queries = if readable() {
+        let queries = if readable(context) {
             (0..GPU_CLOCK_DEPTH)
                 .map_while(|_| unsafe { context.create_query() }.ok())
                 .collect()
@@ -352,7 +418,10 @@ pub(super) struct FrameStats {
     /// inside the frame: flipping halfway would open a pass timer inside the whole-frame one.
     parts: bool,
     headed: Vec<&'static str>,
-    headed_at: web_time::Instant,
+    /// `None` until the first header is written, which is what puts one above the first report.
+    /// Not an instant backdated by [`HEADER_SECONDS`]: a page's clock starts at the document
+    /// rather than at boot, so at the first frame there is not yet that much of it to take away.
+    headed_at: Option<web_time::Instant>,
 }
 
 impl FrameStats {
@@ -365,9 +434,7 @@ impl FrameStats {
             sections: Vec::new(),
             parts: false,
             headed: Vec::new(),
-            // So the first report writes a header above itself.
-            headed_at: web_time::Instant::now()
-                - std::time::Duration::from_secs_f64(HEADER_SECONDS),
+            headed_at: None,
         }
     }
 
@@ -485,38 +552,97 @@ impl FrameStats {
             ])
             .chain(passes.iter().copied().zip(timings))
             .collect();
-        if self.headed_at.elapsed().as_secs_f64() >= HEADER_SECONDS || self.headed != passes {
+        if self
+            .headed_at
+            .is_none_or(|at| at.elapsed().as_secs_f64() >= HEADER_SECONDS)
+            || self.headed != passes
+        {
             log::info!("{}", row(cells.iter().map(|(name, _)| *name)));
-            (self.headed, self.headed_at) = (passes, web_time::Instant::now());
+            (self.headed, self.headed_at) = (passes, Some(web_time::Instant::now()));
         }
         log::info!("{}", row(cells.iter().map(|(_, it)| it.as_str())));
     }
 }
 
-/// Holds the pose a run opens on and then pans away from it, a reporting window a step. See
+/// Brings the whole graph into view and then pans across it, a reporting window a step. See
 /// [`DOLLY`].
 ///
-/// A pan rather than a dolly because it changes what is in the frame and nothing else -- the
-/// distance and the orientation stay, so two reports differ only by what they were drawing.
-pub(super) fn pan_aside(camera: &mut Camera) {
+/// Framed rather than left on the pose the run opened on, which is one world filling the window:
+/// a view with nothing in it times the background, and what is worth timing is a frame with the
+/// graph's own load in it. Framed once, so the distance and the orientation are the same in every
+/// window and two of them still differ only by what they were drawing.
+///
+/// A pan rather than a dolly for that same reason -- it changes what is in the frame and nothing
+/// else -- and a bounded one: out to one side, back through the middle, out to the other and back,
+/// so a long run keeps drawing the graph instead of walking off it.
+///
+/// Answers whether it is the one driving the view, which the caller owes a frame: this runs inside
+/// the frame, so a run that stopped asking for frames would never reach the step that would have
+/// asked for the next one -- the switch would hold the opening pose forever and report nothing.
+/// Every window is drawn at the display's rate for the same reason, two of them being comparable
+/// only if neither was cut short.
+pub(super) fn pan_aside(statics: &mut AppStatics, data: &AppEntities) -> bool {
     if !DOLLY.load(Ordering::Relaxed) {
-        return;
+        return false;
     }
+    // Held off while the layout is still blowing out from its seed, which is not a view anybody
+    // looks at and not one worth timing -- nor one worth framing, the sphere still growing.
     static SINCE: std::sync::OnceLock<web_time::Instant> = std::sync::OnceLock::new();
-    static OPENED: std::sync::OnceLock<(Vec3, Vec3)> = std::sync::OnceLock::new();
-    let (eye, at) = *OPENED.get_or_init(|| (camera.position(), camera.target()));
-    // Held off while the layout is still blowing out from its seed, which is not a view
-    // anybody looks at and not one worth timing.
     let waited = SINCE
         .get_or_init(web_time::Instant::now)
         .elapsed()
         .as_secs_f64()
         - PAN_ASIDE_SETTLES_SECONDS;
-    let step = (waited / FRAME_STATS_SECONDS).max(0.0) as u32;
-    let aside = camera.right_direction().normalize() * PAN_ASIDE_STEP * step as f32;
-    if step > 0 {
-        log::info!("{:.0} units aside", PAN_ASIDE_STEP * step as f32);
+    if waited < 0.0 {
+        return true;
     }
-    let up = camera.up();
-    camera.set_view(eye + aside, at + aside, up);
+    // Set on the first frame past the settle, and only once there is a graph to frame: a dump that
+    // has not landed yet has no sphere, and latching that would leave the run pointed at nothing.
+    static FRAMED: std::sync::OnceLock<(Vec3, Vec3, f32)> = std::sync::OnceLock::new();
+    let (eye, at, radius) = match FRAMED.get() {
+        Some(framed) => *framed,
+        None => {
+            let framed = match asked_pose() {
+                // A pose named by hand is the whole instruction. The reach is taken from how far
+                // the camera stands off its target, there being no sphere to take it from -- so
+                // the pan stays in proportion to the view whether it is a close one or not.
+                Some((eye, at)) => (eye, at, (eye - at).magnitude()),
+                None => {
+                    let Some(bounds) = data.whole_bounds() else {
+                        return true;
+                    };
+                    statics.snap_to_frame(&bounds);
+                    (
+                        statics.camera.position(),
+                        statics.camera.target(),
+                        bounds.radius,
+                    )
+                }
+            };
+            let _ = FRAMED.set(framed);
+            framed
+        }
+    };
+    let step = (waited / FRAME_STATS_SECONDS) as u32;
+    // A triangle over the reach: 0 out to one side over a quarter of the reports, back through the
+    // middle to the other side over a half, and home over the last quarter.
+    let span = PAN_ASIDE_REPORTS / 4.0;
+    let phase = step as f32 % PAN_ASIDE_REPORTS;
+    let units = match phase {
+        phase if phase <= span => phase,
+        phase if phase <= 3.0 * span => 2.0 * span - phase,
+        phase => phase - PAN_ASIDE_REPORTS,
+    };
+    let aside = radius * PAN_ASIDE_REACH * units / span;
+    // Once a step rather than once a frame. Said every frame it was a line per frame in the
+    // console, which a browser charges for -- the switch would have been paying for its own
+    // report, and every window under it read slower than the frame it was timing.
+    static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if SAID.swap(step + 1, Ordering::Relaxed) != step + 1 {
+        log::info!("{aside:.0} units aside of {radius:.0}");
+    }
+    let sideways = statics.camera.right_direction().normalize() * aside;
+    let up = statics.camera.up();
+    statics.camera.set_view(eye + sideways, at + sideways, up);
+    true
 }
