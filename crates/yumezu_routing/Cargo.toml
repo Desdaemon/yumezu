@@ -1,0 +1,13 @@
+[package]
+name = "yumezu_routing"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# A connection's attributes are independent flags the reader gets back out of one number, so the
+# type is a bitfield rather than an enum.
+bitflags = "2.13"
+# The connection is the one part of the dump this crate owns outright: both the program that writes
+# the dump and the one that draws it hold connections in this shape.
+serde = { version = "1", features = ["derive"] }

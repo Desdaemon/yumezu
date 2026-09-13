@@ -36,6 +36,7 @@ use axum::routing::get;
 
 mod depth;
 mod model;
+mod next;
 mod progress;
 /// What the page asks about a player's own YNOproject account, put through to YNOproject. See
 /// [`relay::routes`].
@@ -62,7 +63,7 @@ const SYNC_EVERY: u64 = 2;
 const FULL_EVERY: time::Duration = time::Duration::weeks(1);
 
 #[derive(Clone)]
-struct Server {
+pub struct Server {
     store: Arc<store::Store>,
     http: reqwest::Client,
     /// Where the running sync has got to. See [`progress`].
@@ -280,6 +281,9 @@ async fn serve(server: Server, options: Options) {
         .route("/data", get(data))
         .route("/data.json", get(data))
         .route("/pollUpdate", get(poll_update))
+        // The one route that answers a question rather than handing over the dump, and the one
+        // YNOproject's game client asks. See `next`.
+        .route("/getNextLocations", get(next::get_next_locations))
         // Kept here rather than left to whatever serves the page: the sign-in's cookie has to be
         // handed back for this origin to be keepable at all.
         .merge(relay::routes())

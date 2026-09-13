@@ -17,6 +17,33 @@ pub struct Snapshot {
     /// Byte for byte what a client is sent and what the file holds. Kept rather than produced per
     /// request, being a couple of megabytes and identical every time.
     pub json: Arc<str>,
+    /// What `/getNextLocations` walks. Built with the dump: the walk is per request, this is not.
+    pub routing: Routing,
+}
+
+/// The dump as something to walk, and how a caller naming a world in words finds it.
+pub struct Routing {
+    pub connections: Vec<Vec<yumezu_routing::Step>>,
+    /// By the wiki's English title, which is what YNOproject's location list calls a world.
+    named: std::collections::HashMap<String, usize>,
+}
+
+impl Routing {
+    pub fn of(dump: &Dump) -> Self {
+        Routing {
+            connections: yumezu_routing::connections(&dump.worlds),
+            named: dump
+                .worlds
+                .iter()
+                .enumerate()
+                .map(|(at, world)| (world.title.clone(), at))
+                .collect(),
+        }
+    }
+
+    pub fn world_named(&self, title: &str) -> Option<usize> {
+        self.named.get(title).copied()
+    }
 }
 
 pub struct Store {
@@ -76,6 +103,7 @@ impl Store {
 fn snapshot(dump: Dump) -> Snapshot {
     let json = serde_json::to_string(&dump).expect("a dump is always serializable");
     Snapshot {
+        routing: Routing::of(&dump),
         dump,
         json: json.into(),
     }

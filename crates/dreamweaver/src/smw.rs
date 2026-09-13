@@ -114,19 +114,45 @@ pub async fn connections(
 /// Every location the wiki documents, with the fields a world page carries in its infobox.
 ///
 /// One query for sixteen hundred worlds: the pictures, music and maps hang off a world as
-/// subobjects, and the store writes them into the same answer rather than a request each.
+/// subobjects, and the store writes them into the same answer rather than a request each. The
+/// pages in the category that document no location are left out -- see [`indexes`].
 pub async fn locations(http: &reqwest::Client) -> Result<Vec<Location>> {
-    let rows = askargs::<LocationRow>(
+    let (rows, indexes) = tokio::try_join!(
+        askargs::<LocationRow>(
+            http,
+            LOCATIONS,
+            "Has location image|Has primary author|Japanese name|Has BGM|Has location map|Version \
+             added|Versions updated|Version removed|Version gaps",
+            "",
+        ),
+        indexes(http),
+    )?;
+    Ok(rows
+        .into_iter()
+        .map(|(subject, row)| row.location(without_namespace(&subject)))
+        .filter(|location| !indexes.contains(&location.title))
+        .collect())
+}
+
+const LOCATIONS: &str = "Category:Yume 2kki Locations";
+
+/// The pages in [`LOCATIONS`] that are not a location: an area written up across several pages is
+/// listed under one that carries no infobox, and so answers with none of the fields a world is
+/// made of.
+///
+/// Asked for rather than written into the query above as something to skip: the store cannot say
+/// "not in this category", its comparators being for property values alone.
+async fn indexes(http: &reqwest::Client) -> Result<BTreeSet<String>> {
+    let rows = askargs::<serde::de::IgnoredAny>(
         http,
-        "Category:Yume 2kki Locations",
-        "Has location image|Has primary author|Japanese name|Has BGM|Has location map|Version \
-         added|Versions updated|Version removed|Version gaps",
+        &format!("{LOCATIONS}|Category:Multi-page Locations"),
+        "",
         "",
     )
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(subject, row)| row.location(without_namespace(&subject)))
+        .map(|(subject, _)| without_namespace(&subject))
         .collect())
 }
 
@@ -224,7 +250,7 @@ pub struct Location {
     pub primary_author: Option<String>,
     pub bgms: Vec<Bgm>,
     pub location_maps: Vec<LocationMap>,
-    /// As the version history names it. Empty for a page in the category with no infobox at all.
+    /// As the version history names it. Empty for a world the wiki does not say the release of.
     pub version_added: String,
     /// Every release that changed it, each optionally suffixed with what kind of change it was.
     pub versions_updated: Vec<String>,
@@ -518,8 +544,6 @@ impl LocationRow {
             primary_author: (!self.authors.is_empty()).then(|| self.authors.join(", ")),
             bgms: self.bgms.into_iter().map(BgmRow::bgm).collect(),
             location_maps: self.maps.into_iter().map(MapRow::map).collect(),
-            // Empty rather than absent for the pages with no infobox at all: worlds the wiki has
-            // not written up, not worlds this failed to read.
             version_added: self.added.unwrap_or_default(),
             versions_updated: self.updated,
             version_removed: self.removed,

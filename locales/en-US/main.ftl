@@ -96,6 +96,20 @@ route-length = { $count ->
         [one] 1 connection from the origin
        *[other] { $count } connections from the origin
     }
+# Directions between two worlds, which start somewhere other than the origin.
+path-length = { $count ->
+        [one] 1 connection from { $origin }
+       *[other] { $count } connections from { $origin }
+    }
+no-path = No way there from here.
+# The ways a set of directions can be walked, by how much of the game the player already has.
+way-length = { $count ->
+        [one] 1 connection
+       *[other] { $count } connections
+    }
+# The window offering the ways between two worlds, which only opens where there are several.
+directions-title = { $origin } → { $destination }
+way-via = via { $world }
 zoom-in-world = Zoom in on world
 zoom-out-route = Zoom out to route
 trace-route = Trace the route to this world
@@ -130,6 +144,11 @@ layer-depth = Depth { $depth }
 ## The menu a right-click opens.
 
 menu-descendants = Highlight descendants
+# Offered only while another world is lit, which is the far end of the directions.
+menu-directions-to = Directions to here
+menu-directions-to-hint = Show the way here from { $world }.
+menu-directions-from = Directions from here
+menu-directions-from-hint = Show the way from here to { $world }.
 menu-open-wiki = Open on yume.wiki
 
 ## The rocker in the corner.

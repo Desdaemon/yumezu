@@ -38,6 +38,19 @@ const UI_SCALE_DEFAULT: f32 = 1.0;
 /// names the world under the pointer rather than covering it.
 const TOOLTIP_OFFSET: f32 = 16.0;
 
+// The gutter a walk's line is drawn down, and the line and its stops within it. Drawn as a transit
+// map draws a route: the reader is following one line through named stops, in order.
+const RAIL_WIDTH: f32 = 18.0;
+const RAIL_LINE: f32 = 2.0;
+const RAIL_STOP: f32 = 3.0;
+const RAIL_END: f32 = 5.0;
+
+// Fixed rather than taken from the title, which names whichever world is being walked to: egui
+// files a window's position under its id.
+const DIRECTIONS_ID: &str = "directions";
+// Enough of a route to read without covering the graph it is walked over.
+const DIRECTIONS_SIZE: [f32; 2] = [260.0, 300.0];
+
 /// The rocker is the one control with no words on it and the one a thumb goes for on a phone. A
 /// multiplier rather than a size, so it stays this much of whatever the UI scale made everything
 /// else.
@@ -172,6 +185,8 @@ struct Panel {
     guide: bool,
     /// Whether the framing button was pressed, asking for a route to be framed the other way.
     refit: bool,
+    /// The way among a set of directions that was picked to be drawn instead.
+    way: Option<usize>,
     /// The world whose maps were asked for. A second press on the same world closes them again:
     /// see [`map::Maps::toggle`].
     mapped: Option<usize>,
@@ -205,6 +220,52 @@ struct PanelData<'a> {
     /// The world the pointer is over, and where it is in egui's points. `None` whenever nothing is
     /// hovered, and on a touch screen throughout.
     hovered: Option<(usize, egui::Pos2)>,
+}
+
+/// The line down the left of a walk: a stop per world in the order they are walked, hollow where
+/// the walk starts and solid where it arrives.
+///
+/// Drawn over the rows rather than between them, the height of a row not being known until it has
+/// been laid out. `stops` is in the order they are drawn, top first.
+fn rail(ui: &egui::Ui, stops: &[egui::Rect]) {
+    // What a label is written in, the line being of a piece with the rows it runs beside.
+    let color = ui.visuals().text_color();
+    let stroke = egui::Stroke::new(RAIL_LINE, color);
+    let painter = ui.painter();
+    let at = |row: &egui::Rect| egui::pos2(row.left() + RAIL_WIDTH / 2.0, row.center().y);
+    for (nth, pair) in stops.windows(2).enumerate() {
+        let (mut from, to) = (at(&pair[0]), at(&pair[1]));
+        // Away from the edge of the ring the walk starts at rather than out of the middle of it.
+        // Every other stop is solid and drawn after the line, so it covers its own end.
+        if nth == 0 {
+            from.y += RAIL_END;
+        }
+        painter.line_segment([from, to], stroke);
+    }
+    for (nth, row) in stops.iter().enumerate() {
+        match (nth, nth + 1 == stops.len()) {
+            (0, _) => painter.circle_stroke(at(row), RAIL_END - RAIL_LINE / 2.0, stroke),
+            (_, true) => painter.circle_filled(at(row), RAIL_END, color),
+            _ => painter.circle_filled(at(row), RAIL_STOP, color),
+        };
+    }
+}
+
+/// The world a set of directions would run to or from: whatever is lit, which is what makes two
+/// worlds out of one right-click. `None` while that is this world or nothing at all.
+fn other_end(read: &PanelData, world: usize) -> Option<usize> {
+    read.selected
+        .and_then(Highlight::world)
+        .filter(|&other| other != world)
+}
+
+/// What a world in a walk does when it is pressed.
+enum Rows {
+    /// Traces its own route home, which is what a route is read down to find.
+    Traced,
+    /// Nothing. The ways between two worlds are gone the moment something else is selected, so a
+    /// reader following one down cannot be made to lose it by pressing what they are reading.
+    Pointed,
 }
 
 pub(super) struct ContextMenu {
@@ -285,6 +346,7 @@ impl Overlay {
             wants_pointer: false,
             guide: false,
             refit: false,
+            way: None,
             mapped: None,
             revealed: None,
             language: None,
@@ -320,6 +382,7 @@ impl Overlay {
                 true => sidebar_opener(ui, sidebar, insets),
             }
             panel.rocker(ui, &read, insets);
+            panel.directions(ui, &read);
             panel.menu(ui, &read);
             panel.tooltip(ui, &read);
             // Read within the frame that asked, so the window is on screen the moment the button
@@ -402,6 +465,9 @@ impl Overlay {
         if panel.refit {
             data.frame_route = !data.frame_route;
             data.framing = true;
+        }
+        if let Some(way) = panel.way {
+            data.take_way(way);
         }
         // three-d's own `GUI` surrenders the pointer only while egui is actively working a widget,
         // so a scroll over the panel would reach the camera as a zoom and a press on a bare label
@@ -610,7 +676,8 @@ impl Panel {
         search_box(ui, search, "worlds", t!("search-worlds"));
         for &world in &read.candidates {
             let selected = read.selected.and_then(Highlight::world) == Some(world);
-            self.world_row(ui, world, selected, data.titles[world].show());
+            let row = self.world_row(ui, world, selected, data.titles[world].show());
+            self.with_directions(&row, read, world);
         }
         ui.separator();
         self.selection(ui, read);
@@ -638,11 +705,11 @@ impl Panel {
                 .out
                 .as_ref()
                 .or(step.back.as_ref())
-                .map(world::Ask::asks_emoji)
+                .map(world::asks_emoji)
                 .unwrap_or_default();
             let title = data.titles[step.world].show();
             ui.horizontal(|ui| {
-                ui.label(step.arrow());
+                ui.label(world::arrow(step));
                 let row = ui
                     .selectable_label(read.selected == Some(lit), title)
                     .on_hover_text(walk_of(step));
@@ -1095,13 +1162,167 @@ impl Panel {
         world: usize,
         selected: bool,
         text: impl Into<egui::WidgetText>,
-    ) {
+    ) -> egui::Response {
         let row = ui.selectable_label(selected, text);
         if row.hovered() {
             self.pointed = Some(world);
         }
         if row.clicked() {
             self.chosen = Some(world);
+        }
+        row
+    }
+
+    /// A right-click on a world, offering the two ways between it and whatever is lit. Nothing
+    /// where there is no second world: an empty menu opening on a right-click reads as a broken
+    /// one.
+    fn with_directions(&mut self, row: &egui::Response, read: &PanelData, world: usize) {
+        if other_end(read, world).is_none() {
+            return;
+        }
+        row.context_menu(|ui| {
+            if self.directions_menu(ui, read, world) {
+                ui.close();
+            }
+        });
+    }
+
+    /// The two ways between a world and whatever is lit, and whether one of them was taken. The
+    /// other end is named in the hover, a title being longer than a menu is wide.
+    fn directions_menu(&mut self, ui: &mut egui::Ui, read: &PanelData, world: usize) -> bool {
+        let Some(other) = other_end(read, world) else {
+            return false;
+        };
+        let named = read.data.titles[other].show();
+        let mut taken = false;
+        if ui
+            .button(t!("menu-directions-to"))
+            .on_hover_text(t!("menu-directions-to-hint", world = named))
+            .clicked()
+        {
+            self.lit = Some(Some(Highlight::Path(other, world)));
+            taken = true;
+        }
+        if ui
+            .button(t!("menu-directions-from"))
+            .on_hover_text(t!("menu-directions-from-hint", world = named))
+            .clicked()
+        {
+            self.lit = Some(Some(Highlight::Path(world, other)));
+            taken = true;
+        }
+        taken
+    }
+
+    /// The worlds a walk goes through, origin first so the list reads in the order it is taken,
+    /// each with what the step onto it asks. `walk` is arrival first, as [`AppEntities::route`]
+    /// answers it.
+    ///
+    /// What a step asks is read off the world before it in this walk rather than off the canonical
+    /// parent: the same thing for a route home, not for a way between two other worlds.
+    fn walked(&mut self, ui: &mut egui::Ui, read: &PanelData, walk: &[usize], rows: Rows) {
+        let data = read.data;
+        let mut stops = Vec::with_capacity(walk.len());
+        for (at, &world) in walk.iter().enumerate().rev() {
+            let asks = walk
+                .get(at + 1)
+                .and_then(|&from| world::step_asks(&data.connections, data.hub, from, world))
+                .filter(|ask| ask.gate != Gate::Free);
+            let row = ui.horizontal(|ui| {
+                // Left clear for the line, which is drawn once the rows have settled where they
+                // are. What the step asks belongs against the world it is met on the way to.
+                ui.add_space(RAIL_WIDTH);
+                if let Some(ask) = &asks {
+                    ui.label(world::asks_emoji(ask))
+                        .on_hover_text(world::asks(ask));
+                }
+                let title = data.titles[world].show();
+                match rows {
+                    Rows::Traced => {
+                        let row = self.world_row(ui, world, false, title);
+                        self.with_directions(&row, read, world);
+                    }
+                    Rows::Pointed => {
+                        // visually hoverable only
+                        if ui.selectable_label(false, title).contains_pointer() {
+                            self.pointed = Some(world);
+                        }
+                    }
+                }
+            });
+            stops.push(row.response.rect);
+        }
+        rail(ui, &stops);
+    }
+
+    /// The ways between two worlds a reader can pick between, in a window rather than the sidebar:
+    /// the sidebar reads the one being walked, and choosing among several is a different job that
+    /// wants them side by side.
+    ///
+    /// Nothing where there is one way or none: an alternative is what this offers. Closing it
+    /// drops the directions, there being nothing left to pick between.
+    fn directions(&mut self, ui: &mut egui::Ui, read: &PanelData) {
+        let data = read.data;
+        let Some(Highlight::Path(from, to)) = read.selected.filter(|_| data.ways.len() > 1) else {
+            return;
+        };
+        // Copied out and back: `Window::open` holds its flag for as long as the closure runs.
+        let mut showing = true;
+        egui::Window::new(t!(
+            "directions-title",
+            origin = data.titles[from].show(),
+            destination = data.titles[to].show()
+        ))
+        .id(egui::Id::new(DIRECTIONS_ID))
+        .open(&mut showing)
+        .constrain(true)
+        .default_size(DIRECTIONS_SIZE)
+        .show(ui.ctx(), |ui| {
+            let (mut named, mut above): (Vec<usize>, &[usize]) = (Vec::new(), &[]);
+            for (at, way) in data.ways.iter().enumerate() {
+                let connections = way.walk.len() - 1;
+                // Where this way parts from the one above it, and from there the first world
+                // that has not already named another: several ways of a class leave through
+                // the same door and part later, and a list saying the same thing three times
+                // names nothing. Ways share their tail, so what is peculiar to one is looked
+                // for from where it parts rather than from the start.
+                let parts = way
+                    .walk
+                    .iter()
+                    .zip(above)
+                    .position(|(here, there)| here != there)
+                    .unwrap_or(above.len())
+                    .max(1);
+                let onward = way.walk.get(parts..).unwrap_or_default();
+                let apart = onward
+                    .iter()
+                    .find(|world| !named.contains(world))
+                    .or(onward.first());
+                named.extend(apart);
+                above = &way.walk;
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(at == data.way, t!("way-length", count = connections))
+                        .clicked()
+                    {
+                        self.way = Some(at);
+                    }
+                    for pair in way.walk.windows(2) {
+                        let ask = world::step_asks(&data.connections, data.hub, pair[0], pair[1])
+                            .filter(|ask| ask.gate != Gate::Free);
+                        if let Some(ask) = &ask {
+                            ui.label(world::asks_emoji(ask))
+                                .on_hover_text(world::asks(ask));
+                        }
+                    }
+                    if let Some(&apart) = apart {
+                        ui.weak(t!("way-via", world = data.titles[apart].show()));
+                    }
+                });
+            }
+        });
+        if !showing {
+            self.lit = Some(None);
         }
     }
 
@@ -1132,24 +1353,24 @@ impl Panel {
                     };
                     self.refit |= ui.button(icon).on_hover_text(hint).clicked();
                 });
-                // Origin first, so the list reads in the order it is walked.
-                for &world in read.route.iter().rev() {
-                    // What the step into this world asks, in the direction the route walks it.
-                    let asks = data.routes.parents[world]
-                        .and_then(|from| {
-                            data.connections[from]
-                                .iter()
-                                .find(|step| step.world == world)
-                        })
-                        .and_then(|step| step.out.as_ref())
-                        .filter(|ask| ask.gate != Gate::Free);
-                    ui.horizontal(|ui| {
-                        self.world_row(ui, world, false, data.titles[world].show());
-                        if let Some(ask) = asks {
-                            ui.label(ask.asks_emoji()).on_hover_text(ask.asks());
-                        }
-                    });
+                self.walked(ui, read, &read.route, Rows::Traced);
+            }
+            Some(Highlight::Path(from, world)) => {
+                self.world_info(ui, data, world);
+                self.forward_connections(ui, read, world);
+                ui.separator();
+                if read.route.is_empty() {
+                    ui.label(t!("no-path"));
+                    return;
                 }
+                ui.label(t!(
+                    "path-length",
+                    count = read.route.len() - 1,
+                    origin = data.titles[from].show()
+                ));
+                // Pressed, a world here would be selected and the ways between the two worlds
+                // gone with the selection that asked for them. Nothing else is read at that cost.
+                self.walked(ui, read, &read.route, Rows::Pointed);
             }
             // The connection is the subject, but the ways on are still listed for the world it is
             // walked from: picking another from here is a second way out of the same world, not a
@@ -1163,7 +1384,7 @@ impl Panel {
                 self.forward_connections(ui, read, at);
                 ui.separator();
                 ui.horizontal(|ui| {
-                    ui.label(step.arrow());
+                    ui.label(world::arrow(step));
                     if ui
                         .link(data.titles[far].show())
                         .on_hover_text(t!("trace-route"))
@@ -1323,6 +1544,7 @@ impl Panel {
                     if data.descendants[world] > 0 && ui.button(t!("menu-descendants")).clicked() {
                         self.lit = Some(Some(Highlight::Descendants(world)));
                     }
+                    self.directions_menu(ui, read, world);
                     let named = data.titles[world].known();
                     if named && ui.button(t!("menu-open-wiki")).clicked() {
                         open_in_browser(&data.titles[world].wiki_url());
@@ -1556,7 +1778,7 @@ fn fade(color: egui::Color32, opacity: u8) -> egui::Color32 {
 /// connection can be free one way and locked the other, and a reader deciding whether to walk it
 /// needs the way they are about to walk.
 fn walk_of(step: &world::Step) -> String {
-    let asks = |ask: &world::Ask| match ask.asks() {
+    let asks = |ask: &world::Ask| match world::asks(ask) {
         asks if asks.is_empty() => t!("walk-freely"),
         asks => asks,
     };

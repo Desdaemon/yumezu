@@ -34,6 +34,7 @@ wrote.
 | `GET /data`    | the dump, byte for byte as the file holds it |
 | `GET /data.json` | the same |
 | `GET /pollUpdate` | what the running sync is doing: `{"task": ..., "done": ...}` |
+| `GET /getNextLocations?origin=&dest=` | standing in `origin` and headed for `dest`, which ways on to take |
 
 The server keeps the dump current on its own clock -- a sync every `--sync-every` hours, timed
 from when the dump on disk was built so a restart is not a way to make it re-read the wiki. Every
@@ -49,6 +50,24 @@ and then asks again.
 own route, answered in the reference's own JSON, with the stage named by one of its task names. This
 program fetches the authors, the releases and the connections as one concurrent question, so it
 four stages where the reference names two dozen. See `src/progress.rs`.
+
+`/getNextLocations` answers a question instead of handing over the dump, and is the only route with
+a caller other than the app: YNOproject's game client knows where a player is standing and asks
+which door leads to where they are going. Both worlds are named by their English titles, and the
+answer is at most three ways on, nearest first:
+
+```json
+[{"title": "Blue Eyes World", "titleJP": "碧眼世界", "connType": 0, "typeParams": {}, "depth": 6}]
+```
+
+`connType` and `typeParams` are the wiki's own flags and words for that door; `depth` counts the
+connections left to the destination, that door included. The walk is `yumezu_routing`'s, the same
+one the app walks, ordered by the harshest condition anywhere along the route and then by length --
+so an unconditional way round wins however long it is. A route through a world the wiki keeps secret
+is held back unless there is no other, and one that walks into an isolated section is never offered
+at all -- the way on from there is the way back. A world the dump does not hold is answered, as the reference
+implementation answers it, with `{"error": "Invalid request", "err_code": "INVALID_REQUEST"}` and a
+`200`. `Access-Control-Allow-Origin` names ynoproject.net alone.
 
 ## Where the data comes from
 

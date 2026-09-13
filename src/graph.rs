@@ -40,6 +40,9 @@ pub(super) fn opening_room(worlds: &[world::World]) -> Option<usize> {
 const NOTABLE_WORLDS: usize = 10;
 /// Connections a world needs to count as a "notable" descendant.
 pub(super) const NOTABLE_HUB_CONNECTIONS: usize = 3;
+/// How many ways between two worlds the panel offers at once.
+const WAYS: usize = 5;
+
 /// How many worlds the panel names as still having ways out nobody has walked. See
 /// [`AppEntities::untaken`].
 const UNTAKEN_WORLDS: usize = 10;
@@ -71,6 +74,10 @@ pub(super) enum Highlight {
     /// ways out. Asked for from the panel with nothing selected, and only in a run drawing a
     /// frontier: the whole game has no unwalked way to count.
     Untaken,
+    /// The way from one world to another, held as walked-from then walked-to. Asked for from the
+    /// right-click menu, and the one highlight [`AppEntities::routes`] cannot answer -- so the
+    /// walks themselves are kept in [`AppEntities::ways`].
+    Path(usize, usize),
 }
 
 impl Highlight {
@@ -80,9 +87,11 @@ impl Highlight {
         match self {
             // A connection answers with the world it was picked from -- the one whose ways on the
             // panel is listing -- so clicking through them leaves the reader where they started.
-            Self::Route(world) | Self::Descendants(world) | Self::Connection(world, _) => {
-                Some(world)
-            }
+            // A path answers with where it arrives, which is what was asked for.
+            Self::Route(world)
+            | Self::Descendants(world)
+            | Self::Connection(world, _)
+            | Self::Path(_, world) => Some(world),
             Self::Author(_) | Self::Version(_) | Self::Layer(_) | Self::Untaken => None,
         }
     }
@@ -378,9 +387,17 @@ impl AppEntities {
         self.graph.apply_force(grab.node, force.into());
     }
 
-    /// The selected node and every step from it back to the origin world, selection first. Empty
-    /// with nothing selected, whatever the selection lights: the route is what the panel walks.
+    /// The selected node and every step from it back to the origin world, selection first, or the
+    /// directions asked for where those are what is lit. Empty with nothing selected, whatever the
+    /// selection lights: the route is what the panel walks.
+    ///
+    /// Arrival first either way. [`world::Way`] is kept the way it is walked, so a chosen way is
+    /// turned round here rather than everything that reads a route being written twice.
     pub(super) fn route(&self) -> Vec<usize> {
+        if let Some(Highlight::Path(..)) = self.selected {
+            let arrival_first = |way: &world::Way| way.walk.iter().rev().copied().collect();
+            return self.ways.get(self.way).map_or_else(Vec::new, arrival_first);
+        }
         let mut route = Vec::new();
         let mut step = self.selected.and_then(Highlight::world);
         while let Some(node) = step {
@@ -415,6 +432,11 @@ impl AppEntities {
             Some(Highlight::Layer(depth)) => self.layer(depth),
             Some(Highlight::Connection(at, far)) => vec![at, far],
             Some(Highlight::Untaken) => self.untaken.clone(),
+            // Even with no way between them the two ends light, so the question stays visible.
+            Some(Highlight::Path(from, to)) => match self.route() {
+                walk if walk.is_empty() => vec![from, to],
+                walk => walk,
+            },
         }
     }
 
@@ -483,7 +505,8 @@ impl AppEntities {
                 .opening
                 .map_or_else(Vec::new, |root| self.routes.subtree(root)),
             // The chain home, not everything a route lights: the button asks for the way there,
-            // not for however much of the game hangs off its end.
+            // not for however much of the game hangs off its end. Directions have no such button:
+            // they fall through to be framed whole, the way there being all that was asked for.
             Some(Highlight::Route(_)) => self.route(),
             _ => self.highlighted(),
         }
@@ -609,8 +632,25 @@ impl AppEntities {
     pub(super) fn select(&mut self, selected: Option<Highlight>) {
         if selected != self.selected {
             self.selected = selected;
+            self.ways = match selected {
+                Some(Highlight::Path(from, to)) => {
+                    world::ways(&self.connections, from, to, WAYS, self.hub)
+                }
+                _ => Vec::new(),
+            };
+            self.way = 0;
             // Clearing a selection leaves the person looking at whatever they were looking at.
             self.framing = selected.is_some();
+            self.repaint();
+        }
+    }
+
+    /// Which of [`Self::ways`] is drawn and read out. Framing again, the other way being spread
+    /// over other worlds.
+    pub(super) fn take_way(&mut self, way: usize) {
+        if way != self.way && way < self.ways.len() {
+            self.way = way;
+            self.framing = true;
             self.repaint();
         }
     }

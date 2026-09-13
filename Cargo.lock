@@ -688,6 +688,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "yumezu_routing",
 ]
 
 [[package]]
@@ -4970,6 +4971,15 @@ dependencies = [
  "web-time",
  "webpki-root-certs",
  "winit",
+ "yumezu_routing",
+]
+
+[[package]]
+name = "yumezu_routing"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.13.1",
+ "serde",
 ]
 
 [[package]]

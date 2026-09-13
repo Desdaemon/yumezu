@@ -279,6 +279,11 @@ pub(super) struct App {
     /// Whose game is being drawn: the whole of it, or as much as one player has seen. Kept beside
     /// the dump because it is the other thing the entities are built out of. See [`App::build`].
     yno: yno::Account,
+    /// How far into the code the keys typed at the graph have got. See [`world::Code`].
+    code: world::Code,
+    /// Whether it has been typed, which is asked of every dump fetched after it: a retry must not
+    /// read those worlds back out again.
+    revealed: bool,
     /// What the graph being replaced was, held between the frame that throws it away and the one
     /// that builds the next out of it. `None` at every other moment. See [`Before`].
     before: Option<Before>,
@@ -349,6 +354,14 @@ struct AppEntities {
     versions: Vec<world::Version>,
     /// What is lit. Everything off the highlight is dimmed.
     selected: Option<Highlight>,
+    /// The ways [`Highlight::Path`] found, freest first and never two the same. Empty for every
+    /// other selection, and for a pair with no way between them.
+    ways: Vec<world::Way>,
+    /// Which of `ways` is drawn and read out. See [`AppEntities::take_way`].
+    way: usize,
+    /// The world the Eyeball Bomb effect gets a player back to from anywhere, which the ways
+    /// between two worlds are walked with. See [`world::hub_world`].
+    hub: Option<usize>,
     /// The depth of the furthest world the origin can reach, which is the last layer the rocker
     /// can step to.
     deepest: u32,
@@ -766,10 +779,12 @@ impl App {
             ctx: AppContext::default(),
             // Started here rather than at the first frame: the fetch is the longest thing a run
             // waits for, and nothing it needs is owned by the window.
-            dump: Dump::Loading(fetch::spawn(world::load())),
+            dump: Dump::Loading(fetch::spawn(world::load(false))),
             // For the same reason as the dump: a run that left a session behind has an account to
             // read before it has a window to draw it in.
             yno: yno::Account::new(),
+            code: world::Code::default(),
+            revealed: false,
             before: None,
             statics: AppStatics {
                 control,
@@ -918,7 +933,7 @@ impl App {
         if let Dump::Waiting { until, .. } = &mut self.dump {
             *until -= seconds;
             if *until <= 0.0 {
-                self.dump = Dump::Loading(fetch::spawn(world::load()));
+                self.dump = Dump::Loading(fetch::spawn(world::load(self.revealed)));
             }
         }
         let says = match &self.dump {
@@ -982,6 +997,15 @@ impl App {
             self.before = self.data.as_ref().map(AppEntities::before);
             self.data = None;
             self.build();
+        }
+        // The worlds the code shows never reached this run: `world::hide` drops them as the dump
+        // is read, so showing them is another dump rather than another drawing of the one in hand.
+        if !self.revealed && self.code.taken() {
+            self.revealed = true;
+            self.selected = None;
+            self.before = self.data.as_ref().map(AppEntities::before);
+            self.data = None;
+            self.dump = Dump::Loading(fetch::spawn(world::load(true)));
         }
         if self.data.is_none() {
             // Only while there is nothing to draw: every frame after this one has a graph in it
@@ -1074,9 +1098,20 @@ impl App {
             .take_travel(frame_input.device_pixel_ratio);
         // Read after the overlay, which settles whether the keys are being typed into the search
         // box rather than walked with.
-        self.statics
-            .walk
-            .track(&frame_input.events, self.overlay.as_ref().unwrap().keyboard);
+        let typing = self.overlay.as_ref().unwrap().keyboard;
+        self.statics.walk.track(&frame_input.events, typing);
+        match typing {
+            true => self.code.forget(),
+            false => frame_input
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Text(typed) => Some(typed.chars()),
+                    _ => None,
+                })
+                .flatten()
+                .for_each(|key| self.code.typed(key)),
+        }
         let (across, into) = self
             .statics
             .walk

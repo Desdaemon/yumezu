@@ -146,9 +146,10 @@ pub(super) fn entities(
     let rng = Rng(0x5eed_1337);
 
     let worlds = &dump.worlds;
+    let connections = world::connections(worlds);
     // Depth computed once for both the colors and, in layered mode, the layer each world is
     // pinned to, so the two agree.
-    let routes = world::canonical_routes(worlds);
+    let routes = world::routes_from(&connections, world::origin_world(worlds));
     let deepest = routes.depth.iter().flatten().copied().max().unwrap_or(0);
     let furthest = deepest.max(1) as f32;
     // Sized by how much of the graph hangs off each world. The logarithm grows the size with the
@@ -202,7 +203,6 @@ pub(super) fn entities(
             })
         })
         .collect();
-    let connections = world::connections(worlds);
     // Counted off the same connections the edges are built from, so the panel calls a world a
     // junction on exactly the lines it draws for it.
     let mut degrees = vec![0; worlds.len()];
@@ -398,6 +398,9 @@ pub(super) fn entities(
         // it back at any point.
         framing: arriving,
         frame_route: false,
+        ways: Vec::new(),
+        way: 0,
+        hub: world::hub_world(worlds),
         edge_colors,
         node_radii,
         hub_repulsion,
@@ -474,11 +477,16 @@ impl AppEntities {
             on_route[node] = true;
         }
         let lit = self.selected.is_some();
-        // Empty for every selection but a route, so the match arm below never fires for one.
-        let mut homeward = vec![false; self.titles.len()];
-        if matches!(self.selected, Some(Highlight::Route(_))) {
-            for node in self.route() {
-                homeward[node] = true;
+        // Per world on the walk being read out, the world it is stepped to from; empty for a
+        // selection that is not a walk.
+        let mut walked = vec![None; self.titles.len()];
+        if matches!(
+            self.selected,
+            Some(Highlight::Route(_) | Highlight::Path(..))
+        ) {
+            let walk = self.route();
+            for (at, &world) in walk.iter().enumerate() {
+                walked[world] = walk.get(at + 1).copied();
             }
         }
 
@@ -502,7 +510,7 @@ impl AppEntities {
             );
         }
 
-        let (routes, on_route, homeward) = (&self.routes.parents, &on_route, &homeward);
+        let (routes, on_route, walked) = (&self.routes.parents, &on_route, &walked);
         let (solid, dashed, base) = (
             self.edge_instances.colors.as_mut().unwrap(),
             self.dash_instances.colors.as_mut().unwrap(),
@@ -535,10 +543,13 @@ impl AppEntities {
                 // parent is always exactly one depth in -- so it keeps its own distance color and
                 // only escapes the dimming.
                 Some(Highlight::Layer(_)) if on_route[a] && on_route[b] => (base[edge], true),
-                // Both ends being lit is not enough: it also has to be the step from one of them
-                // to that end's parent, or a shortcut between two distant points of a route would
-                // light up as if the walk went through it.
-                Some(_) if step && homeward[a] && homeward[b] => (ROUTE_HOME_COLOR, true),
+                // Both ends being lit is not enough: it also has to be a step the walk takes, or
+                // a shortcut between two distant points of a route would light up as if the walk
+                // went through it.
+                Some(_) if walked[a] == Some(b) || walked[b] == Some(a) => (ROUTE_HOME_COLOR, true),
+                // Directions are their own steps and nothing else, the canonical tree not being
+                // the way they go.
+                Some(Highlight::Path(..)) => (dim(base[edge]), false),
                 Some(_) if step && on_route[a] && on_route[b] => (ROUTE_COLOR, true),
                 Some(_) => (dim(base[edge]), false),
             };

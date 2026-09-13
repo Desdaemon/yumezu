@@ -9,6 +9,13 @@ use egui_material_icons::{
     icons::{ICON_ARROW_BACK, ICON_ARROW_FORWARD, ICON_ARROW_RANGE, ICON_BLOCK},
 };
 use serde::Deserialize;
+// The connection and the walk are the routing crate's, so the program that publishes the dump
+// reads them exactly as this one does.
+use yumezu_routing::walkable_steps;
+pub use yumezu_routing::{
+    Ask, Connection, Gate, Routes, Step, Way, connections, hub_world, origin_world, routes_from,
+    step_asks, ways,
+};
 
 use super::i18n::t;
 
@@ -202,6 +209,16 @@ pub struct Map {
     pub url: String,
 }
 
+impl yumezu_routing::World for World {
+    fn title(&self) -> &str {
+        &self.title
+    }
+
+    fn connections(&self) -> &[Connection] {
+        &self.connections
+    }
+}
+
 impl World {
     pub fn titles(&self) -> Title {
         Title {
@@ -273,280 +290,68 @@ impl Author {
     }
 }
 
-#[derive(Clone, Deserialize)]
-pub struct Connection {
-    #[serde(rename = "targetId")]
-    pub target_id: usize,
-    /// What the connection demands and which way it can be walked, as the wiki's own bitfield.
-    #[serde(rename = "type")]
-    pub flags: u16,
-    /// The wiki's own words for a demand, keyed by the flag making it. Most connections demand
-    /// nothing and carry none.
-    #[serde(rename = "typeParams", default)]
-    params: std::collections::HashMap<u16, TypeParams>,
-}
-
-/// The dump's Japanese rendering is only ever the four seasons, which this app names for itself
-/// (`gate-seasonal-detail`), so serde skips it.
-#[derive(Clone, Deserialize)]
-struct TypeParams {
-    params: Option<String>,
-}
-
-impl Connection {
-    fn ask(&self) -> Ask {
-        let gate = Gate::of(self.flags);
-        Ask {
-            gate,
-            detail: gate
-                .worded()
-                .and_then(|flag| self.params.get(&flag))
-                .and_then(|words| words.params.clone())
-                .filter(|words| !words.is_empty()),
-        }
+/// Empty for a condition that asks nothing: a row with nothing after the title is a way a player
+/// can walk unconditionally.
+pub fn gate_asks(gate: Gate) -> String {
+    match gate {
+        Gate::Free => String::new(),
+        Gate::Effect => t!("gate-effect"),
+        Gate::Chance => t!("gate-chance"),
+        Gate::Seasonal => t!("gate-seasonal"),
+        Gate::Locked => t!("gate-locked"),
+        Gate::LockedCondition | Gate::Revisit => t!("gate-locked-condition"),
+        Gate::ExitPoint => t!("gate-exit-point"),
+        Gate::DeadEnd => t!("gate-dead-end"),
+        Gate::Isolated => t!("gate-isolated"),
     }
 }
 
-/// The condition on its own is what a route is ordered by; the words are what a reader is told.
-#[derive(Clone)]
-pub struct Ask {
-    pub gate: Gate,
-    /// `None` where the wiki writes no words, and always for a direction that is inferred rather
-    /// than listed. See [`walkable_steps`].
-    detail: Option<String>,
-}
-
-impl Ask {
-    /// Prose is all there is to go on: no flag separates the condition on a shortcut back in from
-    /// one a first-time visitor could meet. `destination` is that world's English title, the only
-    /// one the wiki writes these sentences in.
-    fn first_visit(mut self, destination: &str) -> Self {
-        let names_destination = self
-            .detail
-            .as_deref()
-            .is_some_and(|words| words.to_lowercase().contains(&destination.to_lowercase()));
-        if self.gate == Gate::LockedCondition && names_destination {
-            self.gate = Gate::Revisit;
-        }
-        self
-    }
-
-    #[cfg(test)]
-    pub fn free() -> Self {
-        Self {
-            gate: Gate::Free,
-            detail: None,
-        }
-    }
-
-    /// The wiki's own words where it has any, and the bare name of the condition otherwise. Empty
-    /// for a connection that asks nothing.
-    pub fn asks(&self) -> String {
-        let Some(detail) = self.detail.as_deref() else {
-            return self.gate.asks();
-        };
-        match self.gate {
-            // Comma separated rather than joined into a sentence: the wiki does not say whether
-            // one effect is enough or all are needed, and an "and" or "or" would settle it here.
-            Gate::Effect => t!("gate-effect-detail", effects = detail.replace(',', ", ")),
-            Gate::Chance => t!("gate-chance-detail", chance = detail),
-            Gate::Seasonal => t!("gate-seasonal-detail", season = detail),
-            // The wiki's own sentence, which it writes in English and publishes no Japanese for.
-            Gate::LockedCondition | Gate::Revisit => detail.to_owned(),
-            _ => self.gate.asks(),
-        }
-    }
-    pub fn asks_emoji(&self) -> &'static str {
-        match self.gate {
-            Gate::Free => "",
-            Gate::Effect => "✨",
-            Gate::Chance => "🍀",
-            Gate::Locked => "🔒",
-            Gate::LockedCondition | Gate::Revisit => "🔐",
-            Gate::ExitPoint => "🚪",
-            Gate::DeadEnd => "↩",
-            Gate::Isolated => "🚩",
-            Gate::Seasonal => match self.detail.as_deref() {
-                Some("Spring") => "🌸",
-                Some("Summer") => "☀",
-                Some("Fall") => "🍂",
-                Some("Winter") => "❄",
-                _ => "🗓",
-            },
-        }
+/// The wiki's own words where it has any, and the bare name of the condition otherwise. Empty for
+/// a connection that asks nothing.
+pub fn asks(ask: &Ask) -> String {
+    let Some(detail) = ask.detail.as_deref() else {
+        return gate_asks(ask.gate);
+    };
+    match ask.gate {
+        // Comma separated rather than joined into a sentence: the wiki does not say whether one
+        // effect is enough or all are needed, and an "and" or "or" would settle it here.
+        Gate::Effect => t!("gate-effect-detail", effects = detail.replace(',', ", ")),
+        Gate::Chance => t!("gate-chance-detail", chance = detail),
+        Gate::Seasonal => t!("gate-seasonal-detail", season = detail),
+        // The wiki's own sentence, which it writes in English and publishes no Japanese for.
+        Gate::LockedCondition | Gate::Revisit => detail.to_owned(),
+        _ => gate_asks(ask.gate),
     }
 }
 
-/// The connection flags this module reads, from the wiki's own `ConnType`. The two it leaves out,
-/// `SHORTCUT` and `TRACKED`, describe a connection rather than gating or pointing it.
-pub mod flag {
-    /// Walkable from the world that lists it, never back.
-    pub const ONE_WAY: u16 = 1 << 0;
-    /// Walkable only back to the world that lists it, never from it.
-    pub const NO_ENTRY: u16 = 1 << 1;
-    /// This side opens a connection the far side reports as [`LOCKED`].
-    pub const UNLOCK: u16 = 1 << 2;
-    pub const LOCKED: u16 = 1 << 3;
-    /// Leads to an isolated section of the world at the far end.
-    pub const DEAD_END: u16 = 1 << 4;
-    /// The far side of a [`DEAD_END`]: the way back is reachable only from that isolated section.
-    pub const ISOLATED: u16 = 1 << 5;
-    pub const EFFECT: u16 = 1 << 6;
-    pub const CHANCE: u16 = 1 << 7;
-    pub const LOCKED_CONDITION: u16 = 1 << 8;
-    /// Where a shortcut comes out, walked backwards into the shortcut.
-    pub const EXIT_POINT: u16 = 1 << 10;
-    pub const SEASONAL: u16 = 1 << 11;
-}
-
-/// Ordered by how readily a canonical route accepts it: [`Gate::Free`] demands nothing, and the
-/// rest follow in the order the wiki's own path finder falls back through them -- conditional
-/// before locked, and a shortcut's exit only once both of those are already allowed.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum Gate {
-    Free,
-    Effect,
-    Chance,
-    Seasonal,
-    LockedCondition,
-    /// Unlocked from the opposite entrance.
-    Locked,
-    /// Where a shortcut comes out, walked backwards into the shortcut.
-    ExitPoint,
-    /// Leads to an isolated section of the world at the far end.
-    DeadEnd,
-    /// The far side of a [`Gate::DeadEnd`]: the way back is reachable only from that isolated
-    /// section.
-    Isolated,
-    /// A condition naming the world it leads to, which only a player already there can meet.
-    /// Harsher than anything the wiki flags, since it is no way in -- but still a step, so a world
-    /// it is the only way to is reached rather than lost.
-    Revisit,
-}
-
-impl Gate {
-    /// Harshest wins: several flags are demands to be met together, so the route is only as free
-    /// as its strictest one. Listed strictest first: the enum's order, backwards.
-    fn of(flags: u16) -> Gate {
-        [
-            (flag::ISOLATED, Gate::Isolated),
-            (flag::DEAD_END, Gate::DeadEnd),
-            (flag::EXIT_POINT, Gate::ExitPoint),
-            (flag::LOCKED, Gate::Locked),
-            (flag::LOCKED_CONDITION, Gate::LockedCondition),
-            (flag::SEASONAL, Gate::Seasonal),
-            (flag::CHANCE, Gate::Chance),
-            (flag::EFFECT, Gate::Effect),
-        ]
-        .into_iter()
-        .find(|(flag, _)| flags & flag != 0)
-        .map_or(Gate::Free, |(_, gate)| gate)
-    }
-
-    /// The dump writes words for exactly these four.
-    fn worded(self) -> Option<u16> {
-        match self {
-            Gate::Effect => Some(flag::EFFECT),
-            Gate::Chance => Some(flag::CHANCE),
-            Gate::Seasonal => Some(flag::SEASONAL),
-            Gate::LockedCondition | Gate::Revisit => Some(flag::LOCKED_CONDITION),
-            Gate::Free | Gate::Locked | Gate::ExitPoint | Gate::DeadEnd | Gate::Isolated => None,
-        }
-    }
-
-    /// Empty for a condition that asks nothing: a row with nothing after the title is a way a
-    /// player can walk unconditionally.
-    fn asks(self) -> String {
-        match self {
-            Gate::Free => String::new(),
-            Gate::Effect => t!("gate-effect"),
-            Gate::Chance => t!("gate-chance"),
-            Gate::Seasonal => t!("gate-seasonal"),
-            Gate::Locked => t!("gate-locked"),
-            Gate::LockedCondition | Gate::Revisit => t!("gate-locked-condition"),
-            Gate::ExitPoint => t!("gate-exit-point"),
-            Gate::DeadEnd => t!("gate-dead-end"),
-            Gate::Isolated => t!("gate-isolated"),
-        }
+pub fn asks_emoji(ask: &Ask) -> &'static str {
+    match ask.gate {
+        Gate::Free => "",
+        Gate::Effect => "✨",
+        Gate::Chance => "🍀",
+        Gate::Locked => "🔒",
+        Gate::LockedCondition | Gate::Revisit => "🔐",
+        Gate::ExitPoint => "🚪",
+        Gate::DeadEnd => "↩",
+        Gate::Isolated => "🚩",
+        Gate::Seasonal => match ask.detail.as_deref() {
+            Some("Spring") => "🌸",
+            Some("Summer") => "☀",
+            Some("Fall") => "🍂",
+            Some("Winter") => "❄",
+            _ => "🗓",
+        },
     }
 }
 
-/// One connection of a world, from that world's side. A direction with no gate is a direction
-/// there is no way to walk, which is what makes a connection one-way.
-pub struct Step {
-    pub world: usize,
-    /// `None` where there is no way there.
-    pub out: Option<Ask>,
-    /// `None` where there is no way back.
-    pub back: Option<Ask>,
-}
-
-impl Step {
-    /// [`ICON_BLOCK`] is the connection the dump lists but neither side can walk.
-    pub fn arrow(&self) -> MaterialIcon {
-        match (self.out.is_some(), self.back.is_some()) {
-            (true, true) => ICON_ARROW_RANGE,
-            (true, false) => ICON_ARROW_FORWARD,
-            (false, true) => ICON_ARROW_BACK,
-            (false, false) => ICON_BLOCK,
-        }
+/// [`ICON_BLOCK`] is the connection the dump lists but neither side can walk.
+pub fn arrow(step: &Step) -> MaterialIcon {
+    match (step.out.is_some(), step.back.is_some()) {
+        (true, true) => ICON_ARROW_RANGE,
+        (true, false) => ICON_ARROW_FORWARD,
+        (false, true) => ICON_ARROW_BACK,
+        (false, false) => ICON_BLOCK,
     }
-
-    /// Drawn as marching dashes.
-    pub fn one_way(&self) -> bool {
-        self.out.is_some() != self.back.is_some()
-    }
-}
-
-/// Per world, every world it is joined to, each with what the connection asks in either direction.
-///
-/// One entry per connection rather than one per listing: a connection is nearly always listed by
-/// both worlds it joins and is still one connection. A world's own listings come first, in the
-/// dump's order, then the connections only the far side lists.
-///
-/// Both the lines drawn and the ways onward offered come from here, so the panel names a connection
-/// one-way on exactly the connections drawn that way.
-pub fn connections(worlds: &[World]) -> Vec<Vec<Step>> {
-    let gates: std::collections::HashMap<_, _> = walkable_steps(worlds)
-        .into_iter()
-        .enumerate()
-        .flat_map(|(from, steps)| steps.into_iter().map(move |(to, ask)| ((from, to), ask)))
-        .collect();
-
-    let mut joined: Vec<Vec<usize>> = vec![Vec::new(); worlds.len()];
-    for (from, world) in worlds.iter().enumerate() {
-        for connection in &world.connections {
-            let to = connection.target_id;
-            // A world connected to itself is no way anywhere.
-            if to != from && !joined[from].contains(&to) {
-                joined[from].push(to);
-            }
-        }
-    }
-    // The same connections again from the far side, for the world that did not list them itself.
-    for (from, world) in worlds.iter().enumerate() {
-        for connection in &world.connections {
-            let to = connection.target_id;
-            if to != from && !joined[to].contains(&from) {
-                joined[to].push(from);
-            }
-        }
-    }
-
-    joined
-        .into_iter()
-        .enumerate()
-        .map(|(from, joined)| {
-            joined
-                .into_iter()
-                .map(|to| Step {
-                    world: to,
-                    out: gates.get(&(from, to)).cloned(),
-                    back: gates.get(&(to, from)).cloned(),
-                })
-                .collect()
-        })
-        .collect()
 }
 
 /// The prefix the page rewrites out of every picture address, asking its own host instead.
@@ -654,7 +459,7 @@ async fn ask(url: &str) -> Result<String, super::fetch::Error> {
 ///
 /// `Err` carries what to say on screen rather than panicking: a document off the network failing to
 /// arrive, or arriving as something else, is not worth taking the window down for.
-pub async fn load() -> Result<Option<Dump>, String> {
+pub async fn load(revealed: bool) -> Result<Option<Dump>, String> {
     let url = url();
     let Some(json) = dump(&url)
         .await
@@ -662,7 +467,7 @@ pub async fn load() -> Result<Option<Dump>, String> {
     else {
         return Ok(None);
     };
-    parse(&json)
+    parse(&json, revealed)
         .map(Some)
         .map_err(|error| format!("{url} is not the expected world dump: {error}"))
 }
@@ -690,9 +495,9 @@ async fn download(url: &str) -> Result<String, super::fetch::Error> {
 }
 
 /// Rewrites the addresses this platform cannot use as they stand.
-fn parse(json: &str) -> serde_json::Result<Dump> {
+fn parse(json: &str, revealed: bool) -> serde_json::Result<Dump> {
     let mut dump = serde_json::from_str::<Dump>(json)?;
-    hide(&mut dump.worlds);
+    hide(&mut dump.worlds, revealed);
     // Every picture address the app fetches at runtime passes through here and only here.
     // `tools/atlas` reads `data.json` itself and rightly misses this: it runs at build time and has
     // no page to be on.
@@ -707,12 +512,48 @@ fn parse(json: &str) -> serde_json::Result<Dump> {
     Ok(dump)
 }
 
+const MYSTERY_TEXT: &str = "20050726";
+
+#[derive(Default)]
+pub struct Code {
+    at: usize,
+    done: bool,
+}
+
+impl Code {
+    pub fn typed(&mut self, key: char) {
+        self.at = match MYSTERY_TEXT.chars().nth(self.at) == Some(key) {
+            true => self.at + 1,
+            // Begun again from this key rather than from the next: a false start is usually the
+            // code's own first key struck twice.
+            false => usize::from(MYSTERY_TEXT.starts_with(key)),
+        };
+        if self.at == MYSTERY_TEXT.len() {
+            self.at = 0;
+            self.done = true;
+        }
+    }
+
+    /// Whatever was half typed, dropped: the keys have gone to a box on the panel, where they are
+    /// somebody's search rather than this.
+    pub fn forget(&mut self) {
+        self.at = 0;
+    }
+
+    pub fn taken(&mut self) -> bool {
+        std::mem::take(&mut self.done)
+    }
+}
+
 /// Drops the worlds the dump marks secret, and renumbers what is left.
 ///
 /// A connection names the world it leads to by index, so taking one out moves every index above it
 /// and a reference left pointing at the old one draws a line somewhere else entirely. Done where
 /// the dump becomes the app's, so nothing downstream ever sees those worlds.
-fn hide(worlds: &mut Vec<World>) {
+fn hide(worlds: &mut Vec<World>, revealed: bool) {
+    if revealed {
+        return;
+    }
     let keep: Vec<bool> = worlds.iter().map(|world| !world.secret).collect();
     let dropped = keep.iter().filter(|kept| !**kept).count();
     if dropped == 0 {
@@ -1087,161 +928,11 @@ fn append_query_encoded(input: &str, output: &mut String) {
     }
 }
 
-/// The canonical route from every world back to world 0, Urotsuki's Room.
-pub struct Routes {
-    /// Per world, the world one step closer to the origin along its canonical route. `None` for
-    /// the origin itself and for anything it cannot reach.
-    pub parents: Vec<Option<usize>>,
-    /// Per world, how many connections its canonical route is long, and `None` where unreachable.
-    /// Measured here rather than read from the dump's own `depth`, so it agrees with the
-    /// connections this visualization knows about.
-    pub depth: Vec<Option<u32>>,
-}
-
-impl Routes {
-    /// Per world, how many worlds' canonical route home passes through it: how much of the game it
-    /// is the way to, which is what the node sizes show. Sizing reads it through a logarithmic
-    /// curve, so the origin -- which everything hangs off -- stays on the same scale as the rest.
-    pub fn descendant_counts(&self) -> Vec<u32> {
-        // Deepest first, so a world's descendants are all counted before it hands them up.
-        let mut order: Vec<usize> = (0..self.parents.len()).collect();
-        order.sort_unstable_by_key(|&world| std::cmp::Reverse(self.depth[world]));
-        let mut descendants = vec![0; self.parents.len()];
-        for &world in &order {
-            if let Some(parent) = self.parents[world] {
-                descendants[parent] += descendants[world] + 1;
-            }
-        }
-        descendants
-    }
-
-    /// A world and every world that hangs off it, shallowest first so a reader walks it outward.
-    pub fn subtree(&self, root: usize) -> Vec<usize> {
-        // Shallowest first, so a world's parent has already been decided when it is reached. A
-        // world the origin cannot reach sorts before every depth and has no parent to inherit
-        // from, which keeps it out of every subtree but its own.
-        let mut order: Vec<usize> = (0..self.parents.len()).collect();
-        order.sort_unstable_by_key(|&world| self.depth[world]);
-        let mut inside = vec![false; self.parents.len()];
-        inside[root] = true;
-        for &world in &order {
-            if let Some(parent) = self.parents[world] {
-                inside[world] |= inside[parent];
-            }
-        }
-        order.retain(|&world| inside[world]);
-        order
-    }
-}
-
-/// Walks the route to every world a player could actually be expected to walk.
-///
-/// Routes are ordered by the harshest [`Gate`] anywhere along them, then by length, then by how
-/// many steps demand anything at all, so an unconditional route wins however long it is. That is
-/// why the depth reported here is the higher, honest one: a locked or chance-gated shortcut no
-/// longer makes a world look shallow.
-///
-/// Directed, like the lines drawn: a connection the player can only walk one way is not a way in.
+/// For the tests, which have only a dump in hand: a run walks the connections it already built for
+/// the lines it draws.
+#[cfg(test)]
 pub fn canonical_routes(worlds: &[World]) -> Routes {
-    let mut routes = Routes {
-        parents: vec![None; worlds.len()],
-        depth: vec![None; worlds.len()],
-    };
-    if worlds.is_empty() {
-        return routes;
-    }
-    let origin = origin_world(worlds);
-    let steps = walkable_steps(worlds);
-
-    // Dijkstra over (gate, depth, demands): a world settles on its parent's route plus one step,
-    // so the parent chain and the depth cannot disagree. `demands` sits after the depth and so
-    // cannot move it -- it only picks the least demanding of the equally short routes that share
-    // one harshest condition. Reversed because `BinaryHeap` is a max-heap; the world and the
-    // parent ride in the key so ties resolve the same way on every run.
-    let mut queue =
-        std::collections::BinaryHeap::from([std::cmp::Reverse((Gate::Free, 0, 0, origin, origin))]);
-    while let Some(std::cmp::Reverse((gate, depth, demands, world, parent))) = queue.pop() {
-        if routes.depth[world].is_some() {
-            continue;
-        }
-        routes.depth[world] = Some(depth);
-        routes.parents[world] = (world != origin).then_some(parent);
-        for (next, step) in &steps[world] {
-            if routes.depth[*next].is_none() {
-                queue.push(std::cmp::Reverse((
-                    gate.max(step.gate),
-                    depth + 1,
-                    demands + u32::from(step.gate != Gate::Free),
-                    *next,
-                    world,
-                )));
-            }
-        }
-    }
-    routes
-}
-
-/// Where the game starts, and so where every route ends. Not the page's own [`origin`] elsewhere
-/// in this module, which is an address.
-///
-/// By name rather than by position. The dump usually lists it first, but only because it was the
-/// first world the reference's database ever held: a dump built from nothing lists the worlds
-/// alphabetically and starts at `3D Structures Path`, and seeding the walk there leaves nearly
-/// every world unreachable -- one flat layer at no depth. The first world if the dump has no such
-/// title, which is not worth failing over.
-fn origin_world(worlds: &[World]) -> usize {
-    worlds
-        .iter()
-        .position(|world| world.title == ORIGIN)
-        .unwrap_or(0)
-}
-
-/// As the wiki's English pages spell it.
-const ORIGIN: &str = "Urotsuki's Room";
-
-/// Every step a player can take, as a directed adjacency list carrying what each demands.
-///
-/// A connection is nearly always listed by both worlds it joins, and those two listings are the two
-/// directions. Where only one side lists it, the other is inferred the way the wiki's own path
-/// finder infers it: [`flag::ONE_WAY`] means there is no way back, [`flag::UNLOCK`] means the way
-/// back is [`Gate::Locked`].
-///
-/// The routes walk this directly and [`connections`] reads it pairwise, so a line drawn as one-way
-/// is one-way on exactly the steps a route is denied.
-fn walkable_steps(worlds: &[World]) -> Vec<Vec<(usize, Ask)>> {
-    let listed: std::collections::HashSet<_> = worlds
-        .iter()
-        .enumerate()
-        .flat_map(|(from, world)| {
-            world
-                .connections
-                .iter()
-                .map(move |connection| (from, connection.target_id))
-        })
-        .collect();
-
-    let mut steps = vec![Vec::new(); worlds.len()];
-    for (from, world) in worlds.iter().enumerate() {
-        for connection in &world.connections {
-            let (to, flags) = (connection.target_id, connection.flags);
-            if to == from {
-                continue;
-            }
-            if flags & flag::NO_ENTRY == 0 {
-                steps[from].push((to, connection.ask().first_visit(&worlds[to].title)));
-            }
-            if !listed.contains(&(to, from)) && flags & flag::ONE_WAY == 0 {
-                let gate = if flags & flag::UNLOCK != 0 {
-                    Gate::Locked
-                } else {
-                    Gate::Free
-                };
-                // No words: the wiki wrote none for a direction it did not list at all.
-                steps[to].push((from, Ask { gate, detail: None }));
-            }
-        }
-    }
-    steps
+    routes_from(&connections(worlds), origin_world(worlds))
 }
 
 #[cfg(test)]
@@ -1268,14 +959,11 @@ mod tests {
                 return None;
             }
         };
-        Some(super::parse(&json).expect("data.json is not the expected world dump"))
+        Some(super::parse(&json, false).expect("data.json is not the expected world dump"))
     }
 
-    // Getting the renumbering wrong is silent: the graph still draws, with lines to the wrong
-    // worlds.
-    #[test]
-    fn hiding_a_world_renumbers_the_connections_that_outlive_it() {
-        let world = |title: &str, secret: bool, out: &[usize]| World {
+    fn world(title: &str, secret: bool, out: &[usize]) -> World {
+        World {
             title: title.to_owned(),
             title_jp: None,
             author: String::new(),
@@ -1291,17 +979,27 @@ mod tests {
                 .map(|&target_id| super::Connection {
                     target_id,
                     flags: 0,
-                    params: Default::default(),
+                    type_params: Default::default(),
                 })
                 .collect(),
-        };
-        // 0 Nexus - 1 Debug Room (secret) - 2 Sofa Room, each joined to both the others.
-        let mut worlds = vec![
+        }
+    }
+
+    /// 0 Nexus - 1 Debug Room (secret) - 2 Sofa Room, each joined to both the others.
+    fn secretive() -> Vec<World> {
+        vec![
             world("Nexus", false, &[1, 2]),
             world("Debug Room", true, &[0, 2]),
             world("Sofa Room", false, &[0, 1]),
-        ];
-        super::hide(&mut worlds);
+        ]
+    }
+
+    // Getting the renumbering wrong is silent: the graph still draws, with lines to the wrong
+    // worlds.
+    #[test]
+    fn hiding_a_world_renumbers_the_connections_that_outlive_it() {
+        let mut worlds = secretive();
+        super::hide(&mut worlds, false);
 
         let far = |world: &World| -> Vec<usize> {
             world
@@ -1318,6 +1016,38 @@ mod tests {
             // Sofa Room has moved down to 1, and the connection each wrote to the debug room is
             // gone rather than pointing at whoever took its place.
             [("Nexus", vec![1]), ("Sofa Room", vec![0])]
+        );
+    }
+
+    #[test]
+    fn the_code_is_only_taken_once_it_has_been_typed_whole() {
+        fn type_out(code: &mut super::Code, keys: &str) -> bool {
+            keys.chars().for_each(|key| code.typed(key));
+            code.taken()
+        }
+        let code = &mut super::Code::default();
+
+        assert!(!type_out(code, "2005072"));
+        assert!(!type_out(code, "nexus"));
+        // A false start, then the code from the top.
+        assert!(type_out(code, "220050726"));
+        // Half of it, dropped by a search, so what follows completes nothing.
+        code.typed('2');
+        code.forget();
+        assert!(!type_out(code, "0050726"));
+    }
+
+    #[test]
+    fn the_code_keeps_the_secret_worlds_and_the_ways_into_them() {
+        let mut worlds = secretive();
+        super::hide(&mut worlds, true);
+
+        assert_eq!(
+            worlds
+                .iter()
+                .map(|world| (world.title.as_str(), world.connections.len()))
+                .collect::<Vec<_>>(),
+            [("Nexus", 2), ("Debug Room", 2), ("Sofa Room", 2)]
         );
     }
 
@@ -1358,7 +1088,7 @@ mod tests {
         // Every listed step is one-way *into* the world listing it, so Nexus has no way onward.
         let dump = chain(
             &["Nexus", "Sofa Room", "Far Room", "Farther Room"],
-            super::flag::NO_ENTRY,
+            yumezu_routing::ConnType::NO_ENTRY.bits(),
         );
         let visited = ["Nexus".to_owned()].into_iter().collect();
 
@@ -1393,7 +1123,7 @@ mod tests {
                     .then(|| super::Connection {
                         target_id: at + 1,
                         flags,
-                        params: Default::default(),
+                        type_params: Default::default(),
                     })
                     .into_iter()
                     .collect(),
@@ -1439,7 +1169,7 @@ mod tests {
             .iter()
             .flatten()
             .filter_map(|step| step.out.as_ref())
-            .map(super::Ask::asks)
+            .map(super::asks)
             .collect();
         let any = |wanted: &str| asks.iter().any(|asks| asks.contains(wanted));
         assert!(any(" chance"), "no odds are read out");
@@ -1464,45 +1194,12 @@ mod tests {
                 .all(|w| w.connections.iter().all(|c| c.target_id < worlds.len()))
         );
         assert!(
-            worlds.iter().any(|world| world.title == super::ORIGIN),
+            worlds
+                .iter()
+                .any(|world| world.title == yumezu_routing::START),
             "the dump has no {} to start from",
-            super::ORIGIN
+            yumezu_routing::START
         );
-    }
-
-    // The mildest demand would understate what the player has to have done.
-    #[test]
-    fn a_connection_is_named_by_its_harshest_demand() {
-        use super::{Gate, flag};
-        assert_eq!(Gate::of(0), Gate::Free);
-        assert_eq!(Gate::of(flag::ONE_WAY | flag::NO_ENTRY), Gate::Free);
-        assert_eq!(Gate::of(flag::EFFECT), Gate::Effect);
-        assert_eq!(
-            Gate::of(flag::CHANCE | flag::LOCKED_CONDITION),
-            Gate::LockedCondition
-        );
-        assert_eq!(
-            Gate::of(flag::LOCKED_CONDITION | flag::EXIT_POINT),
-            Gate::ExitPoint
-        );
-    }
-
-    // `dreamweaver`'s `give_up` is the reference for this order.
-    #[test]
-    fn a_route_gives_conditions_up_in_the_references_order() {
-        use super::Gate;
-        let order = [
-            Gate::Free,
-            Gate::Effect,
-            Gate::Chance,
-            Gate::Seasonal,
-            Gate::LockedCondition,
-            Gate::Locked,
-            Gate::ExitPoint,
-            Gate::DeadEnd,
-            Gate::Isolated,
-        ];
-        assert!(order.is_sorted());
     }
 
     #[test]
@@ -1511,7 +1208,7 @@ mod tests {
             return;
         };
         let origin = super::origin_world(&worlds);
-        assert_eq!(worlds[origin].title, super::ORIGIN);
+        assert_eq!(worlds[origin].title, yumezu_routing::START);
         let routes = super::canonical_routes(&worlds);
         assert_eq!(routes.depth[origin], Some(0));
         assert!(routes.parents[origin].is_none());
@@ -1523,6 +1220,197 @@ mod tests {
             "{reached} of {} worlds are reachable",
             worlds.len()
         );
+    }
+
+    #[test]
+    fn directions_start_where_they_are_asked_from() {
+        let Some(worlds) = load().map(|dump| dump.worlds) else {
+            return;
+        };
+        let connections = super::connections(&worlds);
+        // Well away from the origin, which is the case the canonical routes never exercise.
+        let from = (super::origin_world(&worlds) + worlds.len() / 2) % worlds.len();
+        let routes = super::routes_from(&connections, from);
+        assert_eq!(routes.depth[from], Some(0));
+        assert!(routes.parents[from].is_none());
+        let reached = routes.depth.iter().filter(|depth| depth.is_some()).count();
+        assert!(reached > 1, "{} leads nowhere", worlds[from].title);
+
+        for to in 0..worlds.len() {
+            if routes.depth[to].is_none() {
+                continue;
+            }
+            let mut step = to;
+            while let Some(parent) = routes.parents[step] {
+                let onward = connections[parent]
+                    .iter()
+                    .find(|onward| onward.world == step)
+                    .expect("a route steps between worlds that are connected");
+                assert!(
+                    onward.out.is_some(),
+                    "{} is walked to {} the way it cannot be",
+                    worlds[parent].title,
+                    worlds[step].title
+                );
+                step = parent;
+            }
+            assert_eq!(step, from, "{} is not walked from", worlds[from].title);
+        }
+    }
+
+    #[test]
+    fn a_free_way_nothing_is_shorter_than_is_offered_alone() {
+        let Some(worlds) = load().map(|dump| dump.worlds) else {
+            return;
+        };
+        let connections = super::connections(&worlds);
+        let hub = super::hub_world(&worlds);
+        let from = super::origin_world(&worlds);
+        // A neighbour walked to for nothing: no second way there is as short, and none is freer.
+        let to = connections[from]
+            .iter()
+            .find(|step| {
+                step.out
+                    .as_ref()
+                    .is_some_and(|ask| ask.gate == super::Gate::Free)
+            })
+            .expect("the origin walks somewhere for nothing")
+            .world;
+
+        let ways = super::ways(&connections, from, to, 5, hub);
+        assert_eq!(ways.len(), 1, "an alternative to walking straight there");
+        assert_eq!(ways[0].walk, [from, to]);
+    }
+
+    #[test]
+    fn the_eyeball_bomb_is_a_way_back_from_anywhere() {
+        let Some(worlds) = load().map(|dump| dump.worlds) else {
+            return;
+        };
+        let connections = super::connections(&worlds);
+        let hub = super::hub_world(&worlds).expect("the dump has the Nexus");
+        // One that does not lead there itself, so the way back is the effect and nothing else.
+        let from = connections
+            .iter()
+            .position(|steps| steps.iter().all(|step| step.world != hub))
+            .expect("a world the Nexus is not connected to");
+
+        let ways = super::ways(&connections, from, hub, 5, Some(hub));
+        let bomb = ways
+            .iter()
+            .find(|way| way.walk == [from, hub])
+            .expect("no way back with the bomb");
+        assert_eq!((bomb.asks, bomb.demands), (super::Gate::Effect, 1));
+        assert_eq!(
+            super::step_asks(&connections, Some(hub), from, hub)
+                .and_then(|ask| ask.detail)
+                .as_deref(),
+            Some(yumezu_routing::ESCAPE)
+        );
+    }
+
+    #[test]
+    fn every_way_offered_is_one_a_player_could_walk() {
+        let Some(worlds) = load().map(|dump| dump.worlds) else {
+            return;
+        };
+        let connections = super::connections(&worlds);
+        let from = super::origin_world(&worlds);
+        // Well away from the origin, so there is more than one way to be had.
+        let to = (from + worlds.len() / 2) % worlds.len();
+        let hub = super::hub_world(&worlds);
+        let ways = super::ways(&connections, from, to, 5, hub);
+        assert!(!ways.is_empty(), "no way to {}", worlds[to].title);
+        assert!(ways.len() <= 5);
+
+        for way in &ways {
+            assert_eq!(
+                (way.walk.first(), way.walk.last()),
+                (Some(&from), Some(&to))
+            );
+            let mut seen = std::collections::HashSet::new();
+            assert!(
+                way.walk.iter().all(|&world| seen.insert(world)),
+                "a way walks through the same world twice"
+            );
+            let (mut asks, mut demands) = (super::Gate::Free, 0);
+            for pair in way.walk.windows(2) {
+                let ask = super::step_asks(&connections, hub, pair[0], pair[1])
+                    .expect("a way is walked the way it can be");
+                asks = asks.max(ask.gate);
+                demands += u32::from(ask.gate != super::Gate::Free);
+            }
+            assert_eq!((asks, demands), (way.asks, way.demands));
+            let onward: Vec<_> = way
+                .walk
+                .windows(2)
+                .map(|pair| {
+                    super::step_asks(&connections, hub, pair[0], pair[1])
+                        .is_some_and(|ask| ask.gate.onward())
+                })
+                .collect();
+            assert!(
+                onward.windows(2).all(|pair| pair[0] >= pair[1]),
+                "a way walks on out of an isolated section"
+            );
+        }
+
+        let traded: Vec<_> = ways
+            .iter()
+            .map(|way| (way.demands, way.walk.len(), way.backs_out))
+            .collect();
+        assert!(
+            traded.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+            "the ways are not offered by what they ask: {traded:?}"
+        );
+        for &(demands, connections, backs_out) in &traded {
+            let room = match backs_out {
+                true => 1,
+                false => demands.max(1) as usize,
+            };
+            assert!(
+                traded
+                    .iter()
+                    .filter(|way| (way.0, way.2) == (demands, backs_out))
+                    .count()
+                    <= room,
+                "a class of demand is offered more ways than it asks things: {traded:?}"
+            );
+            assert!(
+                traded
+                    .iter()
+                    .all(|&(class, len, _)| class >= demands || len > connections),
+                "a way is offered that asks more without saving a connection: {traded:?}"
+            );
+        }
+        let walks: std::collections::HashSet<_> = ways.iter().map(|way| &way.walk).collect();
+        assert_eq!(walks.len(), ways.len(), "one way is offered twice");
+    }
+
+    #[test]
+    fn a_player_who_can_pass_everything_is_never_sent_further() {
+        let Some(worlds) = load().map(|dump| dump.worlds) else {
+            return;
+        };
+        let connections = super::connections(&worlds);
+        let from = super::origin_world(&worlds);
+        let asking = super::routes_from(&connections, from);
+        let open = yumezu_routing::routes_from_passing(&connections, from, super::Gate::Revisit);
+
+        let mut nearer = 0;
+        for (to, world) in worlds.iter().enumerate() {
+            let Some(depth) = asking.depth[to] else {
+                continue;
+            };
+            let open = open.depth[to].expect("a world reached is reached with nothing in the way");
+            assert!(
+                open <= depth,
+                "{} is further away with every gate open",
+                world.title
+            );
+            nearer += u32::from(open < depth);
+        }
+        assert!(nearer > 0, "no world is nearer with every gate open");
     }
 
     // The depth and the route the overlay walks are one thing seen twice.
@@ -1805,57 +1693,51 @@ mod tests {
         );
     }
 
+    // A revisit is no way in: a route walked in through one is the last thing `Gate::Revisit`
+    // exists for, so a world with any other way in should never be reached by one.
     #[test]
-    fn a_condition_naming_where_it_leads_is_not_a_way_in() {
-        use super::{Ask, Gate};
-        let ask = |gate, detail: &str| Ask {
-            gate,
-            detail: Some(detail.to_owned()),
-        };
-        assert_eq!(
-            ask(
-                Gate::LockedCondition,
-                "If Fluorescent Halls has been visited before"
-            )
-            .first_visit("Fluorescent Halls")
-            .gate,
-            Gate::Revisit
-        );
-        assert_eq!(
-            ask(Gate::LockedCondition, "View Ending #1 at least once")
-                .first_visit("Oil Puddle World B")
-                .gate,
-            Gate::LockedCondition
-        );
-        assert_eq!(
-            ask(Gate::Effect, "Chainsaw the Tree of Life in Blood Cell Sea")
-                .first_visit("Blood Cell Sea")
-                .gate,
-            Gate::Effect
-        );
-    }
-
-    // A world appearing here is one the wiki documents no unvisited way into, not a rule at fault.
-    #[test]
-    fn no_route_is_walked_in_through_a_revisit() {
+    fn no_route_is_walked_in_through_a_revisit_a_player_could_stand_off() {
         let Some(worlds) = load().map(|dump| dump.worlds) else {
             return;
         };
         let routes = super::canonical_routes(&worlds);
         let steps = super::walkable_steps(&worlds);
-        let walked_in: Vec<_> = routes
-            .parents
-            .iter()
-            .enumerate()
-            .filter_map(|(world, parent)| Some((world, (*parent)?)))
-            .filter(|(world, parent)| {
-                !steps[*parent]
-                    .iter()
-                    .any(|(next, step)| next == world && step.gate != super::Gate::Revisit)
-            })
-            .map(|(world, _)| worlds[world].title.as_str())
-            .collect();
-        assert_eq!(walked_in, [] as [&str; 0]);
+        let gate = |from: usize, to: usize| {
+            steps[from]
+                .iter()
+                .find(|(next, _)| *next == to)
+                .map(|(_, ask)| ask.gate)
+        };
+        // A route ending in an isolated section leaves a player where the world's other
+        // connections are behind a wall, so nothing there is a way in to anywhere.
+        let stranded = |world: usize| {
+            let mut at = world;
+            while let Some(parent) = routes.parents[at] {
+                if gate(parent, at).is_some_and(|gate| !gate.onward()) {
+                    return true;
+                }
+                at = parent;
+            }
+            false
+        };
+
+        for (world, parent) in routes.parents.iter().enumerate() {
+            let Some(parent) = *parent else { continue };
+            if gate(parent, world) != Some(super::Gate::Revisit) {
+                continue;
+            }
+            let standing: Vec<_> = (0..worlds.len())
+                .filter(|&from| gate(from, world).is_some_and(|gate| gate != super::Gate::Revisit))
+                .filter(|&from| routes.depth[from].is_some() && !stranded(from))
+                .map(|from| worlds[from].title.as_str())
+                .collect();
+            assert_eq!(
+                standing,
+                [] as [&str; 0],
+                "{} is walked in through a revisit",
+                worlds[world].title
+            );
+        }
     }
 
     // The panel reads a step's demand off `connections`; one missing there drops it silently.

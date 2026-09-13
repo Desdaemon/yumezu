@@ -68,6 +68,11 @@ untaken-worlds-hint = まだ訪れていない場所につながっている、�
 ## The route home.
 
 route-length = 原点から { $count } 接続
+path-length = { $origin } から { $count } 接続
+no-path = ここへの道はありません。
+way-length = { $count } 接続
+directions-title = { $origin } → { $destination }
+way-via = { $world } 経由
 zoom-in-world = マップを中心に
 zoom-out-route = 経路全体を表示
 trace-route = このマップへの経路をたどる
@@ -95,6 +100,10 @@ layer-depth = 深さ { $depth }
 ## The menu a right-click opens.
 
 menu-descendants = 後続マップを強調
+menu-directions-to = ここへの経路
+menu-directions-to-hint = { $world } からここまでの経路を表示
+menu-directions-from = ここからの経路
+menu-directions-from-hint = ここから { $world } までの経路を表示
 menu-open-wiki = wikiで見る
 
 ## The rocker in the corner.

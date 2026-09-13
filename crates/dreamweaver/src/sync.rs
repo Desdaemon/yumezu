@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::depth;
-use crate::model::{ConnType, Connection, Dump, TypeParams, World};
+use crate::model::{self, ConnType, Connection, Dump, TypeParams, World};
 use crate::progress::{self, Progress};
 use crate::smw;
 use crate::versions;
@@ -204,15 +204,19 @@ fn assemble<'a>(
             Attributes::default()
         });
         for attribute in &connection.attributes {
-            let Some((flag, wording)) = ConnType::of(attribute, connection) else {
+            let Some((flag, wording)) = model::conn_type(attribute, connection) else {
                 tracing::debug!("unknown connection attribute {attribute:?}");
                 continue;
             };
             merged.flags |= flag;
             if let Some((params, params_jp)) = wording.published() {
-                merged
-                    .wording
-                    .insert(flag.bits(), TypeParams { params, params_jp });
+                merged.wording.insert(
+                    flag.bits(),
+                    TypeParams {
+                        params: Some(params),
+                        params_jp,
+                    },
+                );
             }
         }
     }
@@ -349,7 +353,7 @@ fn assemble<'a>(
 struct Attributes {
     flags: ConnType,
     /// Keyed by the flag imposing the condition.
-    wording: std::collections::BTreeMap<i16, TypeParams>,
+    wording: std::collections::BTreeMap<u16, TypeParams>,
 }
 
 /// The worlds this dump is about, in [`published_place`] order.

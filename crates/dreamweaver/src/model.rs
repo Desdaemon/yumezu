@@ -3,78 +3,50 @@
 //! `data.json` is an interface with a reader on the other side, so the field names and the nesting
 //! are the reference implementation's and the serde renames are what keep them that way.
 
-use std::collections::BTreeMap;
-
 use crate::smw;
 
 use serde::{Deserialize, Serialize};
 
-bitflags::bitflags! {
-    /// Independent flags rather than a kind: a connection can be locked behind a condition *and*
-    /// seasonal *and* one-way. The numbering is the wiki explorer's own and cannot be renumbered
-    /// -- it is what the dump publishes and what the app reads back.
-    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-    pub struct ConnType: i16 {
-        /// Walkable from the world that lists it, never back.
-        const ONE_WAY = 1 << 0;
-        /// Walkable only back to the world that lists it, never from it.
-        const NO_ENTRY = 1 << 1;
-        /// This side opens a connection the far side reports as [`ConnType::LOCKED`].
-        const UNLOCK = 1 << 2;
-        const LOCKED = 1 << 3;
-        /// Leads to a part of the destination with no way onward.
-        const DEAD_END = 1 << 4;
-        /// The far side of a dead end: reachable only from that isolated part.
-        const ISOLATED = 1 << 5;
-        /// Open only to a player wearing particular effects.
-        const EFFECT = 1 << 6;
-        /// Open at random.
-        const CHANCE = 1 << 7;
-        /// Open only once something else has happened, which the wiki writes out as a sentence.
-        const LOCKED_CONDITION = 1 << 8;
-        const SHORTCUT = 1 << 9;
-        /// Where a shortcut comes out, walked backwards into the shortcut.
-        const EXIT_POINT = 1 << 10;
-        const SEASONAL = 1 << 11;
-        /// Documented but no longer walkable.
-        const INACCESSIBLE = 1 << 12;
-        const TRACKED = 1 << 13;
-    }
-}
+/// The wiki's own connection bitfield and the shape a connection is published in, both from
+/// [`yumezu_routing`]: the program that draws the dump reads a connection out of the same
+/// declaration this one writes it into.
+pub use yumezu_routing::{ConnType, Connection, TypeParams};
 
-impl ConnType {
-    /// `None` for a word this does not know: an unrecognised attribute leaves the connection
-    /// exactly as walkable as it was, so the wiki growing its vocabulary is not fatal.
-    pub fn of(attribute: &str, connection: &smw::Connection) -> Option<(Self, Wording)> {
+/// What one of the wiki's connection attributes means, as a flag and whatever words come with it.
+///
+/// `None` for a word this does not know: an unrecognised attribute leaves the connection exactly as
+/// walkable as it was, so the wiki growing its vocabulary is not fatal.
+pub fn conn_type(attribute: &str, connection: &smw::Connection) -> Option<(ConnType, Wording)> {
+    {
         let plain = |flag| Some((flag, Wording::None));
         match attribute {
-            "No Return" => plain(Self::ONE_WAY),
-            "No Entry" => plain(Self::NO_ENTRY),
-            "Unlockable" => plain(Self::UNLOCK),
-            "Locked" => plain(Self::LOCKED),
-            "Shortcut" => plain(Self::SHORTCUT),
-            "Exit Point" => plain(Self::EXIT_POINT),
-            "Dead End" => plain(Self::DEAD_END),
-            "Return" => plain(Self::ISOLATED),
+            "No Return" => plain(ConnType::ONE_WAY),
+            "No Entry" => plain(ConnType::NO_ENTRY),
+            "Unlockable" => plain(ConnType::UNLOCK),
+            "Locked" => plain(ConnType::LOCKED),
+            "Shortcut" => plain(ConnType::SHORTCUT),
+            "Exit Point" => plain(ConnType::EXIT_POINT),
+            "Dead End" => plain(ConnType::DEAD_END),
+            "Return" => plain(ConnType::ISOLATED),
             "Conditional" => Some((
-                Self::LOCKED_CONDITION,
+                ConnType::LOCKED_CONDITION,
                 Wording::Words(condition(connection.unlock_condition.as_deref()?)),
             )),
             "Needs Effect" => Some((
-                Self::EFFECT,
+                ConnType::EFFECT,
                 // Comma separated and joined no further: the wiki does not say whether one effect
                 // is enough or all are needed, so an "and" would settle it here.
                 Wording::Words(connection.effects_needed.join(",")),
             )),
             "Chance" => Some((
-                Self::CHANCE,
+                ConnType::CHANCE,
                 Wording::Words(connection.chance_percentage.clone()?),
             )),
             "Seasonal" => {
                 // The reader has one word to put a route and four it knows how to translate; the
                 // reference wrapper narrowed these the same way.
                 let season = connection.seasons_available.first()?;
-                Some((Self::SEASONAL, Wording::Translated(season.to_owned())))
+                Some((ConnType::SEASONAL, Wording::Translated(season.to_owned())))
             }
             _ => None,
         }
@@ -184,6 +156,16 @@ pub struct Author {
 
 /// [`World::id`] is the world's place in the published list rather than a database key: the reader
 /// indexes straight into the array with a [`Connection::target_id`].
+impl yumezu_routing::World for World {
+    fn title(&self) -> &str {
+        &self.title
+    }
+
+    fn connections(&self) -> &[Connection] {
+        &self.connections
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct World {
     pub id: usize,
@@ -247,27 +229,46 @@ pub struct VerGap {
     pub ver_readded: String,
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct Connection {
-    #[serde(rename = "targetId")]
-    pub target_id: usize,
-    #[serde(rename = "type")]
-    pub flags: i16,
-    /// Keyed by the flag imposing the condition. Ordered, so two dumps of the same database
-    /// compare equal as text.
-    #[serde(rename = "typeParams")]
-    pub type_params: BTreeMap<i16, TypeParams>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct TypeParams {
-    pub params: String,
-    #[serde(rename = "paramsJP")]
-    pub params_jp: Option<String>,
+/// The dump on disk, for the tests that want a real one. `None` where there is none to read, which
+/// fails only on CI, where skipping would leave those tests silently unrun.
+#[cfg(test)]
+pub fn published() -> Option<String> {
+    let file = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data.json");
+    match std::fs::read_to_string(file) {
+        Ok(json) => Some(json),
+        Err(_) => {
+            eprintln!("skipping the tests that read data.json");
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI has no data.json to read"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    // The connection is declared once and read from both ends, so a change to it that this program
+    // still writes and the app still reads could still move the bytes in between. The dump on disk
+    // is the contract: read it whole and write it back, and it has to come out the same file.
+    //
+    // A missing dump is not a failure, except on CI, where skipping would leave this unchecked.
+    #[test]
+    fn the_dump_is_written_back_exactly_as_it_was_read() {
+        let Some(json) = super::published() else {
+            return;
+        };
+        let dump: super::Dump = serde_json::from_str(&json).expect("the dump this program writes");
+        let written = serde_json::to_string(&dump).expect("a dump is always serializable");
+        assert_eq!(
+            written.len(),
+            json.trim_end().len(),
+            "the dump changed size"
+        );
+        assert!(written == json.trim_end(), "the dump changed");
+    }
+
     // The last dump is where the secret marks and the atlas cells are read from, and a sync that
     // cannot parse it silently starts from nothing: marks forgotten, cells handed out afresh. So
     // every field this has ever published has to stay readable, whether it is still published or
