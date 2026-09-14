@@ -16,7 +16,7 @@ dump-loading = 読み込み中...
 dump-failed = 世界のデータを読み込めませんでした。
 
 # 世界のデータを組み立てているサーバーが、いま何をしているか。`world::building` を参照。
-dump-task-changes = ウィキの更新を確認しています…
+dump-task-changes = wikiの更新を確認しています…
 dump-task-worlds = 世界を読み込んでいます…
 dump-task-connections = 世界のつながりを読み込んでいます…
 dump-task-assembling = グラフを組み立てています…
@@ -34,20 +34,17 @@ show-sidebar = サイドバーを表示
 fps = { $fps } fps
 graph-size = { $worlds } マップ、{ $connections } 接続
 layered = 階層表示
-layered-hint = マップを深さごとの層に分ける
+layered-hint = マップを深さごとの層に分けます
 search-worlds = マップを検索 (英名で検索可能)
 search-authors = ツクラーを検索
 search-versions = バージョンを検索
 
-# Japanese counts one and many alike, so there is one form where English has two.
 worlds = { $count } マップ
 
 showing-authors = { $total } 名
 showing-authors-cut = { $total } 名中 { $shown } 名
 showing-versions = { $total } 件のバージョン
 showing-versions-cut = { $total } 件中 { $shown } 件のバージョン
-
-## The selected world.
 
 world-author = ツクラー
 world-author-hint = ツクラーのマップをすべて表示
@@ -60,10 +57,8 @@ junction = 分岐点
 
 nothing-selected = マップをクリックすると原点までの経路をたどります。右クリックで詳細を表示します。
 
-## Where there is still somewhere to go, offered with nothing selected while a frontier is drawn.
-
 untaken-worlds = ヒントを見る
-untaken-worlds-hint = まだ訪れていない場所につながっている、これらのマップをもう一度訪れてみましょう。
+untaken-worlds-hint = まだ訪れていない場所につながるマップを、もう一度訪れてみましょう。
 
 ## The route home.
 
@@ -114,21 +109,21 @@ rocker-deeper = 深く
 ## The settings tab.
 
 hub-push = ハブの反発
-hub-push-hint = 値が大きいほど、接続の多いマップの反発力が強くなります
+hub-push-hint = 値が大きいほど、接続の多いマップが周囲から遠ざかります
 link-reach = 接続の長さ
-link-reach-hint = 接続された2つのマップが離れられる距離を階層数で表します。一方通行の接続はこの制限を受けません
+link-reach-hint = つながった2つのマップが離れられる距離を階層数で表します。一方通行の接続はこの制限を受けません
 ui-scale = UIの大きさ
-ui-scale-hint = パネルと文字を描く大きさ
+ui-scale-hint = パネルと文字の大きさ
 antialias = 輪郭をなめらかに
-antialias-hint = グラフの輪郭を整えるかどうか。フレームを描く中で最も重いため、リフレッシュレート
-    に届かないときはまずこれを切る。
-antialias-restart = 次回の起動から反映される。
+antialias-hint = グラフの輪郭をなめらかにします。フレームレートがディスプレイに届かないときは、
+    まずこれを切ってください。
+antialias-restart = 次回の起動から反映されます。
 
-leaning = 指した世界へ寄る
-leaning-hint = 一覧で世界を指すと、視点がゆっくりとそこへ寄ります。オフにすると視点は動きません。
+leaning = 指したマップへ寄る
+leaning-hint = 一覧でマップを指すと、視点がゆっくりとそこへ寄ります。オフにすると視点は動きません。
 show-controls = 操作方法を表示
 clear-cache = ダウンロードを消去
-clear-cache-hint = 実行間に保存された画像を消去します。次に見るときは再取得されます
+clear-cache-hint = 起動をまたいで保存したマップの画像を消去します。次に見るときは取得し直します
 clear-cache-clearing = 消去中...
 clear-cache-done = ダウンロードを消去しました
 clear-cache-failed = ダウンロードを消去できませんでした
@@ -139,35 +134,37 @@ update-current = これが最新のリリースです
 update-ready = { $version } が利用できます
 update-install = インストール
 update-installing = ダウンロード中...
-update-installed = インストールしました。次回の起動から反映される。
+update-installed = インストールしました。次回の起動から反映されます。
 update-failed = 更新を取得できませんでした
-last-update = データの作成: { $when } UTC
-last-update-hint = このアプリが持つウィキの写しが作られた時刻
-last-full-update = 全体の読み直し: { $when } UTC
-last-full-update-hint = 変更点だけでなくウィキ全体を読み直した時刻。ウィキが変更として報告しなかった編集はこの読み直しで反映されます
+stamp = { $year }/{ $month }/{ $day } { $hour }:{ $minute }
+
+last-update = データ更新: { $when }
+last-update-hint = データをwikiから読み取った日時
+last-full-update = 全体の再取得: { $when }
+last-full-update-hint = 全体の再取得では、wikiから最新のデータを読み直し、名前が変わったマップが残した空きを詰めます。
 
 ## YNOproject にログインして、行ったことのある世界だけを描く。
 
 yno = YNOprojectでの探検記録
 yno-loading = 記録を読み込み中...
-yno-hint = YNOprojectにログインすると、あなたの探検記録をこのグラフに表示できるようになります。
+yno-hint = YNOprojectにログインすると、探検記録をこのグラフに表示できます。
 yno-user = ユーザー名
 yno-password = パスワード
 yno-sign-in = ログイン
 yno-sign-out = ログアウト
 yno-working = ログイン中...
 yno-signed-out = セッションの有効期限が切れました。もう一度ログインしてください。
-yno-signed-in = ログイン済み。
+yno-signed-in = ログインしました。
 yno-completion = { $seen } / { $worlds }（{ $percent }%）
-yno-completion-hint = 探検記録の完成度です。
+yno-completion-hint = 発見したマップの割合です。
 yno-refresh = 更新
 yno-refresh-hint = 訪問済みのマップをYNOprojectから再度読み込みます。
-yno-promise = あなたのアカウントはYNOprojectでの探検記録を収集する以外に使われていません。yumezuは決してあなたのアカウントを他人に共有したり影響したりはしません。
+yno-promise = ユーザー名とパスワードは、YNOprojectでの探検記録を読み取るためだけに使います。yumezuがそれらを他人に共有することも、アカウントを変更することもありません。
 yno-source = アカウントの扱いについて
 menu-reveal = 【デバグ】訪問済みとみなす
-menu-reveal-hint = YNOproject
+menu-reveal-hint = 更新ボタンで新しいマップが増えた状態を再現します。
 frontier = 探検者モード
-frontier-hint = まだ訪れていないマップを隠し、訪問済みのマップから通行できるマップを探検目標として扱われています。
+frontier-hint = 訪問済みのマップだけを表示します。そこから1つ先のマップは未訪問の場所として表示します。
 unvisited-location = 未訪問の場所
 github-link = GitHubで見る
 download-for = {$platform}版をダウンロード
@@ -193,7 +190,7 @@ guide-scroll-action = 拡大縮小
 guide-rocker = 深さスイッチ
 guide-rocker-body = 右下の2つの矢印は、グラフの層をまとめて選びます。
 guide-got-it = わかった
-dont-show-again = 今後から非表示にする
+dont-show-again = 今後は表示しない
 
 ## The app, offered to a page whose browser has a package to install.
 
@@ -201,7 +198,7 @@ download-app = {$platform}アプリを入手
 
 ## The wiki's maps.
 
-map-none = 海外wikiでこのマップの地図が掲載されていません。
+map-none = 海外wikiにはこのマップの地図が掲載されていません。
 map-missing = 地図の画像を読み込めません。
 map-fit = マップ全体をウィンドウに収める
 map-maximize = ウィンドウを画面いっぱいに広げる
@@ -216,7 +213,7 @@ gate-locked = 反対側の入口から解除
 gate-locked-condition = 条件付きで解除
 gate-exit-point = ショートカットの出口から逆走
 gate-dead-end = 反対側の孤立エリアからのみ
-gate-isolated = 反対側の孤立エリアにて通行
+gate-isolated = 孤立エリアへ通じる
 
 gate-effect-detail = { $effects } が必要
 gate-chance-detail = 確率 { $chance }

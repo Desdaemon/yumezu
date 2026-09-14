@@ -90,6 +90,9 @@ reqwest = { version = "0.13.4", default-features = false, features = ["charset",
 winit = "0.30"
 # `std::time::Instant` panics on the page; this is the same type everywhere else.
 web-time = "1"
+# For the one clock this app reads: the dump's stamp, said in the reader's own zone. `wasmbind`
+# is what gets the page's offset off `Date`, there being no tzdb to read there.
+chrono = { version = "0.4", default-features = false, features = ["clock", "wasmbind"] }
 egui_material_icons = "0.7.0"
 fluent-bundle = "0.16"
 unic-langid = "0.9"

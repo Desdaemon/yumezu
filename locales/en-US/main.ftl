@@ -16,7 +16,7 @@ language = Language
 ## said if it never arrives. See `world::load`.
 
 dump-loading = Loading worlds…
-dump-failed = The world dump could not be loaded.
+dump-failed = The worlds could not be loaded.
 
 # What the server says it is doing, for a run that arrived while it was still building its first
 # dump and has to wait it out. Named for the stage rather than for the server's own word for it:
@@ -41,7 +41,7 @@ graph-size = { $worlds } worlds, { $connections } connections
 dimensions-2d = 2D
 dimensions-3d = 3D
 layered = layered
-layered-hint = Separate worlds into layers of depths
+layered-hint = Separates worlds into layers by depth
 search-worlds = Search worlds
 search-authors = Search authors
 search-versions = Search versions
@@ -88,7 +88,7 @@ nothing-selected =
 ## Where there is still somewhere to go, offered with nothing selected while a frontier is drawn.
 
 untaken-worlds = Get hints
-untaken-worlds-hint = Revisit these worlds which are connected to places you haven't been to.
+untaken-worlds-hint = Revisit these worlds that connect to places you haven't been.
 
 ## The route home.
 
@@ -159,26 +159,26 @@ rocker-deeper = Deeper
 ## The settings tab.
 
 hub-push = hub push
-hub-push-hint = The higher the value, the harder bigger worlds' repulsion force is
+hub-push-hint = Higher values push bigger worlds further from their neighbours
 link-reach = link reach
 link-reach-hint = How far apart two connected worlds may settle, in layers. One-way connections are not held to it
 ui-scale = UI scale
-ui-scale-hint = How large the panel and its text are drawn
+ui-scale-hint = How large the panel and its text are
 antialias = Smooth edges
-antialias-hint = Whether the edges of the graph are softened. The most expensive part of drawing a
-    frame, and the one thing to turn off when the rate falls short of the display.
+antialias-hint = Softens the edges of the graph. Turn this off first when the frame rate falls
+    short of your display.
 antialias-restart = Takes effect the next time yumezu starts.
 
 leaning = lean onto pointed worlds
 leaning-hint = Pointing at a world in a list carries the view onto it, slowly. Turn it off to hold the view still.
 show-controls = Show controls
 clear-cache = Clear downloads
-clear-cache-hint = Empties the pictures kept between runs, so the next look at a world fetches it again
+clear-cache-hint = Deletes the world pictures kept between runs. The next look at a world fetches it again
 clear-cache-clearing = Clearing...
 clear-cache-done = Downloads cleared
 clear-cache-failed = The downloads could not be cleared
 update-check = Check for updates
-update-check-hint = Asks GitHub whether a release newer than this build has been published
+update-check-hint = Asks GitHub whether a release newer than this build is available
 update-checking = Checking...
 update-current = This is the newest release
 update-ready = { $version } is available
@@ -186,10 +186,14 @@ update-install = Install it
 update-installing = Downloading...
 update-installed = Installed. It takes effect the next time yumezu starts.
 update-failed = The update could not be fetched
-last-update = Data from { $when } UTC
-last-update-hint = When this app's copy of the wiki was built
-last-full-update = Last read whole { $when } UTC
-last-full-update-hint = When the wiki was last read entirely rather than only where it said it had changed. An edit the wiki did not report is picked up by such a read
+# A date and a time, in the reader's own zone. The parts arrive separately, each already padded to
+# the width it is always written at, because the order and the separators are the language's.
+stamp = { $year }-{ $month }-{ $day } { $hour }:{ $minute }
+
+last-update = Updated { $when }
+last-update-hint = When this copy of the wiki data was built
+last-full-update = Last reset { $when }
+last-full-update-hint = Full resets read fresh data from the wiki and remove gaps left by renamed worlds.
 
 ## The player's own game: signing in to YNOproject, and drawing only what that account has seen.
 
@@ -204,15 +208,15 @@ yno-working = Signing in...
 yno-signed-out = That session has expired. Sign in again.
 yno-signed-in = Signed in.
 yno-completion = { $seen } / { $worlds } ({ $percent }%)
-yno-completion-hint = The percentage of worlds you have discovered.
+yno-completion-hint = How many of the worlds you have discovered.
 yno-refresh = Refresh
 yno-refresh-hint = Reveals new worlds you've since visited.
-yno-promise = Your account info is only used to retrieve your exploration progress on YNOproject. yumezu will never share your account information or modify it in any way.
+yno-promise = Your username and password are used only to read your exploration progress from YNOproject. yumezu never shares them and never changes your account.
 yno-source = Audit the YNOproject connection
 menu-reveal = [Debug] Reveal
 menu-reveal-hint = Mimics adding a new world from the Refresh button.
 frontier = Frontier Mode
-frontier-hint = Only shows worlds you've been to, and those immediately connected become unvisited locations.
+frontier-hint = Shows only worlds you've visited. Worlds one step beyond them appear as unvisited locations.
 unvisited-location = Unvisited Location
 github-link = yumezu on github
 download-for = Download for {$platform}

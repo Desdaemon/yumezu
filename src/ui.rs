@@ -2,6 +2,8 @@
 //! right-click menu, the hover tooltip, and the frame that stands in for all of it while the dump
 //! is still on its way. See [`Overlay`] and [`Panel`].
 
+use chrono::{Datelike, Timelike};
+
 use super::*;
 
 /// per-frame number swings far too much to read from a moving graph.
@@ -949,21 +951,31 @@ impl Panel {
         let Some(dump) = dump else {
             return;
         };
-        if let Some(built) = dump.last_update.as_deref() {
-            ui.label(t!("last-update", when = Self::stamped(built)))
+        if let Some(built) = dump.last_update.as_deref().and_then(Self::stamped) {
+            ui.label(t!("last-update", when = built))
                 .on_hover_text(t!("last-update-hint"));
         }
-        if let Some(whole) = dump.last_full_update.as_deref() {
-            ui.label(t!("last-full-update", when = Self::stamped(whole)))
+        if let Some(whole) = dump.last_full_update.as_deref().and_then(Self::stamped) {
+            ui.label(t!("last-full-update", when = whole))
                 .on_hover_text(t!("last-full-update-hint"));
         }
     }
 
-    /// `2026-09-07T00:05:25.000Z` read as `2026-09-07 00:05`. To the minute, the dump being built
-    /// a few times a day at most, and left in UTC as the dump stamps it: the reader's own zone
-    /// would need a calendar this app does not carry.
-    fn stamped(iso: &str) -> String {
-        iso.get(..16).unwrap_or(iso).replace('T', " ")
+    /// `2026-09-07T00:05:25.000Z` said in the reader's own zone, to the minute -- the dump is
+    /// built a few times a day at most. A stamp that will not parse is not drawn at all: a label
+    /// reading out its own name is worse than one line missing.
+    fn stamped(iso: &str) -> Option<String> {
+        let when = chrono::DateTime::parse_from_rfc3339(iso)
+            .ok()?
+            .with_timezone(&chrono::Local);
+        Some(t!(
+            "stamp",
+            year = when.year().to_string(),
+            month = format!("{:02}", when.month()),
+            day = format!("{:02}", when.day()),
+            hour = format!("{:02}", when.hour()),
+            minute = format!("{:02}", when.minute()),
+        ))
     }
 
     /// Signing in to YNOproject, and drawing only as much of the graph as that account has seen.
@@ -1988,5 +2000,34 @@ pub(super) fn open_in_browser(url: &str) {
         {
             log::warn!("{opener} could not open {url}: {error}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_family = "wasm")]
+    use wasm_bindgen_test::wasm_bindgen_test as test;
+
+    use super::*;
+
+    // Padded to a fixed width by the message rather than by the caller, which is the part a
+    // language is free to disagree about. The digits themselves are the machine's zone.
+    #[test]
+    fn a_stamp_is_said_in_the_reader_s_zone() {
+        i18n::speak_english();
+        let said = Panel::stamped("2026-09-07T00:05:25.000Z").expect("a stamp that will not say");
+        let (date, time) = said.split_once(' ').expect("a stamp with no time in it");
+        let parts: Vec<&str> = date.split('-').collect();
+        assert_eq!(parts[0].len(), 4, "{said}");
+        assert!(parts[1..].iter().all(|part| part.len() == 2), "{said}");
+        assert!(
+            time.split(':').all(|part| part.len() == 2),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_stamp_that_will_not_parse_is_not_drawn() {
+        assert_eq!(Panel::stamped("whenever"), None);
     }
 }
