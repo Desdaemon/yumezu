@@ -340,4 +340,20 @@ mod tests {
             );
         }
     }
+
+    // Every language rather than English alone: an effect falling back is an English name in the
+    // middle of a Japanese sentence, which reads as a translation nobody wrote.
+    #[test]
+    fn every_language_names_every_effect() {
+        for language in Language::ALL {
+            for effect in super::super::world::EFFECTS {
+                let id = super::super::world::effect_message(effect);
+                assert!(
+                    super::CATALOG.bundles[language as usize].has_message(&id),
+                    "{} does not name {effect}",
+                    language.tag()
+                );
+            }
+        }
+    }
 }

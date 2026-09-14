@@ -69,6 +69,8 @@ showing-versions-cut = { $shown } of { $total } versions
 
 world-author = by
 world-author-hint = Show author's worlds
+world-english-name = English name
+world-english-wiki = Open the English wiki
 world-map-hint = View maps
 world-move-up = Show parent world
 world-connections = { $count ->
@@ -285,6 +287,47 @@ gate-seasonal-detail = { $season ->
         [Winter] in Winter
        *[other] in { $season }
     }
+
+## The game's thirty-five effects, in the order it gives them. The wiki writes a condition in
+## English alone, so these are what it already says; they are messages all the same, because a
+## language that names them differently has nowhere else to say so.
+
+effect-separator = {", "}
+effect-bike = Bike
+effect-boy = Boy
+effect-chainsaw = Chainsaw
+effect-lantern = Lantern
+effect-fairy = Fairy
+effect-spacesuit = Spacesuit
+effect-glasses = Glasses
+effect-rainbow = Rainbow
+effect-wolf = Wolf
+effect-eyeball-bomb = Eyeball Bomb
+effect-telephone = Telephone
+effect-maiko = Maiko
+effect-twintails = Twintails
+effect-penguin = Penguin
+effect-insect = Insect
+effect-spring = Spring
+effect-invisible = Invisible
+effect-gakuran = Gakuran
+effect-plaster-cast = Plaster Cast
+effect-stretch = Stretch
+effect-haniwa = Haniwa
+effect-trombone = Trombone
+effect-cake = Cake
+effect-child = Child
+effect-red-riding-hood = Red Riding Hood
+effect-tissue = Tissue
+effect-bat = Bat
+effect-polygon = Polygon
+effect-teru-teru-bozu = Teru Teru Bōzu
+effect-marginal = Marginal
+effect-drum = Drum
+effect-grave = Grave
+effect-crossing = Crossing
+effect-bunny-ears = Bunny Ears
+effect-dice = Dice
 
 ## Which ways round a connection can be walked, in a sentence.
 ##

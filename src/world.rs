@@ -47,6 +47,51 @@ static JAPANESE_AUTHOR_OVERRIDES: [(&str, &str); 10] = [
     ("Nulsdodage", "nulsdodage"),
 ];
 
+/// The wiki's thirty-five effects, in the order the game gives them, and the only names it writes
+/// a condition's effects in. What each is called on screen is `effect-<name>` in the locale files.
+pub static EFFECTS: [&str; 35] = [
+    "Bike",
+    "Boy",
+    "Chainsaw",
+    "Lantern",
+    "Fairy",
+    "Spacesuit",
+    "Glasses",
+    "Rainbow",
+    "Wolf",
+    "Eyeball Bomb",
+    "Telephone",
+    "Maiko",
+    "Twintails",
+    "Penguin",
+    "Insect",
+    "Spring",
+    "Invisible",
+    "Gakuran",
+    "Plaster Cast",
+    "Stretch",
+    "Haniwa",
+    "Trombone",
+    "Cake",
+    "Child",
+    "Red Riding Hood",
+    "Tissue",
+    "Bat",
+    "Polygon",
+    "Teru Teru Bozu",
+    "Marginal",
+    "Drum",
+    "Grave",
+    "Crossing",
+    "Bunny Ears",
+    "Dice",
+];
+
+/// The message naming an effect on screen, from the name the wiki writes it by.
+pub fn effect_message(effect: &str) -> String {
+    format!("effect-{}", effect.to_lowercase().replace(' ', "-"))
+}
+
 fn japanese_author(name: &str) -> &str {
     JAPANESE_AUTHOR_OVERRIDES
         .iter()
@@ -313,15 +358,71 @@ pub fn asks(ask: &Ask) -> String {
         return gate_asks(ask.gate);
     };
     match ask.gate {
-        // Comma separated rather than joined into a sentence: the wiki does not say whether one
-        // effect is enough or all are needed, and an "and" or "or" would settle it here.
-        Gate::Effect => t!("gate-effect-detail", effects = detail.replace(',', ", ")),
+        Gate::Effect => t!("gate-effect-detail", effects = effects(detail)),
         Gate::Chance => t!("gate-chance-detail", chance = detail),
         Gate::Seasonal => t!("gate-seasonal-detail", season = detail),
         // The wiki's own sentence, which it writes in English and publishes no Japanese for.
         Gate::LockedCondition | Gate::Revisit => detail.to_owned(),
         _ => gate_asks(ask.gate),
     }
+}
+
+/// What a connection asks in effects, in whichever language is being spoken.
+///
+/// Listed as the wiki lists them and joined no further: the wiki does not say whether one effect is
+/// enough or all are needed, and an "and" or "or" would settle it here.
+fn effects(detail: &str) -> String {
+    corrected(detail)
+        .split(',')
+        .map(|listed| named_effects(listed.trim()))
+        .collect::<Vec<_>>()
+        .join(&t!("effect-separator"))
+}
+
+/// An entity the dump leaves unescaped, and a name it writes two ways.
+///
+/// TODO: corrections that belong on yume.wiki rather than here.
+fn corrected(detail: &str) -> String {
+    detail
+        .replace("&comma;", ",")
+        .replace("Teru Teru Bōzu", "Teru Teru Bozu")
+}
+
+/// The effect names within the wiki's own words, as the locale files name them. What lies between
+/// them stays as the wiki wrote it -- a separator, an "or", a note naming where an effect is worn
+/// -- because which of those it means is the wiki's to say.
+fn named_effects(detail: &str) -> String {
+    let mut said = String::with_capacity(detail.len());
+    let mut at = 0;
+    while at < detail.len() {
+        let rest = &detail[at..];
+        // A name only where a word starts and ends, so `Springfield` is not the Spring effect.
+        let starting = detail[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !before.is_alphanumeric());
+        let named = starting
+            .then(|| {
+                EFFECTS.iter().find(|effect| {
+                    rest.get(..effect.len())
+                        .is_some_and(|head| head.eq_ignore_ascii_case(effect))
+                        && !rest[effect.len()..].starts_with(char::is_alphanumeric)
+                })
+            })
+            .flatten();
+        match named {
+            Some(effect) => {
+                said.push_str(&super::i18n::format(&effect_message(effect), None));
+                at += effect.len();
+            }
+            None => {
+                let next = rest.chars().next().expect("a non-empty string has a char");
+                said.push(next);
+                at += next.len_utf8();
+            }
+        }
+    }
+    said
 }
 
 pub fn asks_emoji(ask: &Ask) -> &'static str {
@@ -1178,6 +1279,21 @@ mod tests {
                 .any(|asks| asks.starts_with("needs ") && asks != "needs an effect"),
             "no effect is named"
         );
+    }
+
+    #[test]
+    fn an_effect_is_named_and_the_words_around_it_are_left_alone() {
+        crate::i18n::speak_english();
+        let named = |detail: &str| super::named_effects(&super::corrected(detail));
+        assert_eq!(super::effects("Bat&comma; Fairy"), "Bat, Fairy");
+        assert_eq!(named("fairy"), "Fairy");
+        assert_eq!(named("Teru Teru Bozu"), "Teru Teru Bōzu");
+        assert_eq!(
+            named("Polygon (Mystery Zone A) or Crossing"),
+            "Polygon (Mystery Zone A) or Crossing"
+        );
+        // A name is a whole word, and a word that merely starts with one is not it.
+        assert_eq!(named("Springfield"), "Springfield");
     }
 
     #[test]

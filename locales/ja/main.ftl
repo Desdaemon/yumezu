@@ -48,6 +48,8 @@ showing-versions-cut = { $total } 件中 { $shown } 件のバージョン
 
 world-author = ツクラー
 world-author-hint = ツクラーのマップをすべて表示
+world-english-name = 英名
+world-english-wiki = 海外wikiで見る
 world-map-hint = 地図を見る
 world-move-up = 真上のマップを表示
 world-connections = 接続 { $count }本、
@@ -224,6 +226,46 @@ gate-seasonal-detail = { $season ->
         [Winter] 冬のみ
        *[other] { $season } のみ
     }
+
+## エフェクト. The game's own names, in the order it gives them. A list is separated the way a
+## Japanese list is, rather than with the comma the wiki writes.
+
+effect-separator = 、
+effect-bike = バイク
+effect-boy = おとこのこ
+effect-chainsaw = チェーンソー
+effect-lantern = カンテラ
+effect-fairy = ようせい
+effect-spacesuit = うちゅうふく
+effect-glasses = めがね
+effect-rainbow = にじ
+effect-wolf = おおかみ
+effect-eyeball-bomb = めだまばくだん
+effect-telephone = くろでんわ
+effect-maiko = まいこ
+effect-twintails = ツインテール
+effect-penguin = ぺんぎん
+effect-insect = むし
+effect-spring = バネ
+effect-invisible = とうめい
+effect-gakuran = がくラン
+effect-plaster-cast = ギプス
+effect-stretch = せのび
+effect-haniwa = はにわ
+effect-trombone = トロンボーン
+effect-cake = ケーキ
+effect-child = こども
+effect-red-riding-hood = あかずきん
+effect-tissue = ティッシュ
+effect-bat = コウモリ
+effect-polygon = ポリゴン
+effect-teru-teru-bozu = てるてるぼうず
+effect-marginal = マージナル
+effect-drum = ドラムかん
+effect-grave = おはか
+effect-crossing = ふみきり
+effect-bunny-ears = うさみみ
+effect-dice = サイコロ
 
 ## Which ways round a connection can be walked.
 

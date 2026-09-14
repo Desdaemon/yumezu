@@ -854,11 +854,11 @@ impl Panel {
         });
         if speaking_japanese() && data.titles[world].known() {
             ui.horizontal(|ui| {
-                ui.label("英名");
+                ui.label(t!("world-english-name"));
                 let link = world::wiki_url(&data.titles[world].en);
                 if ui
                     .hyperlink_to(&data.titles[world].en, &link)
-                    .on_hover_text("海外wikiで見る")
+                    .on_hover_text(t!("world-english-wiki"))
                     .clicked()
                 {
                     open_in_browser(&link);
@@ -1562,7 +1562,7 @@ impl Panel {
                         open_in_browser(&data.titles[world].wiki_url());
                         self.menu_taken = true;
                     }
-                    if named && speaking_japanese() && ui.button("海外wikiで見る").clicked() {
+                    if named && speaking_japanese() && ui.button(t!("world-english-wiki")).clicked() {
                         open_in_browser(&world::wiki_url(&data.titles[world].en));
                         self.menu_taken = true;
                     }
