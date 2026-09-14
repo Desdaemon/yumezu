@@ -173,9 +173,8 @@ mod tests {
     use crate::model::Dump;
     use crate::store::Routing;
 
-    fn dump() -> Option<Dump> {
-        let json = crate::model::published()?;
-        Some(serde_json::from_str(&json).expect("the dump this program writes"))
+    fn dump() -> Dump {
+        crate::model::dream_tree()
     }
 
     fn world(dump: &Dump, title: &str) -> usize {
@@ -187,14 +186,14 @@ mod tests {
 
     #[test]
     fn every_way_on_offered_is_a_way_a_player_could_take() {
-        let Some(dump) = dump() else { return };
+        let dump = dump();
         let routing = Routing::of(&dump);
         let origin = world(&dump, yumezu_routing::START);
         // Far enough that the answer is a route rather than a neighbour.
-        let dest = world(&dump, "Sugar Road");
+        let dest = world(&dump, "Marzipan Road");
 
         let ways = super::ways_on(&dump, &routing, origin, dest);
-        assert!(!ways.is_empty(), "no way from the origin to Sugar Road");
+        assert!(!ways.is_empty(), "no way from the origin to Marzipan Road");
         assert!(ways.len() <= super::CANDIDATES);
         assert!(
             ways.windows(2).all(|pair| pair[0].depth <= pair[1].depth),
@@ -215,7 +214,7 @@ mod tests {
 
     #[test]
     fn standing_at_the_destination_is_not_sent_anywhere() {
-        let Some(dump) = dump() else { return };
+        let dump = dump();
         let routing = Routing::of(&dump);
         let nexus = world(&dump, "Nexus");
         assert!(super::ways_on(&dump, &routing, nexus, nexus).is_empty());
@@ -223,7 +222,7 @@ mod tests {
 
     #[test]
     fn a_door_the_origin_does_not_list_is_still_described() {
-        let Some(dump) = dump() else { return };
+        let dump = dump();
         let routing = Routing::of(&dump);
         let unlisted = (0..dump.worlds.len()).find_map(|from| {
             let to = routing.connections[from].iter().find(|step| {

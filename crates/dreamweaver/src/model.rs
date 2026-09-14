@@ -229,44 +229,83 @@ pub struct VerGap {
     pub ver_readded: String,
 }
 
-/// The dump on disk, for the tests that want a real one. `None` where there is none to read, which
-/// fails only on CI, where skipping would leave those tests silently unrun.
+/// The invented tree of [`yumezu_routing::fixture`], as a dump this program could have published.
 #[cfg(test)]
-pub fn published() -> Option<String> {
-    let file = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data.json");
-    match std::fs::read_to_string(file) {
-        Ok(json) => Some(json),
-        Err(_) => {
-            eprintln!("skipping the tests that read data.json");
-            assert!(
-                std::env::var_os("CI").is_none(),
-                "CI has no data.json to read"
-            );
-            None
-        }
+pub fn dream_tree() -> Dump {
+    let worlds = yumezu_routing::fixture::dream_tree()
+        .into_iter()
+        .enumerate()
+        .map(|(id, place)| World {
+            id,
+            cell: Some(id),
+            title: place.title.to_owned(),
+            // Every optional field carries a value somewhere in the tree, or
+            // `the_dump_is_written_back_exactly_as_it_was_read` has nothing to lose track of.
+            title_jp: (id % 2 == 0).then(|| format!("\u{68a6}{id}")),
+            author: "Yumemiru".to_owned(),
+            depth: 0,
+            min_depth: 0,
+            filename: format!("{}.png", place.title.replace([' ', '\''], "_")),
+            map_url: (id % 3 == 0).then(|| format!("map{id}.png|map{id}b.png")),
+            map_label: (id % 3 == 0).then(|| "Ground floor|Upper floor".to_owned()),
+            bgm_url: (id % 4 == 0).then(|| format!("bgm{id}.mp3")),
+            bgm_label: (id % 4 == 0).then(|| "Lantern^by the water".to_owned()),
+            ver_added: Some(format!("0.1{id:02}")),
+            ver_removed: (id == 9).then(|| "0.118".to_owned()),
+            ver_updated: (id == 5).then(|| {
+                vec![VerUpdated {
+                    ver_updated: "0.112".to_owned(),
+                    update_type: "+".to_owned(),
+                }]
+            }),
+            ver_gaps: (id == 11).then(|| {
+                vec![VerGap {
+                    ver_removed: "0.113".to_owned(),
+                    ver_readded: "0.114".to_owned(),
+                }]
+            }),
+            removed: id == 9,
+            secret: false,
+            connections: place.connections,
+        })
+        .collect();
+
+    Dump {
+        worlds,
+        authors: vec![Author {
+            name: "Yumemiru".to_owned(),
+            name_jp: None,
+        }],
+        versions: (0..16)
+            .map(|n| Version {
+                name: format!("0.1{n:02}"),
+                authors: Some("Yumemiru".to_owned()),
+                release_date: Some(format!("2020-01-{:02}", n + 1)),
+            })
+            .collect(),
+        effects: vec![],
+        menu_themes: vec![],
+        wallpapers: vec![],
+        bgm_tracks: vec![],
+        last_update: Some("2020-01-16T00:00:00Z".to_owned()),
+        last_full_update: Some("2020-01-16T00:00:00Z".to_owned()),
+        is_admin: false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     // The connection is declared once and read from both ends, so a change to it that this program
-    // still writes and the app still reads could still move the bytes in between. The dump on disk
-    // is the contract: read it whole and write it back, and it has to come out the same file.
-    //
-    // A missing dump is not a failure, except on CI, where skipping would leave this unchecked.
+    // still writes and the app still reads could still move the bytes in between. What this program
+    // writes is the contract: read it back and write it again, and it has to come out the same.
     #[test]
     fn the_dump_is_written_back_exactly_as_it_was_read() {
-        let Some(json) = super::published() else {
-            return;
-        };
-        let dump: super::Dump = serde_json::from_str(&json).expect("the dump this program writes");
-        let written = serde_json::to_string(&dump).expect("a dump is always serializable");
+        let json = serde_json::to_string(&super::dream_tree()).expect("a dump is serializable");
+        let read: super::Dump = serde_json::from_str(&json).expect("the dump this program writes");
         assert_eq!(
-            written.len(),
-            json.trim_end().len(),
-            "the dump changed size"
+            serde_json::to_string(&read).expect("a dump is serializable"),
+            json
         );
-        assert!(written == json.trim_end(), "the dump changed");
     }
 
     // The last dump is where the secret marks and the atlas cells are read from, and a sync that
@@ -291,3 +330,4 @@ mod tests {
         assert_eq!(world.cell, None);
     }
 }
+

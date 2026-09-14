@@ -942,24 +942,27 @@ mod tests {
 
     use super::World;
 
-    // Read off disk rather than fetched, so the tests neither need a server running nor answer
-    // differently depending on what one has published since. `just dreamweaver` writes it.
-    //
-    // A missing dump is not a failure of these tests, except on CI, where skipping would leave the
-    // dump unchecked. A dump that is present but does not parse fails everywhere.
-    fn load() -> Option<super::Dump> {
-        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/data.json");
-        let json = match std::fs::read_to_string(file) {
-            Ok(json) => json,
-            Err(_) => {
-                eprintln!("skipping data.json tests");
-                if std::env::var_os("CI").is_none() {
-                    eprintln!("run `just dreamweaver` to generate a data.json dump");
-                }
-                return None;
-            }
-        };
-        Some(super::parse(&json, false).expect("data.json is not the expected world dump"))
+    // The invented tree of `yumezu_routing::fixture`, as worlds this side reads. Built rather than
+    // parsed: `data.json` is the wiki's to distribute and is not in the tree, and what this program
+    // does with a dump it has is what these tests are about.
+    fn load() -> Vec<World> {
+        yumezu_routing::fixture::dream_tree()
+            .into_iter()
+            .enumerate()
+            .map(|(id, place)| World {
+                title: place.title.to_owned(),
+                title_jp: None,
+                author: "Yumemiru".to_owned(),
+                image: String::new(),
+                added: Some(format!("0.1{id:02}")),
+                map_url: None,
+                map_label: None,
+                secret: false,
+                cell: Some(id),
+                unknown: false,
+                connections: place.connections,
+            })
+            .collect()
     }
 
     fn world(title: &str, secret: bool, out: &[usize]) -> World {
@@ -1140,9 +1143,7 @@ mod tests {
 
     #[test]
     fn a_connection_reads_the_same_from_either_end() {
-        let Some(worlds) = load().map(|dump| dump.worlds) else {
-            return;
-        };
+        let worlds = load();
         let connections = super::connections(&worlds);
         for (from, steps) in connections.iter().enumerate() {
             for step in steps {
@@ -1158,12 +1159,10 @@ mod tests {
     }
 
     #[test]
-    fn a_condition_is_read_out_in_the_wikis_own_words() {
+    fn a_condition_is_read_out_in_the_words_the_dump_carries() {
         // The words asserted below are the English ones.
         crate::i18n::speak_english();
-        let Some(worlds) = load().map(|dump| dump.worlds) else {
-            return;
-        };
+        let worlds = load();
         let connections = super::connections(&worlds);
         let asks: Vec<String> = connections
             .iter()
@@ -1181,32 +1180,9 @@ mod tests {
         );
     }
 
-    // A field renamed or retyped in the dump would otherwise break the visualization silently.
-    #[test]
-    fn dump_parses() {
-        let Some(worlds) = load().map(|dump| dump.worlds) else {
-            return;
-        };
-        assert!(worlds.len() > 1000, "{} worlds", worlds.len());
-        assert!(
-            worlds
-                .iter()
-                .all(|w| w.connections.iter().all(|c| c.target_id < worlds.len()))
-        );
-        assert!(
-            worlds
-                .iter()
-                .any(|world| world.title == yumezu_routing::START),
-            "the dump has no {} to start from",
-            yumezu_routing::START
-        );
-    }
-
     #[test]
     fn the_origin_roots_the_route_tree() {
-        let Some(worlds) = load().map(|dump| dump.worlds) else {
-            return;
-        };
+        let worlds = load();
         let origin = super::origin_world(&worlds);
         assert_eq!(worlds[origin].title, yumezu_routing::START);
         let routes = super::canonical_routes(&worlds);
@@ -1214,19 +1190,19 @@ mod tests {
         assert!(routes.parents[origin].is_none());
         // What a seed at the wrong world does not do: everything unreached is at no depth, and
         // the graph draws that as one layer.
-        let reached = routes.depth.iter().filter(|depth| depth.is_some()).count();
-        assert!(
-            reached > worlds.len() * 9 / 10,
-            "{reached} of {} worlds are reachable",
-            worlds.len()
-        );
+        let unreached: Vec<_> = routes
+            .depth
+            .iter()
+            .enumerate()
+            .filter(|(_, depth)| depth.is_none())
+            .map(|(world, _)| worlds[world].title.as_str())
+            .collect();
+        assert_eq!(unreached, [] as [&str; 0]);
     }
 
     #[test]
     fn directions_start_where_they_are_asked_from() {
-        let Some(worlds) = load().map(|dump| dump.worlds) else {
-            return;
-        };
+        let worlds = load();
         let connections = super::connections(&worlds);
         // Well away from the origin, which is the case the canonical routes never exercise.
         let from = (super::origin_world(&worlds) + worlds.len() / 2) % worlds.len();
@@ -1260,9 +1236,7 @@ mod tests {
 
     #[test]
     fn a_free_way_nothing_is_shorter_than_is_offered_alone() {
-        let Some(worlds) = load().map(|dump| dump.worlds) else {
-            return;
-        };
+        let worlds = load();
         let connections = super::connections(&worlds);
         let hub = super::hub_world(&worlds);
         let from = super::origin_world(&worlds);
@@ -1284,9 +1258,7 @@ mod tests {
 
     #[test]
     fn the_eyeball_bomb_is_a_way_back_from_anywhere() {
-        let Some(worlds) = load().map(|dump| dump.worlds) else {
-            return;
-        };
+        let worlds = load();
         let connections = super::connections(&worlds);
         let hub = super::hub_world(&worlds).expect("the dump has the Nexus");
         // One that does not lead there itself, so the way back is the effect and nothing else.
@@ -1311,9 +1283,7 @@ mod tests {
 
     #[test]
     fn every_way_offered_is_one_a_player_could_walk() {
-        let Some(worlds) = load().map(|dump| dump.worlds) else {
-            return;
-        };
+        let worlds = load();
         let connections = super::connections(&worlds);
         let from = super::origin_world(&worlds);
         // Well away from the origin, so there is more than one way to be had.
@@ -1389,9 +1359,7 @@ mod tests {
 
     #[test]
     fn a_player_who_can_pass_everything_is_never_sent_further() {
-        let Some(worlds) = load().map(|dump| dump.worlds) else {
-            return;
-        };
+        let worlds = load();
         let connections = super::connections(&worlds);
         let from = super::origin_world(&worlds);
         let asking = super::routes_from(&connections, from);
@@ -1416,9 +1384,7 @@ mod tests {
     // The depth and the route the overlay walks are one thing seen twice.
     #[test]
     fn depth_is_the_length_of_the_canonical_route() {
-        let Some(worlds) = load().map(|dump| dump.worlds) else {
-            return;
-        };
+        let worlds = load();
         let routes = super::canonical_routes(&worlds);
         for (world, depth) in routes.depth.iter().enumerate() {
             let Some(depth) = *depth else {
@@ -1445,9 +1411,7 @@ mod tests {
     // Compared against a walk ignoring both direction and conditions.
     #[test]
     fn conditions_only_ever_push_a_world_deeper() {
-        let Some(worlds) = load().map(|dump| dump.worlds) else {
-            return;
-        };
+        let worlds = load();
         let routes = super::canonical_routes(&worlds);
 
         let mut neighbours = vec![Vec::new(); worlds.len()];
@@ -1474,7 +1438,7 @@ mod tests {
             }
         }
 
-        let mut deeper = 0;
+        let mut deeper = Vec::new();
         for (world, (canonical, shortest)) in routes.depth.iter().zip(&shortest).enumerate() {
             let (Some(canonical), Some(shortest)) = (canonical, shortest) else {
                 continue;
@@ -1484,39 +1448,24 @@ mod tests {
                 "{} is {canonical} deep but {shortest} hops away",
                 worlds[world].title
             );
-            deeper += (canonical > shortest) as usize;
-        }
-        // Not a threshold worth tuning: it only has to prove the rule bites at all.
-        assert!(deeper > worlds.len() / 4, "only {deeper} worlds moved");
-    }
-
-    // Anything unreached that the wiki documents a connection to is a misread flag closing a
-    // connection that is open. The one world that really did document a way out and no way in was
-    // `Gallery of Me`, which the dump marks secret and `hide` takes out with the connections into
-    // it.
-    #[test]
-    fn a_world_is_unreached_only_where_the_wiki_leaves_no_way_in() {
-        let Some(worlds) = load().map(|dump| dump.worlds) else {
-            return;
-        };
-        let routes = super::canonical_routes(&worlds);
-        let mut touched = vec![false; worlds.len()];
-        for (at, world) in worlds.iter().enumerate() {
-            for connection in &world.connections {
-                touched[at] = true;
-                touched[connection.target_id] = true;
+            if canonical > shortest {
+                deeper.push(worlds[world].title.as_str());
             }
         }
-        let unreachable: Vec<_> = routes
-            .depth
-            .iter()
-            .enumerate()
-            .filter(|(_, depth)| depth.is_none())
-            .map(|(world, _)| world)
-            .filter(|&world| touched[world])
-            .map(|world| worlds[world].title.as_str())
-            .collect();
-        assert_eq!(unreachable, [] as [&str; 0]);
+        // The worlds the two conditional shortcuts stand in front of.
+        assert_eq!(
+            deeper,
+            [
+                "Static Shoreline",
+                "Clockwork Dunes",
+                "Chalk Observatory",
+                "Hollow Carnival",
+                "Glass Aviary",
+                "Ember Terrace",
+                "Drowned Switchboard",
+                "Tin Solarium",
+            ]
+        );
     }
 
     #[test]
@@ -1528,63 +1477,6 @@ mod tests {
             depth: vec![Some(0), Some(1), Some(2), Some(3), Some(1)],
         };
         assert_eq!(routes.descendant_counts(), [4, 2, 1, 0, 0]);
-    }
-
-    #[test]
-    fn every_world_is_credited_and_dated_once() {
-        let Some(dump) = load() else { return };
-        let (authors, author_of) = dump.authors();
-        assert!(authors.len() > 100, "{} authors", authors.len());
-        for (world, &author) in author_of.iter().enumerate() {
-            assert!(
-                authors[author].worlds.contains(&world),
-                "{} is not among its author's work",
-                dump.worlds[world].title
-            );
-        }
-        assert_eq!(
-            authors.iter().map(|by| by.worlds.len()).sum::<usize>(),
-            dump.worlds.len()
-        );
-        // Busiest first, which is the order the catalog offers them in.
-        assert!(
-            authors
-                .windows(2)
-                .all(|pair| pair[0].worlds.len() >= pair[1].worlds.len())
-        );
-        // The credits join onto the worlds by name, so a change in either spelling would show up
-        // as nobody having a Japanese name at all.
-        assert!(
-            authors
-                .iter()
-                .filter(|by| by.name.names().count() == 2)
-                .count()
-                > 10
-        );
-
-        // Not every world: a handful are undated, and belong to no release.
-        let versions = dump.versions();
-        let dated: usize = versions.iter().map(|version| version.worlds.len()).sum();
-        assert!(dated > dump.worlds.len() * 9 / 10, "{dated} dated");
-        assert!(versions.iter().all(|version| !version.worlds.is_empty()));
-    }
-
-    // The join is made on more than equality, or a release the two halves spell differently comes
-    // out twice, undated, at the end.
-    #[test]
-    fn a_release_is_one_version_however_the_dump_spells_it() {
-        let Some(versions) = load().map(|dump| dump.versions()) else {
-            return;
-        };
-        assert_eq!(
-            versions
-                .iter()
-                .filter(|it| it.name == "0.129c patch 13")
-                .count(),
-            1
-        );
-        // Newest first and dated, which is what the history's own order buys.
-        assert!(versions[0].released > versions[1].released);
     }
 
     #[test]
@@ -1697,9 +1589,7 @@ mod tests {
     // exists for, so a world with any other way in should never be reached by one.
     #[test]
     fn no_route_is_walked_in_through_a_revisit_a_player_could_stand_off() {
-        let Some(worlds) = load().map(|dump| dump.worlds) else {
-            return;
-        };
+        let worlds = load();
         let routes = super::canonical_routes(&worlds);
         let steps = super::walkable_steps(&worlds);
         let gate = |from: usize, to: usize| {
@@ -1721,11 +1611,25 @@ mod tests {
             false
         };
 
-        for (world, parent) in routes.parents.iter().enumerate() {
-            let Some(parent) = *parent else { continue };
-            if gate(parent, world) != Some(super::Gate::Revisit) {
-                continue;
-            }
+        let walked_in: Vec<_> = routes
+            .parents
+            .iter()
+            .enumerate()
+            .filter(|(world, parent)| {
+                parent.is_some_and(|parent| gate(parent, *world) == Some(super::Gate::Revisit))
+            })
+            .map(|(world, _)| world)
+            .collect();
+        // Without this the loop below has nothing to iterate and the test passes proving nothing.
+        assert_eq!(
+            walked_in
+                .iter()
+                .map(|&world| worlds[world].title.as_str())
+                .collect::<Vec<_>>(),
+            ["Ember Terrace"]
+        );
+
+        for world in walked_in {
             let standing: Vec<_> = (0..worlds.len())
                 .filter(|&from| gate(from, world).is_some_and(|gate| gate != super::Gate::Revisit))
                 .filter(|&from| routes.depth[from].is_some() && !stranded(from))
@@ -1743,9 +1647,7 @@ mod tests {
     // The panel reads a step's demand off `connections`; one missing there drops it silently.
     #[test]
     fn every_canonical_step_is_walkable_where_the_panel_reads_it() {
-        let Some(worlds) = load().map(|dump| dump.worlds) else {
-            return;
-        };
+        let worlds = load();
         let routes = super::canonical_routes(&worlds);
         let connections = super::connections(&worlds);
         for (world, parent) in routes.parents.iter().enumerate() {

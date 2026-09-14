@@ -8,6 +8,8 @@
 //! Saying it is the reader's own business: a [`Gate`] carries the wiki's own words where it wrote
 //! any, and nothing here names a condition in anyone's language.
 
+#[doc(hidden)]
+pub mod fixture;
 mod routes;
 
 pub use routes::{Routes, Way, routes_from, routes_from_passing, routes_toward, step_asks, ways};
