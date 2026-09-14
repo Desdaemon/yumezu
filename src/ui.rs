@@ -485,6 +485,24 @@ fn other_end(read: &PanelData, world: usize) -> Option<usize> {
         .filter(|&other| other != world)
 }
 
+/// A right-click on a release, offering the history page it is written up on. The Japanese wiki
+/// writes its own history rather than translating the English one, so a reader there is offered
+/// both: the same pair a world's own menu offers.
+fn wiki_menu(row: &egui::Response, release: &world::Version) {
+    egui::Popup::context_menu(row)
+        .style(egui::style::StyleModifier::default())
+        .show(|ui| {
+            if ui.button(t!("menu-open-wiki")).clicked() {
+                open_in_browser(&release.wiki_url());
+                ui.close();
+            }
+            if speaking_japanese() && ui.button(t!("world-english-wiki")).clicked() {
+                open_in_browser(&world::version_url(&release.name));
+                ui.close();
+            }
+        });
+}
+
 /// What a world in a walk does when it is pressed.
 enum Rows {
     /// Traces its own route home, which is what a route is read down to find.
@@ -1026,9 +1044,11 @@ impl Panel {
                     ),
                 },
             );
-            if ui.add(tile).clicked() {
+            let row = ui.add(tile);
+            if row.clicked() {
                 self.lit = Some(Some(Highlight::Version(version)));
             }
+            wiki_menu(&row, release);
             // Nothing until the atlas arrives, and nothing ever if it cannot be had: the rest of
             // the row already says what the release is.
             let Some(sheet) = &data.sheet else { return };
@@ -1698,7 +1718,16 @@ impl Panel {
             // A release is a list like an author's work, and read the same way.
             Some(Highlight::Version(version)) => {
                 let release = &data.versions[version];
-                ui.strong(&release.name);
+                ui.horizontal(|ui| {
+                    ui.strong(&release.name);
+                    if ui
+                        .button(ICON_OPEN_IN_NEW)
+                        .on_hover_text(t!("menu-open-wiki"))
+                        .clicked()
+                    {
+                        open_in_browser(&release.wiki_url());
+                    }
+                });
                 if !release.released.is_empty() {
                     ui.label(t!("version-released", released = &release.released));
                 }

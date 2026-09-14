@@ -315,6 +315,18 @@ pub struct Version {
     pub worlds: Vec<usize>,
 }
 
+impl Version {
+    /// Where the release is written up, which is a section of a page on either wiki rather than a
+    /// page of its own. See [`version_url`] and [`yume2kki_t_version_url`].
+    pub fn wiki_url(&self) -> String {
+        if super::i18n::speaking_japanese() {
+            yume2kki_t_version_url(&self.name)
+        } else {
+            version_url(&self.name)
+        }
+    }
+}
+
 /// Both wikis list one person's whole body of work but in different shapes, so which to open is
 /// [`Author::wiki_url`]'s to answer rather than the caller's.
 pub struct Author {
@@ -999,13 +1011,22 @@ fn collect_url_titles(value: &serde_json::Value, pages: &mut Pages) {
     }
 }
 
+/// The page an unlisted name is written up on: a world names one of its areas after itself and the
+/// area, and only the world has a page. The colon is where the wiki's own `Locationbox` cuts, in
+/// either width.
+fn area_page(title: &str) -> &str {
+    title.split([':', '：']).next().unwrap_or(title)
+}
+
 pub fn yume2kki_t_url(title: &str) -> String {
     page_url(PAGES.get().unwrap_or(&Pages::new()), title)
 }
 
 /// An override may name an anchor within a page as well as the page, and that `#` has to stay one.
 fn page_url(pages: &Pages, title: &str) -> String {
-    let page = pages.get(title).map_or(title, String::as_str);
+    let page = pages
+        .get(title)
+        .map_or_else(|| area_page(title), String::as_str);
     let (page, anchor) = match page.split_once('#') {
         Some((page, anchor)) => (page, Some(anchor)),
         None => (page, None),
@@ -1034,6 +1055,109 @@ pub fn yume2kki_t_author_url(author: &str) -> String {
     // space stays a space rather than the underscore a page name would want.
     append_query_encoded(author, &mut url);
     append_query_encoded("氏", &mut url);
+    url
+}
+
+/// A release name as both wikis break it down: `0.129c patch 27` is release 129, revision `c`,
+/// patch 27. `None` for the handful of names from the game's first years that the dump writes
+/// some other way, which are nobody's section.
+struct ReleaseName {
+    number: u32,
+    /// 0 for a release with no letter, 1 for `a`.
+    revision: u32,
+    patch: Option<u32>,
+}
+
+fn read_release(name: &str) -> Option<ReleaseName> {
+    let rest = name.strip_prefix("0.")?;
+    let (number, rest) = rest.split_at_checked(3)?;
+    let number = number.parse().ok()?;
+    let mut chars = rest.chars();
+    let (revision, rest) = match chars.next() {
+        Some(letter @ 'a'..='z') => (letter as u32 - 'a' as u32 + 1, chars.as_str()),
+        _ => (0, rest),
+    };
+    let patch = match rest.trim_start().strip_prefix("patch") {
+        Some(patch) => Some(patch.trim_start().parse().ok()?),
+        None if rest.is_empty() => None,
+        None => return None,
+    };
+    Some(ReleaseName {
+        number,
+        revision,
+        patch,
+    })
+}
+
+const VERSION_HISTORY: &str = "https://yume.wiki/2kki/Version_History";
+
+/// The English wiki files five releases to a page, named for the range it holds and counting down.
+/// Its patches share their release's section, so a patch opens where it was applied.
+pub fn version_url(name: &str) -> String {
+    let Some(release) = read_release(name) else {
+        return VERSION_HISTORY.to_owned();
+    };
+    // The first hundred releases are two pages of their own, and the page that starts the regular
+    // run holds six rather than five.
+    let (high, low) = match release.number {
+        0..=89 => (89, 0),
+        90..=99 => (99, 90),
+        100..=105 => (105, 100),
+        number => {
+            let high = number.div_ceil(5) * 5;
+            (high, high - 4)
+        }
+    };
+    let revision = match release.revision {
+        0 => String::new(),
+        revision => char::from(b'a' + revision as u8 - 1).to_string(),
+    };
+    format!(
+        "{VERSION_HISTORY}/{high:04}-{low:04}#Version_0.{number:03}{revision}",
+        number = release.number
+    )
+}
+
+/// The Japanese wiki's own history page, which is the ten most recent releases and nothing else.
+const UPDATE_HISTORY: &str = "ゆめ２っき更新履歴";
+
+/// Where each of that wiki's past-updates pages starts, highest first, by the code its anchors are
+/// numbered with. The boundaries are the wiki's own: a page is cut when it grows too long rather
+/// than at a round release, so there is nothing to compute them from.
+const PAST_UPDATES: [(u32, &str); 12] = [
+    (1294, "11"),
+    (1280, "10"),
+    (1265, "09"),
+    (1244, "08"),
+    (1226, "07"),
+    (1204, "06"),
+    (1184, "05"),
+    (1140, "04"),
+    (1080, "03"),
+    (1007, "02"),
+    (861, "01"),
+    (0, "00"),
+];
+
+/// The Japanese wiki anchors a release by number and revision run together -- `0.129d` is
+/// `ver1294` -- and gives most, though not all, patches an anchor of their own. A patch it does
+/// not name lands at the top of the right page.
+pub fn yume2kki_t_version_url(name: &str) -> String {
+    let mut url = String::from(YUME2KKI_T);
+    let Some(release) = read_release(name) else {
+        append_encoded(UPDATE_HISTORY, &mut url);
+        return url;
+    };
+    let code = release.number * 10 + release.revision;
+    let page = PAST_UPDATES
+        .iter()
+        .find(|&&(start, _)| code >= start)
+        .map_or("", |&(_, page)| page);
+    append_encoded(&format!("{UPDATE_HISTORY}/過去の更新内容{page}"), &mut url);
+    url.push_str(&format!("#ver{code:04}"));
+    if let Some(patch) = release.patch {
+        url.push_str(&format!("p{patch}"));
+    }
     url
 }
 
@@ -1626,6 +1750,64 @@ mod tests {
     }
 
     #[test]
+    fn a_release_addresses_the_section_it_is_written_up_in() {
+        assert_eq!(
+            super::version_url("0.129d"),
+            "https://yume.wiki/2kki/Version_History/0130-0126#Version_0.129d"
+        );
+        // The English wiki gives a patch no section of its own, so it opens on the release it was
+        // applied to.
+        assert_eq!(
+            super::version_url("0.129c patch 27"),
+            "https://yume.wiki/2kki/Version_History/0130-0126#Version_0.129c"
+        );
+        // The page that starts the regular run holds six releases, and the two before it hold the
+        // first hundred between them.
+        assert_eq!(
+            super::version_url("0.100"),
+            "https://yume.wiki/2kki/Version_History/0105-0100#Version_0.100"
+        );
+        assert_eq!(
+            super::version_url("0.090"),
+            "https://yume.wiki/2kki/Version_History/0099-0090#Version_0.090"
+        );
+        assert_eq!(
+            super::version_url("0.010"),
+            "https://yume.wiki/2kki/Version_History/0089-0000#Version_0.010"
+        );
+        // A name from the first years that the wiki never filed this way.
+        assert_eq!(
+            super::version_url("0.078+"),
+            "https://yume.wiki/2kki/Version_History"
+        );
+    }
+
+    #[test]
+    fn a_release_addresses_the_japanese_wikis_own_history() {
+        assert_eq!(
+            super::yume2kki_t_version_url("0.129d"),
+            "https://wikiwiki.jp/yume2kki-t/%E3%82%86%E3%82%81%EF%BC%92%E3%81%A3%E3%81%8D%E6%9B%B4%E6%96%B0%E5%B1%A5%E6%AD%B4/%E9%81%8E%E5%8E%BB%E3%81%AE%E6%9B%B4%E6%96%B0%E5%86%85%E5%AE%B911#ver1294"
+        );
+        assert_eq!(
+            super::yume2kki_t_version_url("0.129c patch 27"),
+            "https://wikiwiki.jp/yume2kki-t/%E3%82%86%E3%82%81%EF%BC%92%E3%81%A3%E3%81%8D%E6%9B%B4%E6%96%B0%E5%B1%A5%E6%AD%B4/%E9%81%8E%E5%8E%BB%E3%81%AE%E6%9B%B4%E6%96%B0%E5%86%85%E5%AE%B910#ver1293p27"
+        );
+        // Where the dump writes a patch without the space the wiki's own names have.
+        assert_eq!(
+            super::yume2kki_t_version_url("0.106 patch2"),
+            "https://wikiwiki.jp/yume2kki-t/%E3%82%86%E3%82%81%EF%BC%92%E3%81%A3%E3%81%8D%E6%9B%B4%E6%96%B0%E5%B1%A5%E6%AD%B4/%E9%81%8E%E5%8E%BB%E3%81%AE%E6%9B%B4%E6%96%B0%E5%86%85%E5%AE%B902#ver1060p2"
+        );
+        assert_eq!(
+            super::yume2kki_t_version_url("0.010"),
+            "https://wikiwiki.jp/yume2kki-t/%E3%82%86%E3%82%81%EF%BC%92%E3%81%A3%E3%81%8D%E6%9B%B4%E6%96%B0%E5%B1%A5%E6%AD%B4/%E9%81%8E%E5%8E%BB%E3%81%AE%E6%9B%B4%E6%96%B0%E5%86%85%E5%AE%B900#ver0100"
+        );
+        assert_eq!(
+            super::yume2kki_t_version_url("0.078+"),
+            "https://wikiwiki.jp/yume2kki-t/%E3%82%86%E3%82%81%EF%BC%92%E3%81%A3%E3%81%8D%E6%9B%B4%E6%96%B0%E5%B1%A5%E6%AD%B4"
+        );
+    }
+
+    #[test]
     fn an_author_addresses_a_tag_on_the_japanese_wiki() {
         assert_eq!(
             super::yume2kki_t_author_url("185 Go"),
@@ -1684,6 +1866,10 @@ mod tests {
             super::page_url(&pages, "ミニゲームA"),
             "https://wikiwiki.jp/yume2kki-t/%E3%83%9F%E3%83%8B%E3%82%B2%E3%83%BC%E3%83%A0/A"
         );
+        // An area the list does not carry: the world it is named after is what has a page.
+        let potato = "https://wikiwiki.jp/yume2kki-t/%E3%83%9D%E3%83%86%E5%A1%94";
+        assert_eq!(super::page_url(&pages, "ポテ塔：サカナ"), potato);
+        assert_eq!(super::page_url(&pages, "ポテ塔: バーガーショップ"), potato);
     }
 
     // Nothing off to the side, however near.
