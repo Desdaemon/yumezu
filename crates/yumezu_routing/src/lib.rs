@@ -236,6 +236,12 @@ impl Gate {
         .map(|(_, gate)| gate)
     }
 
+    /// Whether a player can meet this where they stand, as against a door opened from its far
+    /// side, which is no way in for anyone who has not already been through it the other way.
+    pub fn in_place(self) -> bool {
+        self <= Gate::LockedCondition
+    }
+
     /// Whether a walk can go on from a step of this kind. A dead end lands a player in a part of
     /// the world with no way out of it but back, so a route can end on one and never pass through
     /// it. Not a condition: no effect and no unlock opens a way onward that is not there.
@@ -371,7 +377,7 @@ pub fn walkable_steps(worlds: &[impl World]) -> Vec<Vec<(usize, Ask)>> {
 mod tests {
     use super::{
         Ask, ConnType, Connection, Demand, Gate, Step, TypeParams, World, connections,
-        routes_toward,
+        routes_toward, ways,
     };
 
     struct Place {
@@ -508,6 +514,40 @@ mod tests {
                 .gate,
             Gate::Effect
         );
+    }
+
+    #[test]
+    fn a_way_through_a_far_side_lock_never_stands_in_for_one_a_visitor_can_walk() {
+        let place = |title: &str, connections: Vec<Connection>| Place {
+            title: title.to_owned(),
+            connections,
+        };
+        let conn = |to, flags: ConnType| Connection {
+            target_id: to,
+            flags: flags.bits(),
+            type_params: Default::default(),
+        };
+        let worlds = [
+            place(
+                "Nexus",
+                vec![conn(1, ConnType::empty()), conn(4, ConnType::empty())],
+            ),
+            place("Lantern Causeway", vec![conn(2, ConnType::empty())]),
+            place("Mural Vestibule", vec![conn(3, ConnType::EFFECT)]),
+            // Walking out of here is what opens the way back in, so the shorter way is locked.
+            place("Ember Terrace", vec![conn(4, ConnType::UNLOCK)]),
+            place("Chalk Observatory", vec![]),
+        ];
+        let joined = connections(&worlds);
+
+        let ways = ways(&joined, 0, 3, 5, Some(0));
+
+        assert_eq!(
+            ways.iter().map(|way| way.walk.clone()).collect::<Vec<_>>(),
+            [vec![0, 1, 2, 3], vec![0, 4, 3]]
+        );
+        assert_eq!(ways[0].asks, Gate::Effect);
+        assert_eq!(ways[1].asks, Gate::Locked);
     }
 
     #[test]

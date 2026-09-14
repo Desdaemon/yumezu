@@ -342,8 +342,7 @@ fn ways_between(
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Passing {
     Nothing,
-    /// Effects, chance, seasons and the conditions the wiki writes out: everything a player can
-    /// meet where they stand, as against a door opened from its far side.
+    /// Everything a player can meet where they stand: see [`Gate::in_place`].
     Conditions,
     Everything,
 }
@@ -373,8 +372,17 @@ pub struct Way {
     pub backs_out: bool,
 }
 
-/// At most `want` ways from `from` to `to`, by class of demand -- how many of a way's steps ask
-/// anything -- and shorter with every class: the trade the reader is being offered.
+/// What a way costs a reader: whether it needs a door opened from its far side, then how many of
+/// its steps ask anything at all.
+///
+/// [`Gate::in_place`] leads, because a way round asking several things a player can meet where
+/// they stand is still a way in and one far-side lock is not, however many fewer steps it takes.
+fn price(asks: Gate, demands: u32) -> (bool, u32) {
+    (!asks.in_place(), demands)
+}
+
+/// At most `want` ways from `from` to `to`, by what each [`price`] costs a reader and shorter with
+/// every class: the trade the reader is being offered.
 ///
 /// A class is only offered where it beats every way of a freer one, so a way that asks more
 /// without saving a connection is no alternative to one that asks less, and where the freest way
@@ -404,12 +412,12 @@ pub fn ways(
             }
         }
     }
-    // Least asked of first, and the shortest of each class ahead of the rest of it. The harshest
-    // gate only separates two of a class that are the same length, so a reader offered one of them
-    // is offered the gentler.
+    // Cheapest first, and the shortest of each class ahead of the rest of it. The harshest gate
+    // only separates two of a class that are the same length, so a reader offered one of them is
+    // offered the gentler.
     found.sort_by_key(|walk| {
         let (asks, demands) = asked_of(connections, hub, walk);
-        (demands, walk.len(), asks)
+        (price(asks, demands), walk.len(), asks)
     });
 
     let mut ways: Vec<Way> = Vec::new();
@@ -418,10 +426,11 @@ pub fn ways(
             break;
         }
         let (asks, demands) = asked_of(connections, hub, &walk);
+        let class = price(asks, demands);
         let backs_out = backs_out(connections, hub, &walk);
         let kept = ways
             .iter()
-            .filter(|way| way.demands == demands && way.backs_out == backs_out)
+            .filter(|way| price(way.asks, way.demands) == class && way.backs_out == backs_out)
             .count();
         let room = kept
             < if backs_out {
@@ -431,7 +440,7 @@ pub fn ways(
             };
         let beats = ways
             .iter()
-            .all(|way| way.demands >= demands || walk.len() < way.walk.len());
+            .all(|way| price(way.asks, way.demands) >= class || walk.len() < way.walk.len());
         if !room || !beats {
             continue;
         }

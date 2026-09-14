@@ -8,6 +8,7 @@
 //! shorter conditional one to the same world, a world reachable only through a condition naming
 //! itself, a connection only one side lists, and a world the hub does not touch.
 //!
+//! ```text
 //!     0  Urotsuki's Room      -> 1, 2, 3, and 12 behind a condition
 //!     1  Lantern Causeway     -> 4
 //!     2  Mural Vestibule      -> 4 on a 1/8 chance
@@ -24,6 +25,7 @@
 //!     13 Ember Terrace        -> nothing
 //!     14 Drowned Switchboard  -> 15
 //!     15 Tin Solarium         -> nothing
+//! ```
 
 use crate::{ConnType, Connection, TypeParams};
 
