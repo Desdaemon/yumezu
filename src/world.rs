@@ -13,8 +13,8 @@ use serde::Deserialize;
 // reads them exactly as this one does.
 use yumezu_routing::walkable_steps;
 pub use yumezu_routing::{
-    Ask, Connection, Gate, Routes, Step, Way, connections, hub_world, origin_world, routes_from,
-    step_asks, ways,
+    Ask, Connection, Demand, Gate, Routes, Step, Way, connections, hub_world, origin_world,
+    routes_from, step_asks, ways,
 };
 
 use super::i18n::t;
@@ -351,19 +351,31 @@ pub fn gate_asks(gate: Gate) -> String {
     }
 }
 
-/// The wiki's own words where it has any, and the bare name of the condition otherwise. Empty for
-/// a connection that asks nothing.
+/// Every condition the connection carries, harshest first, a line each. Empty for a connection
+/// that asks nothing.
+///
+/// All of them rather than the harshest alone: a way that is locked *and* wants an effect is not
+/// walkable by meeting either, and a reader told only the lock would go and fail.
 pub fn asks(ask: &Ask) -> String {
-    let Some(detail) = ask.detail.as_deref() else {
-        return gate_asks(ask.gate);
+    ask.demands
+        .iter()
+        .map(demand_asks)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The wiki's own words where it has any, and the bare name of the condition otherwise.
+fn demand_asks(demand: &Demand) -> String {
+    let Some(detail) = demand.detail.as_deref() else {
+        return gate_asks(demand.gate);
     };
-    match ask.gate {
+    match demand.gate {
         Gate::Effect => t!("gate-effect-detail", effects = effects(detail)),
         Gate::Chance => t!("gate-chance-detail", chance = detail),
         Gate::Seasonal => t!("gate-seasonal-detail", season = detail),
         // The wiki's own sentence, which it writes in English and publishes no Japanese for.
         Gate::LockedCondition | Gate::Revisit => detail.to_owned(),
-        _ => gate_asks(ask.gate),
+        _ => gate_asks(demand.gate),
     }
 }
 
@@ -425,8 +437,14 @@ fn named_effects(detail: &str) -> String {
     said
 }
 
-pub fn asks_emoji(ask: &Ask) -> &'static str {
-    match ask.gate {
+/// One glyph per condition, harshest first, so a way that is locked *and* wants an effect reads as
+/// both. Empty for a connection that asks nothing.
+pub fn asks_emoji(ask: &Ask) -> String {
+    ask.demands.iter().map(demand_emoji).collect()
+}
+
+fn demand_emoji(demand: &Demand) -> &'static str {
+    match demand.gate {
         Gate::Free => "",
         Gate::Effect => "✨",
         Gate::Chance => "🍀",
@@ -435,7 +453,7 @@ pub fn asks_emoji(ask: &Ask) -> &'static str {
         Gate::ExitPoint => "🚪",
         Gate::DeadEnd => "↩",
         Gate::Isolated => "🚩",
-        Gate::Seasonal => match ask.detail.as_deref() {
+        Gate::Seasonal => match demand.detail.as_deref() {
             Some("Spring") => "🌸",
             Some("Summer") => "☀",
             Some("Fall") => "🍂",
@@ -1391,8 +1409,8 @@ mod tests {
         assert_eq!((bomb.asks, bomb.demands), (super::Gate::Effect, 1));
         assert_eq!(
             super::step_asks(&connections, Some(hub), from, hub)
-                .and_then(|ask| ask.detail)
-                .as_deref(),
+                .as_ref()
+                .and_then(super::Ask::detail),
             Some(yumezu_routing::ESCAPE)
         );
     }

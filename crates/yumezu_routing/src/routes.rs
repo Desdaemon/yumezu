@@ -1,6 +1,6 @@
 //! The tree of routes over what a player can walk, run outward from a world or inward to one.
 
-use super::{Ask, ESCAPE, Gate, Step};
+use super::{Ask, Demand, ESCAPE, Gate, Step};
 
 /// The route from every world to the world a walk was seeded at: the origin for the canonical
 /// tree, and the destination for a set of directions.
@@ -197,10 +197,10 @@ fn met(asks: Gate, passable: Gate) -> Gate {
 }
 
 fn escape_ask() -> Ask {
-    Ask {
+    Ask::of([Demand {
         gate: Gate::Effect,
         detail: Some(ESCAPE.to_owned()),
-    }
+    }])
 }
 
 /// One way only, and out of every world but the [`super::HUB`] itself.

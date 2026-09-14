@@ -82,15 +82,16 @@ impl Connection {
     }
 
     fn ask(&self) -> Ask {
-        let gate = Gate::of(self.conditions());
-        Ask {
-            gate,
-            detail: gate
-                .worded()
-                .and_then(|flag| self.type_params.get(&flag.bits()))
-                .and_then(|words| words.params.clone())
-                .filter(|words| !words.is_empty()),
-        }
+        Ask::of(Gate::all_of(self.conditions()).map(|gate| {
+            Demand {
+                gate,
+                detail: gate
+                    .worded()
+                    .and_then(|flag| self.type_params.get(&flag.bits()))
+                    .and_then(|words| words.params.clone())
+                    .filter(|words| !words.is_empty()),
+            }
+        }))
     }
 }
 
@@ -129,35 +130,66 @@ pub fn origin_world(worlds: &[impl World]) -> usize {
         .unwrap_or(0)
 }
 
-/// The condition on its own is what a route is ordered by; the words are what a reader is told.
+/// One condition of a connection: what it demands, and the wiki's own words for it.
 #[derive(Clone)]
-pub struct Ask {
+pub struct Demand {
     pub gate: Gate,
-    /// The wiki's own words for the condition, `None` where it wrote none and always for a
-    /// direction that is inferred rather than listed. See [`walkable_steps`].
+    /// `None` where the wiki wrote no words, and always for a direction that is inferred rather
+    /// than listed. See [`walkable_steps`].
     pub detail: Option<String>,
 }
 
+/// Everything a connection demands, harshest first.
+///
+/// The flags are independent and a connection can carry several -- locked *and* wanting an effect
+/// -- so a reader has to be told all of them. A route is ordered by [`Ask::gate`] alone, being only
+/// as free as the strictest of them.
+#[derive(Clone)]
+pub struct Ask {
+    pub gate: Gate,
+    pub demands: Vec<Demand>,
+}
+
 impl Ask {
-    /// Prose is all there is to go on: no flag separates the condition on a shortcut back in from
-    /// one a first-time visitor could meet. `destination` is that world's English title, the only
-    /// one the wiki writes these sentences in.
-    fn first_visit(mut self, destination: &str) -> Self {
-        let names_destination = self
-            .detail
-            .as_deref()
-            .is_some_and(|words| words.to_lowercase().contains(&destination.to_lowercase()));
-        if self.gate == Gate::LockedCondition && names_destination {
-            self.gate = Gate::Revisit;
+    pub(crate) fn of(demands: impl IntoIterator<Item = Demand>) -> Self {
+        let demands: Vec<_> = demands.into_iter().collect();
+        Self {
+            gate: demands.first().map_or(Gate::Free, |demand| demand.gate),
+            demands,
         }
-        self
+    }
+
+    /// The one demand, which the wiki wrote no words for.
+    pub fn just(gate: Gate) -> Self {
+        Self::of((gate != Gate::Free).then_some(Demand { gate, detail: None }))
     }
 
     pub fn free() -> Self {
-        Self {
-            gate: Gate::Free,
-            detail: None,
+        Self::just(Gate::Free)
+    }
+
+    /// The words for the harshest demand, which is the one [`Ask::gate`] names.
+    pub fn detail(&self) -> Option<&str> {
+        self.demands
+            .first()
+            .and_then(|demand| demand.detail.as_deref())
+    }
+
+    /// Prose is all there is to go on: no flag separates the condition on a shortcut back in from
+    /// one a first-time visitor could meet. `destination` is that world's English title, the only
+    /// one the wiki writes these sentences in.
+    ///
+    /// Only where the condition is the harshest demand, so a way that is locked as well stays
+    /// ordered by the lock.
+    fn first_visit(mut self, destination: &str) -> Self {
+        let names_destination = self
+            .detail()
+            .is_some_and(|words| words.to_lowercase().contains(&destination.to_lowercase()));
+        if self.gate == Gate::LockedCondition && names_destination {
+            self.gate = Gate::Revisit;
+            self.demands[0].gate = Gate::Revisit;
         }
+        self
     }
 }
 
@@ -187,9 +219,8 @@ pub enum Gate {
 }
 
 impl Gate {
-    /// Harshest wins: several flags are demands to be met together, so the route is only as free
-    /// as its strictest one. Listed strictest first: the enum's order, backwards.
-    fn of(flags: ConnType) -> Gate {
+    /// Every condition the flags carry, strictest first: the enum's order, backwards.
+    pub fn all_of(flags: ConnType) -> impl Iterator<Item = Gate> {
         [
             (ConnType::ISOLATED, Gate::Isolated),
             (ConnType::DEAD_END, Gate::DeadEnd),
@@ -201,8 +232,8 @@ impl Gate {
             (ConnType::EFFECT, Gate::Effect),
         ]
         .into_iter()
-        .find(|(flag, _)| flags.contains(*flag))
-        .map_or(Gate::Free, |(_, gate)| gate)
+        .filter(move |(flag, _)| flags.contains(*flag))
+        .map(|(_, gate)| gate)
     }
 
     /// Whether a walk can go on from a step of this kind. A dead end lands a player in a part of
@@ -324,12 +355,12 @@ pub fn walkable_steps(worlds: &[impl World]) -> Vec<Vec<(usize, Ask)>> {
                 steps[from].push((to, connection.ask().first_visit(worlds[to].title())));
             }
             if !listed.contains(&(to, from)) && !flags.contains(ConnType::ONE_WAY) {
-                let gate = match flags.contains(ConnType::UNLOCK) {
+                // No words: the wiki wrote none for a direction it did not list at all.
+                let ask = Ask::just(match flags.contains(ConnType::UNLOCK) {
                     true => Gate::Locked,
                     false => Gate::Free,
-                };
-                // No words: the wiki wrote none for a direction it did not list at all.
-                steps[to].push((from, Ask { gate, detail: None }));
+                });
+                steps[to].push((from, ask));
             }
         }
     }
@@ -338,7 +369,10 @@ pub fn walkable_steps(worlds: &[impl World]) -> Vec<Vec<(usize, Ask)>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ask, ConnType, Connection, Gate, Step, World, connections, routes_toward};
+    use super::{
+        Ask, ConnType, Connection, Demand, Gate, Step, TypeParams, World, connections,
+        routes_toward,
+    };
 
     struct Place {
         title: String,
@@ -373,19 +407,56 @@ mod tests {
             .collect()
     }
 
-    // The mildest demand would understate what the player has to have done.
+    // Every demand is listed, so a reader is told all of them, and the harshest leads, so what
+    // orders a route does not understate what the player has to have done.
     #[test]
-    fn a_connection_is_named_by_its_harshest_demand() {
-        assert_eq!(Gate::of(ConnType::empty()), Gate::Free);
-        assert_eq!(Gate::of(ConnType::ONE_WAY | ConnType::NO_ENTRY), Gate::Free);
-        assert_eq!(Gate::of(ConnType::EFFECT), Gate::Effect);
+    fn a_connection_lists_every_demand_harshest_first() {
+        let all_of = |flags| Gate::all_of(flags).collect::<Vec<_>>();
+        assert_eq!(all_of(ConnType::empty()), []);
+        assert_eq!(all_of(ConnType::ONE_WAY | ConnType::NO_ENTRY), []);
+        assert_eq!(all_of(ConnType::EFFECT), [Gate::Effect]);
         assert_eq!(
-            Gate::of(ConnType::CHANCE | ConnType::LOCKED_CONDITION),
-            Gate::LockedCondition
+            all_of(ConnType::CHANCE | ConnType::LOCKED_CONDITION),
+            [Gate::LockedCondition, Gate::Chance]
         );
         assert_eq!(
-            Gate::of(ConnType::LOCKED_CONDITION | ConnType::EXIT_POINT),
-            Gate::ExitPoint
+            all_of(ConnType::LOCKED | ConnType::EFFECT),
+            [Gate::Locked, Gate::Effect]
+        );
+        assert_eq!(
+            all_of(ConnType::LOCKED_CONDITION | ConnType::EXIT_POINT),
+            [Gate::ExitPoint, Gate::LockedCondition]
+        );
+    }
+
+    // The dump writes a word list per flag, so a connection that is locked *and* wants an effect
+    // has words only for the effect. Losing them to the harsher demand would leave the reader with
+    // a lock and no idea what else the way wants.
+    #[test]
+    fn a_connection_keeps_the_words_of_every_demand() {
+        let connection = Connection {
+            target_id: 0,
+            flags: (ConnType::LOCKED | ConnType::EFFECT).bits(),
+            type_params: [(
+                ConnType::EFFECT.bits(),
+                TypeParams {
+                    params: Some("Twintails".to_owned()),
+                    params_jp: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let ask = connection.ask();
+
+        assert_eq!(ask.gate, Gate::Locked);
+        assert_eq!(
+            ask.demands
+                .iter()
+                .map(|demand| (demand.gate, demand.detail.as_deref()))
+                .collect::<Vec<_>>(),
+            [(Gate::Locked, None), (Gate::Effect, Some("Twintails"))]
         );
     }
 
@@ -410,9 +481,11 @@ mod tests {
     // wiki writes no flag for it -- only the sentence.
     #[test]
     fn a_condition_naming_where_it_leads_is_not_a_way_in() {
-        let ask = |gate, detail: &str| Ask {
-            gate,
-            detail: Some(detail.to_owned()),
+        let ask = |gate, detail: &str| {
+            Ask::of([Demand {
+                gate,
+                detail: Some(detail.to_owned()),
+            }])
         };
         assert_eq!(
             ask(

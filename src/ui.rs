@@ -47,6 +47,32 @@ const RAIL_LINE: f32 = 2.0;
 const RAIL_STOP: f32 = 3.0;
 const RAIL_END: f32 = 5.0;
 
+/// What a list row is given on top of the height a pointer needs, once the app has seen a finger.
+/// Enough that a thumb is not aiming at a line of text, and no more: what a phone gains from a row
+/// the size of a button it loses again in a list of a few hundred worlds. See [`Tile`].
+const TILE_PADDING_TOUCH: f32 = 6.0;
+/// How long a finger rests on something before it is read as asking what a pointer asks by
+/// hovering. Shorter than what egui waits for a pointer, which can come to rest on a widget
+/// without having been aimed at it, and well inside the 800 ms a press has to be held to become a
+/// right-click, so the two read as one gesture going further rather than as two.
+const HOVER_HOLD_SECONDS: f64 = 0.4;
+/// How far a finger may wander over the hold and still be asking about the row it started on.
+///
+/// A hand is never still. egui waits out [`HOVER_HOLD_SECONDS`] of a pointer that has *stopped*,
+/// restarting the wait at every twitch, which a mouse left alone satisfies and a finger never
+/// does -- so the hold is timed here against this much slack instead. See [`Tile::hover`].
+const HOVER_HOLD_SLACK: f32 = 16.0;
+/// How far a row's hover text stands off the row on a touch screen: clear of the fingertip that
+/// asked for it without drifting so far up the panel that the two stop reading as one thing. It
+/// stands over the finger rather than over the row, so it need not clear the whole hand. See
+/// [`Tile::hover`].
+const HOVER_FINGER_GAP: f32 = 16.0;
+/// Above the row and below it only where there is no room above: a phone is held from below, so
+/// what is under the row is under the hand.
+const HOVER_ALIGNS: [egui::RectAlign; 1] = [egui::RectAlign::BOTTOM];
+/// Where [`HeldHover`] is kept.
+const HELD_HOVER_ID: &str = "held hover";
+
 // Fixed rather than taken from the title, which names whichever world is being walked to: egui
 // files a window's position under its id.
 const DIRECTIONS_ID: &str = "directions";
@@ -253,6 +279,204 @@ fn rail(ui: &egui::Ui, stops: &[egui::Rect]) {
     }
 }
 
+/// A row of a list, built the way a list tile is: something leading it, what it says, something
+/// trailing it, and all of it one press the width of the list.
+///
+/// [`egui::Ui::selectable_label`] is as wide as its own text and as tall as a line, so a thumb has
+/// to find a target the size of a word and a reader cannot see how far a row reaches. Anything set
+/// beside it in an [`egui::Ui::horizontal`] -- the arrow on a connection, what a step asks -- is a
+/// widget of its own that answers no press, so a row that reads as one thing behaves as three.
+/// Here they are atoms of the row itself.
+struct Tile<'a> {
+    selected: bool,
+    leading: egui::Atoms<'a>,
+    title: egui::WidgetText,
+    trailing: egui::Atoms<'a>,
+    hover: Option<egui::WidgetText>,
+}
+
+impl<'a> Tile<'a> {
+    fn new(selected: bool, title: impl Into<egui::WidgetText>) -> Self {
+        Self {
+            selected,
+            leading: egui::Atoms::default(),
+            title: title.into(),
+            trailing: egui::Atoms::default(),
+            hover: None,
+        }
+    }
+
+    fn leading(mut self, leading: impl egui::IntoAtoms<'a>) -> Self {
+        self.leading = egui::Atoms::new(leading);
+        self
+    }
+
+    fn trailing(mut self, trailing: impl egui::IntoAtoms<'a>) -> Self {
+        self.trailing = egui::Atoms::new(trailing);
+        self
+    }
+
+    /// What a pointer reads by hovering the row, and a finger by holding it.
+    ///
+    /// Not [`egui::Response::on_hover_text`] on the row after the fact: on a touch screen that
+    /// draws the text against the row, which is where the hand is. Here it is put on the far side
+    /// of the row from the hand and stood far enough off to be read past a fingertip. See
+    /// [`HOVER_FINGER_GAP`].
+    fn hover(mut self, text: impl Into<egui::WidgetText>) -> Self {
+        self.hover = Some(text.into());
+        self
+    }
+}
+
+impl egui::Widget for Tile<'_> {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        use egui::AtomExt as _;
+
+        let Self {
+            selected,
+            mut leading,
+            title,
+            trailing,
+            hover,
+        } = self;
+        // The title is what gives way when the row is too narrow for everything in it: what leads
+        // and trails a row is a glyph or two, and a truncated one says nothing at all.
+        leading.push_right(egui::Atom::from(title).atom_shrink(true));
+        leading.push_right(egui::Atom::grow());
+        leading.extend_right(trailing);
+        let touch = ui.input(|input| input.has_touch_screen());
+        let height = ui.spacing().interact_size.y
+            + match touch {
+                true => TILE_PADDING_TOUCH,
+                false => 0.0,
+            };
+        let row = ui.add(
+            egui::Button::selectable(selected, leading)
+                .min_size(egui::vec2(ui.available_width(), height))
+                .truncate(),
+        );
+        let Some(hover) = hover else { return row };
+        if !touch {
+            return row.on_hover_text(hover);
+        }
+        // A press that also pressed the row ends its own peek: what the text named is about to be
+        // gone from under it. Only a hold long enough to stop being a click leaves the text
+        // standing, which is the hold that meant to read it.
+        if row.clicked() {
+            release_hover(ui.ctx());
+            return row;
+        }
+        let pressing = row.is_pointer_button_down_on();
+        if pressing {
+            // The wait ends on a frame no event would ask for: a finger resting still sends none.
+            ui.ctx().request_repaint();
+        }
+        // Asked for by the finger that is on the row now, or by one that was and has gone.
+        let asked = pressing && held_long_enough(&row);
+        if asked {
+            let at = ui
+                .input(|input| input.pointer.press_origin())
+                .map_or(row.rect.center().x, |origin| origin.x);
+            hold_hover(
+                ui.ctx(),
+                HeldHover {
+                    tile: row.id,
+                    row: row.rect,
+                    at,
+                },
+            );
+        }
+        let Some(held) = held_hover(ui.ctx()).filter(|held| held.tile == row.id) else {
+            return row;
+        };
+        // Over the finger rather than over the middle of the row: a row runs the width of the
+        // panel, and text centred on it can sit a long way from what the hand is pointing at. The
+        // row's own height still, so the text clears the row and not merely the touch.
+        let finger = egui::Rect::from_min_max(
+            egui::pos2(held.at, row.rect.top()),
+            egui::pos2(held.at, row.rect.bottom()),
+        );
+        // `for_widget` rather than `for_enabled`, which would close the moment the finger lifted:
+        // what keeps this open is the hold, not egui's own reading of the pointer.
+        let mut tooltip = egui::Tooltip::for_widget(&row).gap(HOVER_FINGER_GAP);
+        tooltip.popup = tooltip
+            .popup
+            .anchor(finger)
+            .align(egui::RectAlign::TOP)
+            .align_alternatives(&HOVER_ALIGNS);
+        tooltip.show(|ui| ui.label(hover));
+        row
+    }
+}
+
+/// Whether the finger on this row has been there long enough, and stayed near enough to where it
+/// landed, to be asking what the row is rather than pressing it.
+///
+/// Timed here rather than left to [`egui::Tooltip::should_show_tooltip`], which wants a pointer
+/// that has come to rest: it restarts its wait on every movement and, by default, refuses outright
+/// unless the pointer is still. A mouse nobody is touching meets that; a hand does not.
+fn held_long_enough(row: &egui::Response) -> bool {
+    row.ctx.input(|input| {
+        let pointer = &input.pointer;
+        let held = pointer
+            .press_start_time()
+            .is_some_and(|started| input.time - started >= HOVER_HOLD_SECONDS);
+        let near = pointer
+            .press_origin()
+            .zip(pointer.latest_pos())
+            .is_none_or(|(from, at)| from.distance(at) <= HOVER_HOLD_SLACK);
+        held && near
+    })
+}
+
+/// The row whose hover text a finger asked for, where that row was, and where along it the finger
+/// landed.
+///
+/// egui closes a tooltip as soon as the pointer leaves, which on a touch screen is the instant the
+/// finger lifts -- so the text a hold asked for would go before it could be read. Held here across
+/// frames instead and let go by [`release_held_hover`]. The rect is what tells a press meant for
+/// the text apart from one meant for something else, and `at` is what keeps the text over the
+/// finger once the finger is gone.
+#[derive(Clone, Copy)]
+struct HeldHover {
+    tile: egui::Id,
+    row: egui::Rect,
+    /// Where the finger came down, across the row. Taken once, from where the press started: read
+    /// afresh every frame it would shiver along with the hand.
+    at: f32,
+}
+
+fn held_hover(ctx: &egui::Context) -> Option<HeldHover> {
+    ctx.data(|data| data.get_temp(egui::Id::new(HELD_HOVER_ID)))
+}
+
+fn hold_hover(ctx: &egui::Context, held: HeldHover) {
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(HELD_HOVER_ID), held));
+}
+
+fn release_hover(ctx: &egui::Context) {
+    ctx.data_mut(|data| data.remove::<HeldHover>(egui::Id::new(HELD_HOVER_ID)));
+}
+
+/// Let a held hover go on the first press that lands off its row.
+///
+/// Once per frame and before anything is drawn, rather than from the row that is holding it: the
+/// press that starts a hold on another row is one of the presses this drops, and a tooltip still
+/// claiming the layer when that row asks for its own would keep the second one from ever opening.
+fn release_held_hover(ctx: &egui::Context) {
+    let Some(held) = held_hover(ctx) else { return };
+    let pressed = ctx.input(|input| {
+        input
+            .pointer
+            .any_pressed()
+            .then(|| input.pointer.interact_pos())
+            .flatten()
+    });
+    if pressed.is_some_and(|at| !held.row.contains(at)) {
+        release_hover(ctx);
+    }
+}
+
 /// The world a set of directions would run to or from: whatever is lit, which is what makes two
 /// worlds out of one right-click. `None` while that is this world or nothing at all.
 fn other_end(read: &PanelData, world: usize) -> Option<usize> {
@@ -327,6 +551,17 @@ impl Overlay {
         // exactly what this scale means. So the panel is laid out and read at the product, and the
         // graph behind it at the window's ratio alone.
         self.gui.context().set_zoom_factor(self.ui_scale);
+        // Every hover text in the app that is not a row's -- those time their own hold, see
+        // [`held_long_enough`]. On a touch screen the only way to ask for one is to press and
+        // wait, so the wait is shortened and the demand that the pointer be still is dropped: a
+        // hand cannot meet it, and a tooltip nobody can open may as well not be written.
+        if self.gui.context().input(|input| input.has_touch_screen()) {
+            self.gui.context().all_styles_mut(|style| {
+                style.interaction.tooltip_delay = HOVER_HOLD_SECONDS as f32;
+                style.interaction.show_tooltips_only_when_still = false;
+            });
+            release_held_hover(self.gui.context());
+        }
         let ratio = frame_input.device_pixel_ratio * self.ui_scale;
         let read = PanelData::new(data, self.counted.rate(), &self.sidebar, frame_input, ratio);
         let parameters = data.graph.parameters();
@@ -678,7 +913,7 @@ impl Panel {
         search_box(ui, search, "worlds", t!("search-worlds"));
         for &world in &read.candidates {
             let selected = read.selected.and_then(Highlight::world) == Some(world);
-            let row = self.world_row(ui, world, selected, data.titles[world].show());
+            let row = self.world_row(ui, world, Tile::new(selected, data.titles[world].show()));
             self.with_directions(&row, read, world);
         }
         ui.separator();
@@ -710,23 +945,22 @@ impl Panel {
                 .map(world::asks_emoji)
                 .unwrap_or_default();
             let title = data.titles[step.world].show();
-            ui.horizontal(|ui| {
-                ui.label(world::arrow(step));
-                let row = ui
-                    .selectable_label(read.selected == Some(lit), title)
-                    .on_hover_text(walk_of(step));
-                if row.hovered() {
-                    self.pointed = Some(step.world);
+            let row = ui.add(
+                Tile::new(read.selected == Some(lit), title)
+                    .leading(world::arrow(step))
+                    .trailing(asks)
+                    .hover(walk_of(step)),
+            );
+            if row.hovered() {
+                self.pointed = Some(step.world);
+            }
+            if row.clicked() {
+                if read.selected == Some(lit) {
+                    self.lit = Some(Some(Highlight::Route(world)));
+                } else {
+                    self.lit = Some(Some(lit));
                 }
-                if row.clicked() {
-                    if read.selected == Some(lit) {
-                        self.lit = Some(Some(Highlight::Route(world)));
-                    } else {
-                        self.lit = Some(Some(lit));
-                    }
-                }
-                ui.label(asks);
-            });
+            }
         }
     }
 
@@ -737,17 +971,15 @@ impl Panel {
         ui.separator();
         for &author in &read.authors {
             let by = &data.authors[author];
-            if ui
-                .selectable_label(
-                    read.selected == Some(Highlight::Author(author)),
-                    t!(
-                        "author-row",
-                        name = by.name.show(),
-                        worlds = by.worlds.len()
-                    ),
-                )
-                .clicked()
-            {
+            let tile = Tile::new(
+                read.selected == Some(Highlight::Author(author)),
+                t!(
+                    "author-row",
+                    name = by.name.show(),
+                    worlds = by.worlds.len()
+                ),
+            );
+            if ui.add(tile).clicked() {
                 self.lit = Some(Some(Highlight::Author(author)));
             }
         }
@@ -778,25 +1010,23 @@ impl Panel {
         // release's own place in the list is what keeps two rows apart.
         ui.push_id(version, |ui| {
             let lit = read.selected == Some(Highlight::Version(version));
-            if ui
-                .selectable_label(
-                    lit,
-                    match release.released.is_empty() {
-                        true => t!(
-                            "version-row",
-                            name = &release.name,
-                            worlds = worlds(release.worlds.len())
-                        ),
-                        false => t!(
-                            "version-row-dated",
-                            name = &release.name,
-                            worlds = worlds(release.worlds.len()),
-                            released = &release.released
-                        ),
-                    },
-                )
-                .clicked()
-            {
+            let tile = Tile::new(
+                lit,
+                match release.released.is_empty() {
+                    true => t!(
+                        "version-row",
+                        name = &release.name,
+                        worlds = worlds(release.worlds.len())
+                    ),
+                    false => t!(
+                        "version-row-dated",
+                        name = &release.name,
+                        worlds = worlds(release.worlds.len()),
+                        released = &release.released
+                    ),
+                },
+            );
+            if ui.add(tile).clicked() {
                 self.lit = Some(Some(Highlight::Version(version)));
             }
             // Nothing until the atlas arrives, and nothing ever if it cannot be had: the rest of
@@ -1168,14 +1398,8 @@ impl Panel {
     /// connections and which lights the connection rather than either end of it.
     ///
     /// [`Self::pointed`] is written rather than merged: egui hovers at most one row at a time.
-    fn world_row(
-        &mut self,
-        ui: &mut egui::Ui,
-        world: usize,
-        selected: bool,
-        text: impl Into<egui::WidgetText>,
-    ) -> egui::Response {
-        let row = ui.selectable_label(selected, text);
+    fn world_row(&mut self, ui: &mut egui::Ui, world: usize, tile: Tile<'_>) -> egui::Response {
+        let row = ui.add(tile);
         if row.hovered() {
             self.pointed = Some(world);
         }
@@ -1192,11 +1416,17 @@ impl Panel {
         if other_end(read, world).is_none() {
             return;
         }
-        row.context_menu(|ui| {
-            if self.directions_menu(ui, read, world) {
-                ui.close();
-            }
-        });
+        // The app's own style rather than egui's menu style, which is what
+        // `Response::context_menu` would apply: it strips a menu item's fill and stroke until the
+        // item is hovered. There is no hover on a phone, so that leaves a control with nothing to
+        // say it is one -- and these are the same two buttons `Panel::menu` already draws framed.
+        egui::Popup::context_menu(row)
+            .style(egui::style::StyleModifier::default())
+            .show(|ui| {
+                if self.directions_menu(ui, read, world) {
+                    ui.close();
+                }
+            });
     }
 
     /// The two ways between a world and whatever is lit, and whether one of them was taken. The
@@ -1208,19 +1438,19 @@ impl Panel {
         let named = read.data.titles[other].show();
         let mut taken = false;
         if ui
-            .button(t!("menu-directions-to"))
-            .on_hover_text(t!("menu-directions-to-hint", world = named))
-            .clicked()
-        {
-            self.lit = Some(Some(Highlight::Path(other, world)));
-            taken = true;
-        }
-        if ui
             .button(t!("menu-directions-from"))
             .on_hover_text(t!("menu-directions-from-hint", world = named))
             .clicked()
         {
             self.lit = Some(Some(Highlight::Path(world, other)));
+            taken = true;
+        }
+        if ui
+            .button(t!("menu-directions-to"))
+            .on_hover_text(t!("menu-directions-to-hint", world = named))
+            .clicked()
+        {
+            self.lit = Some(Some(Highlight::Path(other, world)));
             taken = true;
         }
         taken
@@ -1236,27 +1466,40 @@ impl Panel {
         let data = read.data;
         let mut stops = Vec::with_capacity(walk.len());
         for (at, &world) in walk.iter().enumerate().rev() {
-            let asks = walk
-                .get(at + 1)
-                .and_then(|&from| world::step_asks(&data.connections, data.hub, from, world))
+            let from = walk.get(at + 1).copied();
+            let asks = from
+                .and_then(|from| world::step_asks(&data.connections, data.hub, from, world))
                 .filter(|ask| ask.gate != Gate::Free);
+            // The connection itself, so a row here reads the way a row of the ways on from a world
+            // reads: both its directions named, and named even where it demands nothing. The
+            // escape home is the one step that is no listed connection, and all there is to say of
+            // it is what it asks.
+            let walked = from.and_then(|from| {
+                data.connections[from]
+                    .iter()
+                    .find(|step| step.world == world)
+            });
             let row = ui.horizontal(|ui| {
                 // Left clear for the line, which is drawn once the rows have settled where they
                 // are. What the step asks belongs against the world it is met on the way to.
                 ui.add_space(RAIL_WIDTH);
-                if let Some(ask) = &asks {
-                    ui.label(world::asks_emoji(ask))
-                        .on_hover_text(world::asks(ask));
-                }
+                let leading = asks.as_ref().map(world::asks_emoji).unwrap_or_default();
                 let title = data.titles[world].show();
+                let mut tile = Tile::new(false, title).leading(leading);
+                if let Some(hover) = walked
+                    .map(walk_of)
+                    .or_else(|| asks.as_ref().map(world::asks))
+                {
+                    tile = tile.hover(hover);
+                }
                 match rows {
                     Rows::Traced => {
-                        let row = self.world_row(ui, world, false, title);
+                        let row = self.world_row(ui, world, tile);
                         self.with_directions(&row, read, world);
                     }
                     Rows::Pointed => {
                         // visually hoverable only
-                        if ui.selectable_label(false, title).contains_pointer() {
+                        if ui.add(tile).contains_pointer() {
                             self.pointed = Some(world);
                         }
                     }
@@ -1423,12 +1666,14 @@ impl Panel {
                     self.world_row(
                         ui,
                         world,
-                        false,
-                        t!(
-                            "notable-world",
-                            title = data.titles[world].show(),
-                            kind = kind,
-                            degree = degree
+                        Tile::new(
+                            false,
+                            t!(
+                                "notable-world",
+                                title = data.titles[world].show(),
+                                kind = kind,
+                                degree = degree
+                            ),
                         ),
                     );
                 }
@@ -1447,7 +1692,7 @@ impl Panel {
                 });
                 ui.label(worlds(read.listed.len()));
                 for &world in &read.listed {
-                    self.world_row(ui, world, false, data.titles[world].show());
+                    self.world_row(ui, world, Tile::new(false, data.titles[world].show()));
                 }
             }
             // A release is a list like an author's work, and read the same way.
@@ -1459,7 +1704,7 @@ impl Panel {
                 }
                 ui.label(t!("version-added", worlds = worlds(read.listed.len())));
                 for &world in &read.listed {
-                    self.world_row(ui, world, false, data.titles[world].show());
+                    self.world_row(ui, world, Tile::new(false, data.titles[world].show()));
                 }
             }
             // The order is the whole of what this list says, so its rows are bare titles like
@@ -1469,7 +1714,7 @@ impl Panel {
                 ui.label(t!("untaken-worlds-hint"));
                 ui.separator();
                 for &world in &data.untaken {
-                    self.world_row(ui, world, false, data.titles[world].show());
+                    self.world_row(ui, world, Tile::new(false, data.titles[world].show()));
                 }
             }
             // A layer is a shell rather than a list, so the panel only says which is lit and how
@@ -1478,7 +1723,7 @@ impl Panel {
                 ui.strong(t!("layer-depth", depth = depth));
                 ui.label(worlds(read.listed.len()));
                 for &world in &read.listed {
-                    self.world_row(ui, world, false, data.titles[world].show());
+                    self.world_row(ui, world, Tile::new(false, data.titles[world].show()));
                 }
             }
         }
@@ -1562,7 +1807,8 @@ impl Panel {
                         open_in_browser(&data.titles[world].wiki_url());
                         self.menu_taken = true;
                     }
-                    if named && speaking_japanese() && ui.button(t!("world-english-wiki")).clicked() {
+                    if named && speaking_japanese() && ui.button(t!("world-english-wiki")).clicked()
+                    {
                         open_in_browser(&world::wiki_url(&data.titles[world].en));
                         self.menu_taken = true;
                     }
@@ -1817,14 +2063,23 @@ fn walk_of(step: &world::Step) -> String {
             }),
             _,
         ) => t!("walk-isolated"),
+        // Only where the other direction asks nothing. A lock is worth a sentence of its own, but
+        // not at the price of the other direction's conditions: a way out that wants an effect and
+        // back that is locked has to say both, which `walk-both` does.
         (
             Some(Ask {
                 gate: Gate::Locked, ..
             }),
-            _,
+            Some(Ask {
+                gate: Gate::Free, ..
+            })
+            | None,
         ) => t!("walk-locked-out"),
         (
-            _,
+            Some(Ask {
+                gate: Gate::Free, ..
+            })
+            | None,
             Some(Ask {
                 gate: Gate::Locked, ..
             }),
@@ -2020,10 +2275,7 @@ mod tests {
         let parts: Vec<&str> = date.split('-').collect();
         assert_eq!(parts[0].len(), 4, "{said}");
         assert!(parts[1..].iter().all(|part| part.len() == 2), "{said}");
-        assert!(
-            time.split(':').all(|part| part.len() == 2),
-            "{said}"
-        );
+        assert!(time.split(':').all(|part| part.len() == 2), "{said}");
     }
 
     #[test]
