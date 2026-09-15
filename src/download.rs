@@ -11,8 +11,7 @@ use egui_material_icons::icons::{
 use super::i18n::t;
 
 /// The releases page rather than a package: `.github/workflows/release.yml` stamps every asset
-/// with the version that built it, so no one address stays pointed at the newest, and the page
-/// carries the install notes each of them needs anyway.
+/// with the version that built it, so no address stays pointed at the newest.
 pub(super) const RELEASES: &str = "https://github.com/Desdaemon/yumezu/releases/latest";
 
 // Presence is the whole answer; the value is always empty.
@@ -51,8 +50,8 @@ impl Platform {
     }
 
     /// `None` for an iPhone, a Chromebook, an agent saying nothing recognisable, and off the page
-    /// entirely -- a run that is already a package has nothing to be offered. Nothing rests on the
-    /// answer: an agent that lies is offered a package it can ignore.
+    /// entirely. Nothing rests on the answer: an agent that lies is offered a package it can
+    /// ignore.
     pub(super) fn detected() -> Option<Self> {
         #[cfg(target_family = "wasm")]
         {
@@ -69,7 +68,7 @@ impl Platform {
                 return Some(Self::Windows);
             }
             if agent.contains("Macintosh") {
-                // An iPad asked for the desktop site says `Macintosh` and drops `iPad`. No Mac
+                // An iPad set to the desktop site says `Macintosh` and drops `iPad`. No Mac
                 // reports touch points, so this is what still tells the two apart.
                 return (navigator.max_touch_points() <= 1).then_some(Self::MacOs);
             }

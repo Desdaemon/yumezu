@@ -8,8 +8,7 @@ use crate::smw;
 use serde::{Deserialize, Serialize};
 
 /// The wiki's own connection bitfield and the shape a connection is published in, both from
-/// [`yumezu_routing`]: the program that draws the dump reads a connection out of the same
-/// declaration this one writes it into.
+/// [`yumezu_routing`], so the program that draws the dump reads what this one writes.
 pub use yumezu_routing::{ConnType, Connection, TypeParams};
 
 /// What one of the wiki's connection attributes means, as a flag and whatever words come with it.
@@ -103,8 +102,7 @@ impl Wording {
 /// Exactly as the reference implementation's `/data` answers it.
 ///
 /// The empty lists are not oversights: effects, menu themes, wallpapers and soundtrack entries are
-/// written as prose and tables rather than held in the wiki's store. They stay as empty lists so a
-/// reader written against the reference dump keeps working.
+/// prose rather than store entries. Kept so a reader written against the reference dump works.
 #[derive(Serialize, Deserialize, Default)]
 pub struct Dump {
     #[serde(rename = "worldData")]
@@ -129,7 +127,7 @@ pub struct Dump {
     /// When this dump was built, ISO 8601.
     #[serde(rename = "lastUpdate")]
     pub last_update: Option<String>,
-    /// When the whole wiki was last read without first asking what had changed. A soft sync
+    /// When the whole wiki was last read without first querying what had changed. A soft sync
     /// carries this over rather than moving it.
     #[serde(rename = "lastFullUpdate")]
     pub last_full_update: Option<String>,
@@ -205,8 +203,8 @@ pub struct World {
     pub ver_gaps: Option<Vec<VerGap>>,
     pub removed: bool,
     /// Set for the debug room and whatever else an operator has marked as a spoiler. Published
-    /// rather than acted on: the world stays in the dump, in the graph and in the numbering, and
-    /// the client is what leaves it out.
+    /// rather than acted on: the world stays in the dump and the numbering, and the client leaves
+    /// it out.
     pub secret: bool,
     pub connections: Vec<Connection>,
 }
@@ -295,9 +293,9 @@ pub fn dream_tree() -> Dump {
 
 #[cfg(test)]
 mod tests {
-    // The connection is declared once and read from both ends, so a change to it that this program
-    // still writes and the app still reads could still move the bytes in between. What this program
-    // writes is the contract: read it back and write it again, and it has to come out the same.
+    // The connection is declared once and read from both ends, so a change both sides still
+    // compile against can still move the bytes in between. Read it back and write it again, and it
+    // has to come out the same.
     #[test]
     fn the_dump_is_written_back_exactly_as_it_was_read() {
         let json = serde_json::to_string(&super::dream_tree()).expect("a dump is serializable");
@@ -309,9 +307,8 @@ mod tests {
     }
 
     // The last dump is where the secret marks and the atlas cells are read from, and a sync that
-    // cannot parse it silently starts from nothing: marks forgotten, cells handed out afresh. So
-    // every field this has ever published has to stay readable, whether it is still published or
-    // not.
+    // cannot parse it silently starts from nothing. So every field this has ever published has to
+    // stay readable, whether it is still published or not.
     #[test]
     fn a_dump_written_before_the_fields_moved_is_still_read() {
         // As published before `cell` existed and while `mapIds` still did.
@@ -330,4 +327,3 @@ mod tests {
         assert_eq!(world.cell, None);
     }
 }
-

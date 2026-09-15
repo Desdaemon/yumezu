@@ -1,17 +1,15 @@
 //! The player's own account on YNOproject, and the worlds it says they have been to.
 //!
 //! The game is played at <https://ynoproject.net>, which records every place its client has seen
-//! the player standing in. That turns this from a map of the whole game into a map of one person's
-//! game: see [`Account::frontier`].
+//! the player standing in. See [`Account::frontier`].
 //!
 //! Two documents have to be read together: `GET /api/info` answers with YNOproject's own database
-//! ids, which mean nothing to a dump the wiki numbers by the game's maps, and
-//! `GET /api/gamelocations` turns them into names -- the one thing the two sides write the same way.
+//! ids, which mean nothing to a dump numbered by the game's maps, and `GET /api/gamelocations`
+//! turns them into names -- the one thing both sides write the same way.
 //!
 //! The credential is a cookie and only a cookie: a request carrying its value as a header is
-//! answered as if nobody had signed in. That is what splits the two platforms here. A native run
-//! may set a cookie by hand and so keeps the session itself; on the page the cookie is the
-//! browser's, neither readable nor writable by a script and sent whether this asks or not.
+//! answered as if nobody had signed in. A native run may set one by hand and so keeps the session
+//! itself; on the page the cookie is the browser's, unreadable and sent regardless.
 
 use super::i18n::t;
 use super::{fetch, store};
@@ -24,9 +22,9 @@ const API: &str = "https://api.ynoproject.net/2kki/api";
 #[cfg(not(target_family = "wasm"))]
 const AUTH: &str = "https://auth.ynoproject.net";
 
-/// Relayed by the page's own host rather than asked of [`API`] directly: YNOproject allows exactly
-/// one origin, and being same-origin is also what makes the sign-in's cookie keepable at all. See
-/// `dreamweaver`'s `relay`, which answers these.
+/// Relayed by the page's own host rather than fetched from [`API`] directly: YNOproject allows
+/// exactly one origin, and same-origin is what makes the sign-in's cookie keepable. See
+/// `dreamweaver`'s `relay`.
 ///
 /// The cost is that the host sees the session a relayed request carries. A run that would rather not
 /// pay that is a native run.
@@ -70,7 +68,7 @@ pub struct Account {
     visited: Option<Visited>,
     /// Answers with both session and visits, so the caller has the same two things to write down
     /// whichever it was.
-    asking: Option<fetch::Pending<Result<(String, Visited), String>>>,
+    pending: Option<fetch::Pending<Result<(String, Visited), String>>>,
     /// Why the last attempt came to nothing, until the next one is started.
     failed: Option<String>,
     /// Kept apart from [`Account::visited`] so leaving the frontier does not sign out of the
@@ -85,29 +83,29 @@ impl Account {
     /// meant to answer at once, and the fetch is two documents off someone else's server.
     pub fn new() -> Self {
         let session = store::read(SESSION).filter(|session| !session.is_empty());
-        let asking = session.clone().map(|session| fetch::spawn(resume(session)));
+        let pending = session.clone().map(|session| fetch::spawn(resume(session)));
         Self {
             session,
-            asking,
+            pending,
             frontier: store::read(FRONTIER).is_some(),
             ..Default::default()
         }
     }
 
     /// What keeps the window drawing over a wait nothing on screen is moving through.
-    pub fn asking(&self) -> bool {
-        self.asking.is_some()
+    pub fn working(&self) -> bool {
+        self.pending.is_some()
     }
 
     /// Called once a frame, and does nothing on the frames there is nothing to read.
     pub fn poll(&mut self) {
-        let Some(answer) = self.asking.as_ref().and_then(fetch::Pending::take) else {
+        let Some(answer) = self.pending.as_ref().and_then(fetch::Pending::take) else {
             return;
         };
-        self.asking = None;
+        self.pending = None;
         // A refresh that turned nothing up is not a change: rebuilding would throw away a layout
-        // and a selection to arrive at the same picture. An answer landing on top of a pretence
-        // always is -- it puts back a world the pretence had taken the graph past.
+        // and a selection for the same picture. An answer landing on top of a pretence always is,
+        // putting back a world the pretence had taken the graph past.
         let mut changed = !self.pretended.is_empty();
         self.pretended.clear();
         match answer {
@@ -137,7 +135,7 @@ impl Account {
     /// Reads what the account has seen in the same go: nothing else needs the session.
     pub fn sign_in(&mut self, user: String, password: String) {
         self.failed = None;
-        self.asking = Some(fetch::spawn(sign_in(user, password)));
+        self.pending = Some(fetch::spawn(sign_in(user, password)));
     }
 
     /// YNOproject is not told: its own sign-out would end the session the person is playing the
@@ -147,7 +145,7 @@ impl Account {
         store::write(SESSION, None);
         self.session = None;
         self.visited = None;
-        self.asking = None;
+        self.pending = None;
         self.failed = None;
         self.pretended.clear();
         // See [`Account::poll`] for why the switch is what settles this.
@@ -155,17 +153,17 @@ impl Account {
     }
 
     /// The app reads the account once at startup while the person goes on walking into places in
-    /// another window. A button rather than a poll, the answer only mattering when someone wants to
-    /// look at it. Does nothing without a session, or while an attempt is in flight.
+    /// another window. A button rather than a poll. Does nothing without a session, or while an
+    /// attempt is in flight.
     pub fn refresh(&mut self) {
         let Some(session) = self.session.clone() else {
             return;
         };
-        if self.asking.is_some() {
+        if self.pending.is_some() {
             return;
         }
         self.failed = None;
-        self.asking = Some(fetch::spawn(resume(session)));
+        self.pending = Some(fetch::spawn(resume(session)));
     }
 
     /// Everywhere the account has been, whether or not the graph is cut back by it -- unlike
@@ -191,9 +189,8 @@ impl Account {
 
     /// Pretends the account has been to a world, so the graph opens out past it.
     ///
-    /// Nothing is sent and nothing written down, so the pretence goes with the run, the sign-out,
-    /// or the next answer from the server. Kept out of [`Account::visited`] so the completion this
-    /// app reports still reads what the server said.
+    /// Nothing is sent and nothing written down, so the pretence goes with the run, the sign-out or
+    /// the next answer. Kept out of [`Account::visited`], which the reported completion reads.
     pub fn pretend(&mut self, title: String) {
         // The graph is already drawn as though this had happened.
         let known = self
@@ -218,25 +215,24 @@ impl Account {
         })
     }
 
-    /// Answered once: the asking is what clears it.
+    /// Answered once: the reading is what clears it.
     pub fn restated(&mut self) -> bool {
         std::mem::take(&mut self.restated)
     }
 
     /// Whether what the graph should be built out of is settled.
     ///
-    /// A run resuming a session asks YNOproject about it while the dump is still on its way, and the
-    /// two arrive in whichever order. Building on the dump alone would draw the whole game and then
-    /// throw it away for the frontier.
+    /// A run resuming a session checks it with YNOproject while the dump is still on its way.
+    /// Building on the dump alone would draw the whole game and then throw it away.
     ///
     /// Only while the switch is on. A finished attempt is settled however it finished -- a failure
     /// answers the question too.
     pub fn settled(&self) -> bool {
-        !self.frontier || self.asking.is_none()
+        !self.frontier || self.pending.is_none()
     }
 
     pub fn state(&self) -> State<'_> {
-        if self.asking.is_some() {
+        if self.pending.is_some() {
             return State::Working;
         }
         match (&self.visited, &self.failed) {
@@ -287,7 +283,7 @@ fn forget() {
     }));
 }
 
-/// Nothing to ask anyone: a native run keeps the session itself.
+/// Nothing to tell anyone: a native run keeps the session itself.
 #[cfg(not(target_family = "wasm"))]
 fn forget() {}
 
@@ -334,9 +330,8 @@ async fn login(user: &str, password: &str) -> Result<String, String> {
 
 /// Where the sign-in is held, which is not the same place on the two platforms.
 ///
-/// Natively it is the cookie's own value, kept by this app and set on every signed-in request. On
-/// the page it is only a marker that the browser has one: a script may neither read that cookie nor
-/// send it by hand, so the one thing ever read out is whether it is there.
+/// Natively the cookie's own value, kept by this app and set on every signed-in request. On the
+/// page only a marker that the browser has one, a script being unable to read or send it.
 mod session {
     #[cfg(target_family = "wasm")]
     const HELD_BY_THE_BROWSER: &str = "browser";
@@ -359,10 +354,10 @@ mod session {
 
     #[cfg(not(target_family = "wasm"))]
     pub fn sign(
-        asking: super::fetch::RequestBuilder,
+        request: super::fetch::RequestBuilder,
         session: &str,
     ) -> super::fetch::RequestBuilder {
-        asking.header(
+        request.header(
             reqwest::header::COOKIE,
             format!("{}={session}", super::COOKIE),
         )
@@ -370,8 +365,8 @@ mod session {
 
     /// The browser has already signed it, and will not let this add the header even to agree.
     #[cfg(target_family = "wasm")]
-    pub fn sign(asking: super::fetch::RequestBuilder, _: &str) -> super::fetch::RequestBuilder {
-        asking
+    pub fn sign(request: super::fetch::RequestBuilder, _: &str) -> super::fetch::RequestBuilder {
+        request
     }
 
     /// Everything after the first `;` is how long to keep it and where.
@@ -409,7 +404,7 @@ async fn visited(session: &str) -> Result<Visited, String> {
         .collect();
     // The two lists are kept by different people out of the same wiki, so a place YNOproject knows
     // and the dump does not is ordinary. A run where nearly none line up is drawing the wrong
-    // thing, and this is the only place that would show it.
+    // thing, and nothing else would show it.
     if visited.len() < seen.len() {
         log::info!(
             "{} of the {} places visited are not worlds this draws",
@@ -453,7 +448,7 @@ async fn seen(session: &str) -> Result<Vec<u64>, String> {
         .ok_or_else(|| t!("yno-signed-out"))
 }
 
-/// Public and the same for everyone, so it is asked for without a session and left to the ordinary
+/// Public and the same for everyone, so it is fetched without a session and left to the ordinary
 /// HTTP cache between runs.
 async fn named() -> Result<std::collections::HashMap<u64, String>, String> {
     let url = format!("{}/gamelocations", api());

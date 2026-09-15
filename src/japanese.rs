@@ -1,16 +1,16 @@
 //! The Japanese face, which nothing this app starts with has and everything Japanese needs.
 //!
 //! egui's own fonts carry Latin and little else, so Japanese is drawn as empty boxes without this.
-//! A face carrying the glyphs is a few megabytes wherever it comes from, so it is sent for as the
-//! app starts and installed the frame it turns up.
+//! A face carrying the glyphs is a few megabytes, so it is sent for as the app starts and
+//! installed the frame it turns up.
 //!
 //! Sent for whatever language the run is in: an English run shows the wiki's Japanese names beside
 //! the English ones.
 //!
 //! Where it comes from is the whole of what the platforms differ in. A device usually has one
-//! already, which [`installed`] asks for by name; a page downloads one.
+//! already, which [`installed`] looks up by name; a page downloads one.
 
-// Only ever added, never looked up: a fallback rather than a family anything asks for.
+// Only ever added, never looked up: a fallback rather than a family anything names.
 const NAME: &str = "japanese";
 
 pub(super) enum Japanese {
@@ -51,9 +51,8 @@ async fn face() -> Option<(Vec<u8>, u32)> {
     download().await.map(|face| (face, 0))
 }
 
-/// Added at the lowest priority, so it is reached only for the glyphs nothing already installed
-/// carries: the Latin in a Japanese sentence still comes from the font the panel is drawn in.
-/// `None` leaves the panel exactly as it was.
+/// Added at the lowest priority, so the Latin in a Japanese sentence still comes from the font the
+/// panel is drawn in. `None` leaves the panel as it was.
 fn install(ctx: &egui::Context, face: Option<(Vec<u8>, u32)>) {
     let Some((face, index)) = face else {
         log::warn!("no Japanese font: Japanese will be drawn as empty boxes");
@@ -83,30 +82,25 @@ fn install(ctx: &egui::Context, face: Option<(Vec<u8>, u32)>) {
 /// How far the face has to be moved for its baseline to land on the panel's own, as a fraction of
 /// the font size. Positive is downwards, per [`egui::FontTweak::y_offset_factor`].
 ///
-/// egui centres the faces in a family rather than aligning their baselines, which suits the emoji
-/// faces it ships and not a second text face: a Japanese face reserves far more of its line above
-/// the baseline than a Latin one -- Noto Sans CJK JP asks 1.16 of the font size where Ubuntu Light
-/// asks 0.93 -- so centring drops the Japanese a full point below the Latin beside it, visible in a
-/// line like `ここへ: Chainsaw が必要。`.
+/// egui centres the faces in a family rather than aligning their baselines, and a Japanese face
+/// reserves far more of its line above the baseline than a Latin one -- 1.16 of the font size
+/// against 0.93 -- so centring drops the Japanese a full point below the Latin beside it.
 ///
-/// Measured rather than guessed at, the face differing per platform. Both sides are measured
-/// against the proportional family, which is what the panel is drawn in; the face is inserted
-/// into the monospace family too, whose own first face sits a sixth of a point differently, which
-/// is not worth a second copy of the face to correct.
+/// Measured rather than guessed at, the face differing per platform. Against the proportional
+/// family, the panel being drawn in it; the monospace family sits a sixth of a point differently,
+/// which is not worth a second copy of the face to correct.
 ///
 /// Zero if either side cannot be measured, which leaves the placement exactly as egui had it.
 fn lowered(ctx: &egui::Context, face: &[u8], index: u32) -> f32 {
-    /// The one quantity the two sides are comparable in: egui's centring aligns the middles of
-    /// the lines, so what is left over is the difference between the baselines' distances from
-    /// them. Scaled to the font size.
+    /// egui's centring aligns the middles of the lines, so what is left over is the difference
+    /// between the baselines' distances from them. Scaled to the font size.
     fn from_middle(ascent: f32, line: f32) -> f32 {
         ascent - line / 2.0
     }
 
     let panel = {
-        // Asked of egui rather than read off the file egui happens to be built with, so this
-        // stays right if the panel is ever given a different Latin face. A glyph carries the
-        // metrics of the family it was placed against.
+        // Read from egui rather than off the file it happens to be built with, so this stays
+        // right if the panel is ever given a different Latin face.
         let font = egui::TextStyle::Body.resolve(&ctx.style_of(ctx.theme()));
         let size = font.size;
         let galley = ctx.fonts_mut(|fonts| {
@@ -136,15 +130,13 @@ fn lowered(ctx: &egui::Context, face: &[u8], index: u32) -> f32 {
 
 /// The Japanese interface face each platform is expected to have, best first.
 ///
-/// Named rather than searched for, because a search chooses between fonts that are all readable
-/// and only one of which is what the rest of the system draws Japanese in. Every name is a
-/// Japanese face -- the panel already has a Latin one this is inserted underneath -- so Windows
-/// is asked for Yu Gothic UI, the Japanese of the Segoe UI it draws its own interface in.
+/// Named rather than searched for: a search chooses between fonts that are all readable, only one
+/// of which is what the rest of the system draws Japanese in. Every name is a Japanese face, the
+/// panel already having a Latin one this is inserted underneath.
 ///
 /// Each list ends in what the platform had before the face it has now, so a device a version or
-/// two behind is still answered. Nothing here is guaranteed to exist, which is why the list is
-/// walked rather than indexed: a missing name is not found, and an installed one that cannot draw
-/// Japanese is rejected by [`SAMPLE`].
+/// two behind is still answered. Nothing here is guaranteed to exist: a missing name is not found,
+/// and an installed one that cannot draw Japanese is rejected by [`SAMPLE`].
 #[cfg(target_os = "windows")]
 const PREFERRED: &[&str] = &[
     "Yu Gothic UI",
@@ -182,19 +174,20 @@ const PREFERRED: &[&str] = &[
     "TakaoPGothic",
 ];
 
-/// The system font family Japanese is drawn with, and which face of it. Three ways of asking, each
-/// falling through to the next, and every candidate having to draw [`SAMPLE`] before it is taken:
+/// The system font family Japanese is drawn with, and which face of it. Three ways of finding it,
+/// each falling through to the next, and every candidate having to draw [`SAMPLE`] before it is
+/// taken:
 ///
 /// 1. [`PREFERRED`], the face the platform draws its own Japanese in.
 /// 2. The platform's script fallback, for a device carrying a Japanese font this app has never
-///    heard of. Asked by `Hira` rather than `Jpan`: the composite code resolves to a Latin font
+///    heard of. Keyed by `Hira` rather than `Jpan`: the composite code resolves to a Latin font
 ///    with no kana in it, and the kana code is what the underlying font databases key on.
 /// 3. Every family the system has, sorted only so that it is the same last resort every run, the
 ///    names coming out of a hash map.
 ///
 /// A pan-CJK font reached by 2 or 3 may show the Chinese or Korean glyph shapes a Japanese reader
-/// will notice, one file covering all four languages and only the platform knowing which of its
-/// faces was meant. Those two are choosing between a font this app can read and none at all.
+/// will notice, only the platform knowing which face was meant. Those two are choosing between a
+/// readable font and none at all.
 #[cfg(not(target_family = "wasm"))]
 fn installed() -> Option<(Vec<u8>, u32)> {
     use fontique::{Collection, CollectionOptions, FallbackKey, Script, SourceCache};
@@ -212,7 +205,7 @@ fn installed() -> Option<(Vec<u8>, u32)> {
         .iter()
         .filter_map(|name| collection.family_id(name))
         .collect();
-    let asked: Vec<_> = collection
+    let script: Vec<_> = collection
         .fallback_families(FallbackKey::from((
             Script::from_str_unchecked("Hira"),
             "ja",
@@ -225,7 +218,7 @@ fn installed() -> Option<(Vec<u8>, u32)> {
         .filter_map(|name| collection.family_id(&name))
         .collect();
 
-    named.into_iter().chain(asked).chain(every).find_map(|id| {
+    named.into_iter().chain(script).chain(every).find_map(|id| {
         let family = collection.family(id)?;
         let font = family.default_font()?;
         let blob = font.load(Some(&mut sources))?;
@@ -244,9 +237,9 @@ fn installed() -> Option<(Vec<u8>, u32)> {
 
 /// Noto Sans JP, pinned, off a host that serves it cross-origin.
 ///
-/// The whole face rather than the glyphs this app can name in advance: a subset of exactly the
-/// world names in `data.json` is a tenth of the size, but also an asset to build and keep in step
-/// with every refresh of the dump, where this is one download the browser then keeps.
+/// The whole face rather than the glyphs this app can name in advance: a subset of the world names
+/// in `data.json` is a tenth of the size, but an asset to build and keep in step with every
+/// refresh of the dump.
 #[cfg(target_family = "wasm")]
 const URL: &str = "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@Sans2.004/Sans/SubsetOTF/JP/NotoSansJP-Regular.otf";
 
@@ -265,7 +258,7 @@ async fn download() -> Option<Vec<u8>> {
     let face = response
         .bytes()
         .await
-        .inspect_err(|error| log::warn!("the Japanese font did not arrive whole: {error}"))
+        .inspect_err(|error| log::warn!("the Japanese font did not download whole: {error}"))
         .ok()?;
     Some(face.into())
 }

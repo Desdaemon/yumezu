@@ -8,9 +8,8 @@ const EDGE_RADIUS: f32 = 0.05;
 /// Sides of the tube a connection is drawn as. Tens of thousands of them come out a pixel wide, so
 /// the cost is triangle setup rather than fill and the sides are very nearly the whole of it.
 const EDGE_SIDES: u32 = 3;
-/// World units rather than a share of the connection: `layout::edge_reach` lets a one-way
-/// connection stretch as far as the layout wants, so a share of one is no fixed size at all.
-/// Against `NODE_LEAF_RADIUS` for scale.
+/// World units rather than a share of the connection, which `layout::edge_reach` lets stretch as
+/// far as the layout wants. Against `NODE_LEAF_RADIUS` for scale.
 const EDGE_DASH_LENGTH: f32 = 1.0;
 /// Start of one dash to the start of the next; the gap is what is left over.
 const EDGE_DASH_PERIOD: f32 = 3.0;
@@ -18,14 +17,13 @@ const EDGE_DASH_PERIOD: f32 = 3.0;
 /// for reads as a worn-away line rather than a mark travelling along one.
 const EDGE_DASH_WIDTH: f32 = 1.6;
 /// Slots a second: at `1.0` a dash takes a second to reach where the dash ahead of it started. The
-/// marching carries the direction on its own, so nothing about a still frame points anywhere.
-/// World units a second.
+/// marching carries the direction, so nothing about a still frame points anywhere.
 const EDGE_DASH_SPEED: f32 = 3.0;
 /// sRGB, which is what both the clear and [`panorama_texture`]'s glows over it want.
 pub(super) const BACKGROUND_COLOR: [f32; 3] = [0.03, 0.03, 0.05];
 /// Side of the backdrop's repeating tile in texels, and the spacing of the lattice of glows inside
-/// it. Four glows lie across the tile, each with its own brightness, so the lattice does not read
-/// as one cell stamped over and over. Its size on screen is [`PANORAMA_TILE_PIXELS`].
+/// it. Four glows lie across the tile, each with its own brightness, so it does not read as one
+/// cell stamped over and over. Its size on screen is [`PANORAMA_TILE_PIXELS`].
 const PANORAMA_TILE_TEXELS: usize = 256;
 const PANORAMA_CELL_TEXELS: usize = 64;
 /// How far a glow reaches, in texels, and how sharply it fades over that reach. Most of a cell, so
@@ -52,21 +50,18 @@ const PANORAMA_TILE_PIXELS: f32 = 260.0;
 /// How far the backdrop slides, in tiles, per unit of the view direction's horizontal or vertical
 /// component.
 ///
-/// Small on purpose: a panorama sits far enough away that a turn toward it barely shifts it, and
-/// that faint drift is what makes the graph read as turning in front of a scene rather than a
-/// decal.
+/// Small on purpose: a panorama sits far enough away that a turn barely shifts it, and that faint
+/// drift is what makes the graph read as turning in front of a scene rather than a decal.
 const PANORAMA_PARALLAX: f32 = 0.12;
-/// Brightness of the connection into a world with nothing behind it, against the one into the world
-/// the whole game is behind. The connections carry the depth ramp, so this is the range the ramp is
-/// drawn over rather than a color of its own. See [`edge_colors`].
+/// Brightness of the connection into a world with nothing behind it, against the one into the
+/// world the whole game is behind: the range the depth ramp is drawn over. See [`edge_colors`].
 const EDGE_LEAF_BRIGHTNESS: f32 = 0.6;
 /// How far the connection colors move toward even apparent brightness: at 0 the ramp keeps its own
 /// stops, at 1 every stop takes the brightness of the dimmest.
 ///
 /// The ramp is picked for hue, and hue drags brightness with it -- most of what the eye reads as
-/// brightness is the green channel, so the green stop in the middle looks glaring beside the
-/// magenta at the end even though both are nominally full. Levelled far enough that no stop shouts
-/// over the others, and not so far that the ramp flattens into four shades of one brightness.
+/// brightness is the green channel, so the green stop looks glaring beside the magenta. Levelled
+/// far enough that no stop shouts, not so far that the ramp flattens.
 const EDGE_LUMINANCE_EVENNESS: f32 = 0.5;
 /// Warm and bright, for the edges of the route back to the origin world.
 const ROUTE_COLOR: Srgba = Srgba::new(255, 242, 194, 255);
@@ -78,14 +73,12 @@ const ROUTE_HOME_COLOR: Srgba = Srgba::new(255, 58, 74, 255);
 const DIMMED_BRIGHTNESS: f32 = 0.25;
 /// How much of its own picture is added back over a world's node while a list row points at it.
 ///
-/// Added rather than multiplied, because a lit node is already painted white and there is nothing
-/// left to multiply by. High enough to pick the node out of a crowd, low enough that the
-/// screenshot is still a screenshot.
+/// Added rather than multiplied, a lit node already being painted white. High enough to pick the
+/// node out of a crowd, low enough that the screenshot is still a screenshot.
 const POINTED_BRIGHTNESS: f32 = 0.85;
 /// Deliberately off the distance ramp: the worlds the origin cannot reach are at no distance at
 /// all rather than at a large one, and reading them as the far end of the ramp would be a lie.
 const UNREACHED_COLOR: Srgba = Srgba::new(110, 110, 120, 255);
-/// How long the panel counts frames over before saying how many there were, in milliseconds. The
 /// Cuts the dashes out of a solid line as it is drawn, so one instance is a whole connection
 /// whatever its length and however many dashes fit along it.
 pub(super) struct DashMaterial {
@@ -135,9 +128,24 @@ fn dash_line() -> CpuMesh {
     mesh.uvs = Some(positions.iter().map(|at| vec2(at.x, 0.0)).collect());
     mesh
 }
-/// A free function rather than a method because it reads the dump the app holds and hands back
-/// what the app is about to hold beside it: two borrows of one [`App`] that do not overlap in fact
-/// and cannot both be taken in a method.
+/// How long the app waits before fetching the thumbnail atlas again, after a try that could not be
+/// had. Longer than the dump's retries because nothing waits on it: the graph draws without the
+/// pictures. See [`Atlas`].
+const ATLAS_RETRIED_AFTER_SECONDS: f32 = 10.0;
+
+/// Where the thumbnail atlas has got to: a state rather than a handle because a try that fails is
+/// retried. Modelled on [`Dump`], which waits the same way.
+pub(super) enum Atlas {
+    Loading(fetch::Pending<Option<CpuTexture>>),
+    /// Seconds until the next try.
+    Waiting(f32),
+    /// On screen, or wrong-shaped and therefore never going to be: a mismatch between the atlas and
+    /// the dump is not something trying again can mend.
+    Settled,
+}
+
+/// A free function rather than a method: it reads the dump the app holds and hands back what the
+/// app is about to hold beside it, two borrows of one [`App`] a method could not take.
 pub(super) fn entities(
     dump: &world::Dump,
     before: Option<&Before>,
@@ -152,9 +160,8 @@ pub(super) fn entities(
     let routes = world::routes_from(&connections, world::origin_world(worlds));
     let deepest = routes.depth.iter().flatten().copied().max().unwrap_or(0);
     let furthest = deepest.max(1) as f32;
-    // Sized by how much of the graph hangs off each world. The logarithm grows the size with the
-    // order of magnitude of what a world leads to rather than with the count, so a deep world with
-    // a handful behind it lands within reach of a shallow one with a hundred.
+    // Sized by how much of the graph hangs off each world, through a logarithm so a deep world
+    // with a handful behind it lands within reach of a shallow one with a hundred.
     let descendants = routes.descendant_counts();
     let node_radii: Vec<_> = descendants
         .iter()
@@ -217,8 +224,8 @@ pub(super) fn entities(
             }
             let to = step.world;
             // Stored from the end a player can leave, so the dashes march the way they can walk.
-            // Walkable both ways or neither keeps the dump's own order: nothing drawn on such a
-            // connection means anything to a direction.
+            // Walkable both ways or neither keeps the dump's own order, nothing drawn on such a
+            // connection meaning anything to a direction.
             let (from, to) = if step.out.is_none() && step.back.is_some() {
                 (to, from)
             } else {
@@ -296,9 +303,9 @@ pub(super) fn entities(
         },
         is_transparent: false,
     };
-    // Quads rather than cubes, turned to face the camera every frame: a picture has to be seen
-    // square on, and a cube's uv coordinates unwrap its six faces across the image rather than
-    // giving each face the whole of it. No texture yet -- the atlas is still on its way in.
+    // Quads rather than cubes, turned to face the camera every frame: a cube's uv coordinates
+    // unwrap its six faces across the image rather than giving each the whole of it. No texture
+    // yet -- the atlas is still on its way in.
     let thumbnails = Gm::new(
         InstancedMesh::new(ctx, &thumbnail_instances, &CpuMesh::square()),
         ColorMaterial::default(),
@@ -316,8 +323,7 @@ pub(super) fn entities(
                 write_mask: WriteMask::COLOR,
                 // Equal passes because at these distances the lift toward the camera is smaller
                 // than one step of the depth buffer. The quad is never *behind* the node it
-                // copies, so the two depths quantise to either less or the same, and a strict
-                // test drops the glow on exactly the frames the rounding went the other way.
+                // copies, so a strict test would drop the glow wherever the rounding tied.
                 depth_test: DepthTest::LessOrEqual,
                 blend: Blend::ADD,
                 ..Default::default()
@@ -529,7 +535,7 @@ impl AppEntities {
             let (color, shown) = match self.selected {
                 None => (base[edge], false),
                 // The one line it is about, and not even the step home from either of its ends,
-                // which is a different way through the graph than the one the reader asked for.
+                // which is a different way through the graph than the one the reader picked.
                 Some(Highlight::Connection(at, far)) => {
                     if (a, b) == (at, far) || (a, b) == (far, at) {
                         (ROUTE_COLOR, true)
@@ -537,15 +543,13 @@ impl AppEntities {
                         (dim(base[edge]), false)
                     }
                 }
-                // A layer is a shell rather than a walk, so what is worth seeing across it is
-                // where it is stitched to itself, not the step each world takes home. Both ends
-                // being lit is the whole test, and such an edge is never a canonical step -- a
-                // parent is always exactly one depth in -- so it keeps its own distance color and
-                // only escapes the dimming.
+                // A layer is a shell rather than a walk, so what is worth seeing is where it is
+                // stitched to itself. Both ends being lit is the whole test, and such an edge is
+                // never a canonical step, so it keeps its distance color and only escapes the
+                // dimming.
                 Some(Highlight::Layer(_)) if on_route[a] && on_route[b] => (base[edge], true),
-                // Both ends being lit is not enough: it also has to be a step the walk takes, or
-                // a shortcut between two distant points of a route would light up as if the walk
-                // went through it.
+                // Both ends being lit is not enough: it also has to be a step the walk takes, or a
+                // shortcut across the route would light up as if the walk went through it.
                 Some(_) if walked[a] == Some(b) || walked[b] == Some(a) => (ROUTE_HOME_COLOR, true),
                 // Directions are their own steps and nothing else, the canonical tree not being
                 // the way they go.
@@ -665,8 +669,7 @@ impl AppEntities {
     }
 
     /// `laid_out` is whether the layout itself moved. The node quads face the camera, so a turn
-    /// dates them over a layout that has not; the lines are only where the worlds are, so a turn
-    /// would lay the same bytes back over every connection in the graph.
+    /// dates them alone: the lines are only where the worlds are.
     pub(super) fn rebuild_instances(&mut self, camera: &Camera, laid_out: bool) {
         self.rebuild_nodes(camera);
         if laid_out {
@@ -751,9 +754,8 @@ impl AppEntities {
     /// Stands the placeholder over every world the player has not been to.
     ///
     /// Taken from the nodes' own quads rather than worked out again, so a placeholder is exactly
-    /// where and how big the world it stands for is, and dims with it. Lifted toward the camera as
-    /// a magnified picture is, two coplanar quads otherwise leaving the depth test to pick between
-    /// them per pixel; composed onto the node's own transformation, translations commuting.
+    /// where and how big its world is, and dims with it. Lifted toward the camera as a magnified
+    /// picture is, coplanar quads otherwise leaving the depth test to pick per pixel.
     ///
     /// Every frame, like the magnified pictures: what it copies is rebuilt whenever the layout
     /// moves, the camera turns, or a selection repaints.
@@ -813,10 +815,9 @@ impl AppEntities {
     /// Points the thumbnail quads at their own cells of the atlas once it has arrived, and hands
     /// egui a copy for the catalog. Nothing is drawn until then.
     ///
-    /// An atlas that could not be had is asked for again after [`ATLAS_RETRIED_AFTER_SECONDS`]:
-    /// `seconds` is the frame's own, and the wait therefore runs on frames the app was drawing
-    /// anyway rather than keeping it awake. So a run left alone defers its next try until something
-    /// touches it, which is the right trade for pictures the graph reads fine without.
+    /// An atlas that could not be had is fetched again after [`ATLAS_RETRIED_AFTER_SECONDS`].
+    /// `seconds` is the frame's own, so the wait runs on frames the app was drawing anyway and a
+    /// run left alone defers its next try until something touches it.
     pub(super) fn receive_atlas(&mut self, seconds: f32, context: &Context, egui: &egui::Context) {
         let loaded = match &mut self.atlas {
             Atlas::Settled => return,
@@ -867,15 +868,12 @@ impl AppEntities {
 
     /// Stands the glow quad over the node a list row is pointing at, on that world's cell.
     ///
-    /// The node's own quad is taken rather than worked out again: it is already turned to face the
-    /// camera and already the right size, and standing the glow anywhere else would brighten a
-    /// different shape than the one on screen. Only the lift toward the camera is added, so the
-    /// two are not coplanar -- twice [`detail::LIFT`], because a magnified world already sits one
-    /// lift in front and the glow is over that too.
+    /// The node's own quad is taken rather than worked out again, so the glow brightens exactly
+    /// the shape on screen. Only the lift is added, twice [`detail::LIFT`] because a magnified
+    /// world already sits one lift in front.
     ///
-    /// A lift proportional to a node is small next to how far away the graph is read from, so it
-    /// is not on its own enough to clear the depth buffer's rounding. What makes that harmless is
-    /// the `depth_test` the quad is drawn under.
+    /// That lift is too small to clear the depth buffer's rounding; the quad's `depth_test` is
+    /// what makes that harmless.
     pub(super) fn aim_glow(&mut self, camera: &Camera) {
         let Some(world) = self.pointed else { return };
         let Some(cells) = self.thumbnail_instances.texture_transformations.as_ref() else {
@@ -898,18 +896,15 @@ impl AppEntities {
         ready.then_some(&self.glow as &dyn Object)
     }
 
-    /// Every world the view is asking more of than the atlas holds, nearest the camera first.
+    /// Every world the view needs more of than the atlas holds, nearest the camera first.
     ///
     /// What [`detail`] is driven from, and the reason it needs no view of its own: a world is here
-    /// because its node is on screen and drawn wider than [`detail::LEAVE_PIXELS`], and it carries
-    /// the quad it would have been drawn on so the full picture lands over its thumbnail. The whole
-    /// hysteresis band, not only what the switch admits: which end applies turns on what is
-    /// already held, which only [`detail::Detail::track`] knows.
+    /// because its node is on screen and drawn wider than [`detail::LEAVE_PIXELS`], carrying the
+    /// quad it would have been drawn on. The whole hysteresis band, which end applies being known
+    /// only to [`detail::Detail::track`].
     ///
-    /// A world in the middle of becoming itself is asked for at the size it is about to be rather
-    /// than the size it is now, so the picture is fetched while the placeholder is still shrinking
-    /// away and what grows back is the world's own from the first frame, rather than a thumbnail
-    /// that pops sharp part way up.
+    /// A world in the middle of becoming itself is measured at the size it is about to be, so what
+    /// grows back is the world's own picture from the first frame.
     pub(super) fn magnified(&self, camera: &Camera, viewport: Viewport) -> Vec<detail::Magnified> {
         let billboard = billboard(camera);
         let forward = camera.view_direction();
@@ -954,18 +949,15 @@ impl AppEntities {
             ));
         });
         // Not by drawn width: perspective inflates a node as it goes off-axis, a third wider in
-        // the corner than the same node dead centre, so width would spend the budget on the
-        // worlds leaving the window rather than the one the view is pointed at.
+        // the corner, so width would spend the budget on the worlds leaving the window.
         magnified.sort_by(|(a, _), (b, _)| a.total_cmp(b));
         magnified.into_iter().map(|(_, it)| it).collect()
     }
 }
 /// A lattice of soft blue glows on the background color, in the style of the game's own panoramas.
 ///
-/// Held in linear color, which is what the shader's own sRGB encoding expects on the way out, and
-/// at half precision because eight bits of linear is not enough for glows this dim: the darkest
-/// steps land far enough apart once encoded to band, and dithering them only trades the banding
-/// for grain across the whole flat backdrop.
+/// Held in linear color, which the shader's sRGB encoding expects, and at half precision: eight
+/// bits of linear bands at these brightnesses, and dithering trades the bands for grain.
 fn panorama_tile() -> CpuTexture {
     let cells = PANORAMA_TILE_TEXELS / PANORAMA_CELL_TEXELS;
     let mut data = Vec::with_capacity(PANORAMA_TILE_TEXELS * PANORAMA_TILE_TEXELS);
@@ -1029,8 +1021,7 @@ fn srgb_to_linear(channel: f32) -> f32 {
 
 /// Scaled so a tile keeps a fixed size in logical pixels whatever the window and the display
 /// density, and slid by [`PANORAMA_PARALLAX`] as the camera turns. Where the camera *is* does not
-/// enter: a panorama is far enough away that only the direction it is seen from moves it, which
-/// keeps the backdrop from reading as a plane the graph slides over.
+/// enter, or the backdrop would read as a plane the graph slides over.
 ///
 /// The offset is taken straight from the view direction rather than from a yaw and a pitch, so it
 /// stays continuous all the way around instead of snapping where an angle wraps.
@@ -1042,16 +1033,13 @@ pub(super) fn panorama_transform(viewport: Viewport, device_pixel_ratio: f32, vi
     Mat3::from_translation(drift)
         * Mat3::from_nonuniform_scale(viewport.width as f32 / tile, viewport.height as f32 / tile)
 }
-/// A normalized distance from the origin around the hues, so how far a world sits from the start
-/// of the game reads off its color. Blue at the origin and on round through cyan, green, yellow
-/// and red to magenta: a turn of five sixths rather than a whole one, so the deepest connection
-/// is not painted the same blue as the shallowest.
+/// A normalized distance from the origin around the hues. Blue at the origin and on through cyan,
+/// green, yellow and red to magenta: five sixths of a turn, so the deepest connection is not
+/// painted the shallowest's blue.
 ///
 /// Written as the corners themselves rather than as a hue swept through: neighbouring corners
-/// share a channel at the full, so interpolating between two of them stays as saturated as both,
-/// and no stop is a number this file would have to trust a conversion for. The stops stay bright
-/// to hold up against [`BACKGROUND_COLOR`], the blue lifted off a pure one -- which at this end
-/// of the range would read as unlit rather than as near.
+/// share a channel at the full, so interpolating between two stays as saturated as both. The blue
+/// is lifted off a pure one, which against [`BACKGROUND_COLOR`] would read as unlit.
 fn distance_color(distance: f32) -> Srgba {
     const STOPS: [[f32; 3]; 6] = [
         [0.25, 0.35, 1.00],
@@ -1089,14 +1077,11 @@ fn scaled(color: Srgba, brightness: f32) -> Srgba {
 /// Per connection, the color it carries when nothing is selected.
 ///
 /// The depth ramp lives on the connections rather than the worlds, which carry pictures: a
-/// connection wears the color of the world it is walked *from*, so following a line outward from
-/// the origin walks the ramp. Its brightness says how much of the game lies through it, which
-/// makes the trunk of the route tree stand out of its twigs -- read through a logarithm for the
-/// same reason the node sizes are.
+/// connection wears the color of the world it is walked *from*. Its brightness says how much of
+/// the game lies through it, through a logarithm as the node sizes are.
 ///
-/// Which end is walked from is the canonical routes' answer where they have one. A connection that
-/// is nobody's route home -- a shortcut across the tree -- is taken as walked from its shallower
-/// end, which is the direction a player meets it in anyway.
+/// Which end is walked from is the canonical routes' answer where they have one. A shortcut across
+/// the tree is taken as walked from its shallower end, which a player meets it from anyway.
 fn edge_colors(
     graph: &Graph,
     routes: &world::Routes,

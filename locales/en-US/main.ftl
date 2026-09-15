@@ -180,7 +180,7 @@ clear-cache-clearing = Clearing...
 clear-cache-done = Downloads cleared
 clear-cache-failed = The downloads could not be cleared
 update-check = Check for updates
-update-check-hint = Asks GitHub whether a release newer than this build is available
+update-check-hint = Checks GitHub for a release newer than this build
 update-checking = Checking...
 update-current = This is the newest release
 update-ready = { $version } is available
@@ -261,7 +261,7 @@ map-fit = Fit the whole map in the window
 map-maximize = Fill the screen with the window
 map-restore = Put the window back where it was
 
-## What a connection asks of a player walking it.
+## What a connection demands of a player walking it.
 ##
 ## The bare name of the condition, for the connections the wiki writes no words of its own about.
 

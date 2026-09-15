@@ -1,14 +1,13 @@
-//! What the page asks about a player's own YNOproject account, put through to YNOproject.
+//! What the page reads about a player's own YNOproject account, put through to YNOproject.
 //!
-//! The page cannot ask YNOproject itself: that host allows exactly one origin -- its own site --
+//! The page cannot reach YNOproject itself: that host allows exactly one origin -- its own site --
 //! and the credential it answers to is a cookie, which a script may neither read nor set by hand.
 //!
-//! The one thing done beyond forwarding is the sign-in's cookie. YNOproject issues it for its own
-//! domain, which a browser reading this page would refuse to keep, so [`resettled`] hands it back
-//! for whatever origin served the page.
+//! The one thing done beyond forwarding is the sign-in's cookie, which YNOproject issues for its
+//! own domain and a browser would therefore refuse to keep. See [`resettled`].
 //!
 //! The cost is that a signed-in request goes through this host, so this host sees the session. That
-//! is why the native builds ask YNOproject directly instead.
+//! is why the native builds reach YNOproject directly instead.
 //!
 //! Only the routes the app uses, rather than a path forwarding whatever it is given: an open relay
 //! to someone else's API is not something to run by accident.
@@ -42,7 +41,7 @@ async fn info(headers: HeaderMap) -> Response {
 
 /// `GET /yno/gamelocations` -- every place YNOproject knows, by id.
 ///
-/// The same document for everybody, so it is asked for without a session.
+/// The same document for everybody, so it is fetched without a session.
 async fn locations() -> Response {
     forward(&format!("{API}/gamelocations"), None).await
 }
@@ -103,11 +102,11 @@ async fn forget() -> Response {
 
 /// Status and body as they came back: a failure upstream is for the page to read and say.
 async fn forward(url: &str, session: Option<HeaderValue>) -> Response {
-    let mut asking = client().get(url);
+    let mut request = client().get(url);
     if let Some(session) = session {
-        asking = asking.header(header::COOKIE, session);
+        request = request.header(header::COOKIE, session);
     }
-    match asking.send().await {
+    match request.send().await {
         Ok(answer) => {
             let status = answer.status();
             let content_type = answer
@@ -139,10 +138,9 @@ fn session(headers: &HeaderMap) -> Option<HeaderValue> {
 
 /// One `Set-Cookie` from YNOproject, made keepable by whatever browser is reading this page.
 ///
-/// `Domain` is dropped, which is the whole point: a browser refuses a cookie for a domain that is
-/// not the one that served the response, and without the attribute the cookie belongs to whichever
-/// origin served it. `Path` is forced to the root, the page asking under paths of its own.
-/// Everything else is left as YNOproject wrote it.
+/// `Domain` is dropped, which is the whole point: without the attribute the cookie belongs to
+/// whichever origin served it. `Path` is forced to the root, the page fetching under paths of its
+/// own, and everything else is left as YNOproject wrote it.
 ///
 /// `None` for a cookie that is not the session.
 fn resettled(cookie: &str) -> Option<HeaderValue> {
@@ -193,8 +191,8 @@ mod tests {
         .expect("the session is passed on");
         assert_eq!(
             resettled.to_str().unwrap(),
-            // The root, because the page asks under paths of its own; no domain, so it belongs to
-            // whoever served it.
+            // The root, because the page fetches under paths of its own; no domain, so it belongs
+            // to whoever served it.
             "auth=s3cr3t; Path=/; Max-Age=2592000; HttpOnly; Secure; SameSite=None"
         );
     }

@@ -2,8 +2,7 @@
 //!
 //! Read next to the graph rather than in place of it, so they get a window that can be moved and
 //! resized and stays open across selections. Some run to a few thousand pixels of corridors, hence
-//! [`egui::Scene`] -- panned and zoomed rather than laid out. Worlds whose floors the wiki drew
-//! separately get a tab per map.
+//! [`egui::Scene`]. Worlds whose floors the wiki drew separately get a tab per map.
 
 use egui_material_icons::icons::{ICON_CLOSE_FULLSCREEN, ICON_FIT_SCREEN, ICON_OPEN_IN_FULL};
 use three_d::renderer::CpuTexture;
@@ -52,15 +51,15 @@ struct Sheet {
     label: String,
     picture: Picture,
     /// In the picture's own pixels, per map, so stepping through the tabs and back leaves each one
-    /// where it was left. Empty until the picture arrives and there is a size to fit, which is also
-    /// what [`egui::Scene`] reads as "no view yet".
+    /// where it was left. Empty until the picture resolves, which [`egui::Scene`] reads as "no view
+    /// yet".
     at: egui::Rect,
 }
 
 enum Picture {
     Loading(fetch::Pending<Option<CpuTexture>>),
     Ready(egui::TextureHandle),
-    /// Kept rather than dropped: a window left open would otherwise ask again every frame.
+    /// Kept rather than dropped: a window left open would otherwise fetch again every frame.
     Missing,
 }
 
@@ -100,7 +99,7 @@ impl Maps {
             return;
         };
         for sheet in &mut open.sheets {
-            sheet.arrive(ctx);
+            sheet.resolve(ctx);
         }
         // Copied out and back: `Window::open` holds its flag for as long as the closure reading
         // the rest runs.
@@ -114,8 +113,7 @@ impl Maps {
             // of the screen to give it.
             Sizing::Free => window.default_size(SIZE).resizable(true),
             // three-d tells egui nothing about the system's furniture, so egui's content rect is
-            // the whole window; the app's own insets keep a maximized window out from under a
-            // status bar.
+            // the whole window and the app's own insets keep it out from under a status bar.
             Sizing::Full(_) => window.fixed_rect(ctx.content_rect() - insets),
             Sizing::Restoring(rect) => window.fixed_rect(rect),
         };
@@ -146,7 +144,7 @@ impl Sizing {
 }
 
 impl Open {
-    /// Returns whether the window was asked to be taken to or out of the whole screen.
+    /// Returns whether the window was told to go to or come out of the whole screen.
     fn show(&mut self, ui: &mut egui::Ui, full: bool) -> bool {
         if self.sheets.is_empty() {
             ui.label(t!("map-none"));
@@ -185,7 +183,7 @@ impl Open {
 }
 
 impl Sheet {
-    fn arrive(&mut self, ctx: &egui::Context) {
+    fn resolve(&mut self, ctx: &egui::Context) {
         let Picture::Loading(pending) = &self.picture else {
             return;
         };

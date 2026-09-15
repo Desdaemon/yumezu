@@ -1,11 +1,10 @@
 //! Building a dump out of what the wiki knows.
 //!
-//! Four fetches describe four parts of the same thing -- worlds, the connections between them, the
-//! people credited for them, the releases they arrived in -- and none knows about the others. This
-//! is where they are joined into one graph, measured, and written out for the reader.
+//! Four fetches describe four parts of the same thing -- worlds, connections, credits, releases --
+//! and none knows about the others. Here they are joined into one graph, measured and written out.
 //!
 //! A rebuild does not have to fetch all four: [`Fetched`] keeps the last answers, and a sync that
-//! knows which pages have been edited re-asks only the parts those pages could have changed.
+//! knows which pages have been edited re-reads only the parts those pages could have changed.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -17,9 +16,8 @@ use crate::versions;
 
 /// What the last sync fetched, kept so the next one can leave most of it alone.
 ///
-/// Every fetch here is a question about pages, so an account of which pages have been edited is
-/// also an account of which answers can still be trusted. On a wiki where a week's editing touches
-/// a dozen worlds, that is two or three requests instead of thirty.
+/// Every fetch here is a question about pages, so an account of which pages have been edited says
+/// which answers can still be trusted: two or three requests a week instead of thirty.
 ///
 /// The worlds themselves are not kept: they are one query for all sixteen hundred, and a world that
 /// changed can add or remove one, which would make this something to reconcile rather than skip.
@@ -37,7 +35,7 @@ pub struct Fetched {
 
 /// How much of the wiki a sync re-reads.
 pub enum Refresh {
-    /// Whatever the wiki says about itself, without asking what has changed.
+    /// Whatever the wiki says about itself, without querying what has changed.
     Everything,
     /// Titles without the `Yume 2kki:` namespace prefix. An empty list never reaches here: the
     /// caller stands the sync down instead.
@@ -81,7 +79,7 @@ const AUTHORS: &str = "Authors";
 const VERSION_HISTORY: &str = "Version History";
 
 /// `previous` is the last dump published, consulted only for what an operator has marked on the
-/// worlds and when the dump was last rebuilt without asking.
+/// worlds and when the dump was last rebuilt without querying.
 pub async fn run(
     http: &reqwest::Client,
     previous: &Dump,
@@ -89,14 +87,14 @@ pub async fn run(
     fetched: &mut Fetched,
     progress: &Progress,
 ) -> smw::Result<Dump> {
-    // First and alone: what the worlds are decides which pieces of the connection query to ask for.
+    // First and alone: what the worlds are decides which pieces of the connection query to request.
     progress.at(progress::WORLDS);
     let locations = smw::locations(http).await?;
     let initials: BTreeSet<char> = locations
         .iter()
         .filter_map(|location| location.title.chars().next())
         .collect();
-    // An empty cache is a run that has just come up, so everything is asked for however little the
+    // An empty cache is a run that has just come up, so everything is requested however little the
     // wiki says has changed.
     let cold = fetched.connections.is_empty();
     let want_authors = cold || refresh.touches(AUTHORS);
@@ -115,7 +113,7 @@ pub async fn run(
         smw::connections(http, shards),
     )?;
 
-    // What came back replaces what it was asked in place of; the rest of the last answer stands.
+    // What came back replaces the piece it was requested for; the rest of the last answer stands.
     if let Some(authors) = authors {
         fetched.authors = authors;
     }
@@ -128,7 +126,7 @@ pub async fn run(
         .connections
         .retain(|initial, _| initials.contains(initial));
 
-    /// Which parts were asked for this time, so a log line reads as what this sync cost rather
+    /// Which parts were read this time, so a log line reads as what this sync cost rather
     /// than what it ended up holding.
     fn again(read: bool) -> &'static str {
         match read {
@@ -182,9 +180,8 @@ fn assemble<'a>(
         .map(|(at, location)| (location.title.as_str(), at))
         .collect();
 
-    // One entry per pair of worlds rather than per row. The wiki writes a connection up once per
-    // direction, and occasionally twice where there is more than one way through; either way it is
-    // one connection carrying everything the wiki said about it.
+    // One entry per pair of worlds rather than per row: the wiki writes a connection up once per
+    // direction, and occasionally twice where there is more than one way through.
     let mut merged: HashMap<(usize, usize), Attributes> = HashMap::new();
     let mut leaving: Vec<Vec<usize>> = vec![Vec::new(); locations.len()];
     for connection in connections {
@@ -279,7 +276,7 @@ fn assemble<'a>(
                     let attributes = &merged[&(at, to)];
                     Some(Connection {
                         target_id: published[to]?,
-                        flags: attributes.flags.bits(),
+                        bits: attributes.flags.bits(),
                         type_params: attributes.wording.clone(),
                     })
                 })
@@ -361,9 +358,8 @@ struct Attributes {
 /// Secrets included: the mark is carried from one dump to the next by title, so a dropped world is
 /// a mark forgotten at the next sync, and hiding is a question about a reader rather than the game.
 ///
-/// A world's published id is its index here, and the order is a property of the wiki rather than of
-/// this program's history: two runs reading the same wiki publish the same ids, whether either had
-/// a dump to start from or not.
+/// A world's published id is its index here, and the order is the wiki's rather than this program's
+/// history, so two runs reading the same wiki publish the same ids.
 fn published_worlds(mut locations: Vec<smw::Location>) -> Vec<smw::Location> {
     locations.sort_by(|one, other| published_place(one).cmp(&published_place(other)));
     locations
@@ -373,9 +369,8 @@ fn published_worlds(mut locations: Vec<smw::Location>) -> Vec<smw::Location> {
 ///
 /// Nothing reads a world's position: the app and [`crate::depth`] both find the origin by title,
 /// and a `targetId` only has to agree with the dump it was published in. The order used to be the
-/// game's map numbering, which put a world roughly where it was added and so kept the thumbnail
-/// atlas from shifting under an insertion -- a job the world's own `cell` now does, and does
-/// properly. What is left is a dump a person can read, which title alone gives.
+/// game's map numbering, to keep the thumbnail atlas from shifting under an insertion -- a job the
+/// world's own `cell` now does. What is left is a dump a person can read.
 ///
 /// The origin is named anyway. It costs a comparison, and a dump opening on `3D Structures Path`
 /// rather than the room the player wakes up in reads as a mistake.
@@ -386,22 +381,20 @@ fn published_place(location: &smw::Location) -> (bool, &str) {
 /// Every published world's cell in the thumbnail atlas, by title.
 ///
 /// A cell is handed out once and never moves: a world keeps whatever the last dump gave it, and one
-/// first seen now takes a cell above every cell in use. This is why the atlas is not packed by
-/// [`World::id`]. An id is a place in [`published_place`] order, and that order moves under a world
-/// already published -- the wiki documents an old area, or corrects which maps a world is -- which
-/// would leave every picture after the newcomer belonging to somebody else.
+/// first seen now takes a cell above every cell in use. Not packed by [`World::id`], which is a
+/// place in [`published_place`] order and moves under an already-published world, leaving every
+/// picture after the newcomer belonging to somebody else.
 ///
 /// So an atlas is still right about every world it was packed with however far the dump has moved
 /// on, and a world it has no cell for draws the placeholder until the atlas is packed again.
 ///
-/// Cells are not reused below the highest one held: a gap a dropped world leaves stays a gap, where
-/// handing it to the next world along would be the same wrong picture in miniature. A `full` run
-/// reclaims the tail, forgetting the cells of worlds the dump has stopped publishing -- held to the
-/// weekly pass so a world the wiki marks removed and then restores keeps its picture.
+/// Cells are not reused below the highest one held: handing a dropped world's gap to the next world
+/// along is the same wrong picture in miniature. A `full` run reclaims the tail, held to the weekly
+/// pass so a world the wiki marks removed and then restores keeps its picture.
 ///
 /// Title is the key, as it is for [`marked_secret`], and carries the same cost: a world the wiki
-/// renames is a world this has never seen, and takes a fresh cell. A cold build has nothing to
-/// carry and hands out cells in publish order, so the atlas has to be packed again after one.
+/// renames takes a fresh cell. A cold build hands out cells in publish order, so the atlas has to
+/// be packed again after one.
 fn cells<'a>(previous: &Dump, live: &[&'a str], full: bool) -> HashMap<&'a str, usize> {
     let mut held: HashMap<&str, usize> = previous
         .worlds
@@ -469,12 +462,11 @@ fn encode_uri(url: &str) -> String {
     encoded
 }
 
-/// When the dump was built, and when it was last built without first asking whether it needed to be.
+/// When the dump was built, and when it was last built without checking whether it needed to be.
 ///
-/// A soft sync publishes a dump as complete as any other, but reached by trusting the wiki's account
-/// of itself, and if that account were wrong no soft sync would notice. So `lastFullUpdate` marks
-/// the last time this program saw the whole wiki for itself, and a soft sync carries it over rather
-/// than moving it. A dump with no previous stamp is a full sync however it was asked for.
+/// A soft sync publishes a dump as complete as any other, but by trusting the wiki's account of
+/// itself, which no soft sync could catch out. So `lastFullUpdate` marks the last time this program
+/// saw the whole wiki, and a soft sync carries it over rather than moving it.
 fn stamps(previous: &Dump, full: bool) -> (Option<String>, Option<String>) {
     let now = stamp();
     let last_full = match full {
@@ -486,23 +478,22 @@ fn stamps(previous: &Dump, full: bool) -> (Option<String>, Option<String>) {
 
 /// How far back the wiki's record of its own recent changes is worth trusting.
 ///
-/// MediaWiki keeps that record for a fixed span and then forgets, answering a question about a
-/// moment further back with the changes it still has rather than with a complaint -- so a dump
-/// older than that would read an empty answer as "nothing has changed" and stay stale for ever.
-/// The wiki's default is ninety days; a month leaves room for it to be configured tighter.
+/// MediaWiki keeps that record for a fixed span and then forgets, answering about a moment further
+/// back with what it still has rather than with a complaint -- so an older dump would read that as
+/// "nothing has changed" and stay stale for ever. The default is ninety days; a month leaves room
+/// for it to be configured tighter.
 const HORIZON: time::Duration = time::Duration::days(30);
 
 /// How far before the last dump a soft sync starts looking.
 ///
 /// The store is not written by the edit that changes it: a job queue re-reads the page afterwards,
-/// and until it has, a query answers with what the page used to say. A sync asking only about what
-/// changed since it last ran would take the stale answer, move its stamp past the edit, and never
-/// ask again.
+/// and until it has, a query answers with what the page used to say. A sync querying only what
+/// changed since it last ran would take that answer and never ask again.
 const MARGIN: time::Duration = time::Duration::hours(1);
 
-/// The moment a soft sync asks the wiki about, or `None` for a dump too old for the question to
+/// The moment a soft sync queries the wiki from, or `None` for a dump too old for the question to
 /// mean anything, which is a full sync's job.
-pub fn asked_from(since: &str, now: time::OffsetDateTime) -> Option<String> {
+pub fn looking_from(since: &str, now: time::OffsetDateTime) -> Option<String> {
     // A stamp that will not parse was not written by this program, so there is nothing to date the
     // question from.
     let since = moment(since)?;
@@ -677,10 +668,10 @@ mod tests {
         assert_eq!(built, full);
     }
 
-    // Asymmetric: asking for a piece that had not changed wastes one request, where failing to ask
-    // for one that had leaves the dump quietly wrong until the next full sync.
+    // Asymmetric: requesting a piece that had not changed wastes one request, where failing to
+    // request one that had leaves the dump quietly wrong until the next full sync.
     #[test]
-    fn only_the_pieces_an_edited_page_belongs_to_are_asked_for_again() {
+    fn only_the_pieces_an_edited_page_belongs_to_are_read_again() {
         let letters: std::collections::BTreeSet<char> = "ABS".chars().collect();
         let edited = super::Refresh::Pages(vec![
             "Snow Village".to_owned(),
@@ -696,7 +687,7 @@ mod tests {
             !edited.touches("Snow Village/Maps"),
             "and a name is not a prefix"
         );
-        // One world edited, and only the piece its title falls in re-asked -- `S` for the world
+        // One world edited, and only the piece its title falls in re-read -- `S` for the world
         // and `A` for the author page, which is not a world but shares a letter with several.
         assert_eq!(edited.shards(&letters), "AS".chars().collect());
 
@@ -725,27 +716,27 @@ mod tests {
     // Two corrections to "everything since the dump was built", both because trusting the wiki's
     // account of itself literally would lose edits.
     #[test]
-    fn the_wiki_is_asked_about_a_little_before_the_dump_was_built() {
+    fn the_wiki_is_queried_from_a_little_before_the_dump_was_built() {
         let now = time::OffsetDateTime::from_unix_timestamp(1_788_393_600).expect("a moment");
         let built = super::iso(now - time::Duration::hours(6));
 
         // Back an hour: the store is indexed after the edit, and a query inside that window
         // answers with what the page used to say.
         assert_eq!(
-            super::asked_from(&built, now).as_deref(),
+            super::looking_from(&built, now).as_deref(),
             Some(super::iso(now - time::Duration::hours(7)).as_str())
         );
 
-        // A dump older than the wiki's memory cannot be asked what changed since: the answer would
-        // be "nothing I still know about", which reads exactly like "nothing".
+        // A dump older than the wiki's memory cannot be queried for what changed since: the
+        // answer would be "nothing I still know about", which reads exactly like "nothing".
         let stale = super::iso(now - time::Duration::days(45));
         assert_eq!(
-            super::asked_from(&stale, now),
+            super::looking_from(&stale, now),
             None,
             "read the whole wiki instead"
         );
         assert_eq!(
-            super::asked_from("last tuesday", now),
+            super::looking_from("last tuesday", now),
             None,
             "as for a stamp with no moment in it"
         );

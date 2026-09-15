@@ -4,15 +4,12 @@
 //! mesh: fifteen hundred textures would be fifteen hundred draw calls.
 //!
 //! Fetched from the same host as the dump rather than shipped beside the binary, so a package does
-//! not freeze the pictures at release time while the worlds they illustrate go on arriving. See
-//! [`read`].
+//! not freeze the pictures at release time. See [`read`].
 //!
 //! A world's cell is the one the dump gives it, which the server hands out once and never moves,
-//! so an atlas is still right about every world it was packed with however far the dump has moved
-//! on since. A world the atlas is too small to hold a cell for is simply one packed after it was:
-//! it draws the placeholder until the atlas is packed again. The last cell of the grid is that
-//! placeholder and holds no world. Both sides have to agree on [`CELL`], which [`grid`] checks
-//! rather than trusts.
+//! so an atlas stays right however far the dump has moved on. A world past the end of the atlas
+//! was packed after it and draws the placeholder, which is itself the grid's last cell. Both sides
+//! have to agree on [`CELL`], which [`grid`] checks rather than trusts.
 
 use three_d::renderer::*;
 
@@ -31,19 +28,18 @@ pub const ASPECT: f32 = CELL[0] as f32 / CELL[1] as f32;
 /// far unmipmapped makes the thumbnails crawl as the layout moves.
 ///
 /// Capped because a mip texel averages a square of the atlas without knowing where one world's
-/// picture stops. At this level a texel spans 16 of the atlas's own, which still divides both sides
-/// of a cell, so no world samples its neighbour's picture.
+/// picture stops. At this level a texel spans 16, which still divides both sides of a cell.
 const MIP_LEVELS: u32 = 5;
 
-/// `None` is not fatal: the graph draws without pictures until one arrives, and the caller asks
+/// `None` is not fatal: the graph draws without pictures until one resolves, and the caller tries
 /// again after a wait -- see [`super::Atlas`].
 pub fn load() -> fetch::Pending<Option<CpuTexture>> {
     picture(PATH, Some(MIP_LEVELS))
 }
 
-/// Its own file as well as its own cell of the atlas, because the graph draws it at every size and
-/// the atlas is a jpeg -- the worst thing to put hard white edges on black through. The catalog
-/// draws the cell, at about the size it is packed at.
+/// Its own file as well as its own cell of the atlas: the graph draws it at every size, and the
+/// atlas is a jpeg, the worst thing to put hard white edges on black through. The catalog draws
+/// the cell, at about the size it is packed at.
 ///
 /// `None` is not fatal: an unvisited world keeps its bare node.
 pub fn placeholder() -> fetch::Pending<Option<CpuTexture>> {
@@ -108,8 +104,8 @@ fn uv(cell: usize, columns: u32, rows: u32) -> Mat3 {
     let size = vec2(1.0 / columns as f32, 1.0 / rows as f32);
     let (column, row) = (cell as u32 % columns, cell as u32 / columns);
     // Rows count from the bottom because three-d builds a mesh's uv buffer as `1 - v`, so a quad's
-    // top edge arrives here as v = 1. Only the offset turns over -- the direction within a cell is
-    // already right, which is why the pictures are not upside down.
+    // top edge arrives here as v = 1. Only the offset turns over: the direction within a cell is
+    // already right.
     let row = rows - 1 - row;
     Mat3::from_translation(vec2(column as f32 * size.x, row as f32 * size.y))
         * Mat3::from_nonuniform_scale(size.x, size.y)

@@ -1,15 +1,13 @@
 //! Everything this app says, in whichever language it is being spoken.
 //!
 //! Fluent, because half of what is said is a count and the languages disagree about how a count is
-//! said -- English has one form for one world and another for the rest, Japanese has one for both.
-//! That disagreement belongs in `locales/<tag>/main.ftl` rather than in the panel.
+//! said. That disagreement belongs in `locales/<tag>/main.ftl` rather than in the panel.
 //!
 //! Every language is parsed at once because English has to be resident whatever is being spoken: it
 //! is what the rest fall back to for a message not written in them yet.
 //!
-//! Nothing here is locked. The messages never change, and which language is being spoken is a single
-//! integer, so it is an atomic rather than a field behind a lock over the messages. [`speaking`] is
-//! read once per world name on screen, a few thousand times a frame.
+//! Nothing here is locked: the messages never change, and the language is an atomic, read once per
+//! world name on screen and so a few thousand times a frame.
 
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
@@ -22,9 +20,9 @@ use unic_langid::LanguageIdentifier;
 // languages still says which one it meant.
 const LANGUAGE: &str = "language";
 
-/// A closed set rather than a table of tags, so anything reading differently in one language than
-/// another can say so in a `match` the compiler checks. Adding one is a variant here, an entry in
-/// [`Language::ALL`], and a file for [`Language::ftl`] to name.
+/// A closed set rather than a table of tags, so anything reading differently per language can say
+/// so in a checked `match`. Adding one is a variant here, an entry in [`Language::ALL`], and a
+/// file for [`Language::ftl`] to name.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Language {
     /// The fallback, and so the one language that has to carry every message.
@@ -36,7 +34,7 @@ impl Language {
     /// In the order the picker offers them, English first as the fallback.
     pub(super) const ALL: [Language; 2] = [Language::English, Language::Japanese];
 
-    /// BCP 47, which is what the store keeps and what a device asks for its language in.
+    /// BCP 47, which is what the store keeps and what a device names its language in.
     pub(super) fn tag(self) -> &'static str {
         match self {
             Self::English => "en-US",
@@ -60,11 +58,11 @@ impl Language {
     }
 }
 
-/// An index into [`Language::ALL`], or [`UNSETTLED`] before anything has asked. Relaxed throughout:
-/// nothing is published alongside it for another thread to have to see first.
+/// An index into [`Language::ALL`], or [`UNSETTLED`] before anything has read it. Relaxed
+/// throughout: nothing is published alongside it for another thread to have to see first.
 static SPEAKING: AtomicUsize = AtomicUsize::new(UNSETTLED);
 
-/// Settled on the first ask rather than at startup, so nothing has to remember to settle it.
+/// Settled on the first read rather than at startup, so nothing has to remember to settle it.
 const UNSETTLED: usize = usize::MAX;
 
 /// Immutable once built, which is what leaves this without a lock. The bundles are the concurrent
@@ -101,9 +99,8 @@ impl Catalog {
         Self { bundles }
     }
 
-    /// A message whose values do not add up counts as unsaid and falls through to the next language
-    /// and finally to its own name: a name on screen is a broken message anybody can report, where a
-    /// half-substituted sentence is not.
+    /// A message whose values do not add up counts as unsaid and falls through to the next
+    /// language and finally to its own id: a message id on screen is a fault anybody can report.
     fn say(&self, language: Language, id: &str, args: Option<&FluentArgs>) -> Option<String> {
         let bundle = &self.bundles[language as usize];
         let pattern = bundle.get_message(id)?.value()?;
@@ -113,8 +110,8 @@ impl Catalog {
     }
 }
 
-/// One relaxed load and no lock, which is what lets a caller ask per world name rather than be told
-/// once and carry the answer around.
+/// One relaxed load and no lock, which is what lets a caller read it per world name rather than be
+/// told once and carry the answer around.
 pub(super) fn speaking() -> Language {
     match SPEAKING.load(Relaxed) {
         UNSETTLED => {
@@ -130,7 +127,7 @@ pub(super) fn speaking() -> Language {
     }
 }
 
-/// Asked about often enough to be worth its own name: no font this app starts with carries the
+/// Read often enough to be worth its own name: no font this app starts with carries the
 /// glyphs, and the wiki has a second site in it.
 pub(super) fn speaking_japanese() -> bool {
     speaking() == Language::Japanese
@@ -154,7 +151,7 @@ pub(super) fn format(id: &str, args: Option<&FluentArgs>) -> String {
         .unwrap_or_else(|| id.to_owned())
 }
 
-/// What a message says, by name, with the values it asks for named where it is said:
+/// What a message says, by name, with the values it takes named where it is said:
 ///
 /// ```ignore
 /// t!("graph-size", worlds = 1574, connections = 4402)
@@ -186,7 +183,7 @@ fn chosen() -> Language {
     super::link::language()
         .and_then(|tag| matching(&tag))
         .or_else(|| super::store::read(LANGUAGE).and_then(|tag| matching(&tag)))
-        // In the order the device prefers them, so one asking for two this app has is answered in
+        // In the order the device prefers them, so a device naming two this app has is answered in
         // the one it would rather read.
         .or_else(|| sys_locale::get_locales().find_map(|tag| matching(&tag)))
         .unwrap_or(Language::English)
@@ -252,9 +249,8 @@ mod tests {
         }
     }
 
-    // A message asking for a value by a name nothing passes compiles, parses, and is read out on
-    // screen as `some-message-id`. So every message is formatted against the whole set of values
-    // the app ever passes.
+    // A message taking a value nothing passes compiles, parses, and is read out on screen as its
+    // own id, so every message is formatted against every value the app ever passes.
     #[test]
     fn every_english_message_says_something() {
         let mut args = fluent_bundle::FluentArgs::new();
@@ -295,19 +291,19 @@ mod tests {
             "platform",
             "origin",
             "world",
-            "asks",
+            "conditions",
             "destination",
         ] {
             args.set(worded, "x");
         }
         for id in named(Language::English.ftl()) {
-            // Asked of the bundle rather than through `format`, which answers with the name of a
+            // Read from the bundle rather than through `format`, which answers with the name of a
             // message it cannot say -- and a couple are worded the same as their own name.
             assert!(
                 super::CATALOG
                     .say(Language::English, id, Some(&args))
                     .is_some(),
-                "{id} says nothing: see whether it asks for a value by a name no caller passes"
+                "{id} says nothing: see whether it takes a value by a name no caller passes"
             );
         }
     }

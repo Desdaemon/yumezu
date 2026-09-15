@@ -1,9 +1,10 @@
 [serve]
 port = 5001
  
-# Trunk's own settings for `just serve`. The page may only ask its own host -- see `world::server`
-# -- and these put those requests through to `dreamweaver`, which has to be running alongside
-# (`just dreamweaver`). A page served by anything else needs the same routes proxied the same way.
+# Trunk's own settings for `just serve`. The page may only fetch from its own host -- see
+# `world::server` -- and these put those requests through to `dreamweaver`, which has to be running
+# alongside (`just dreamweaver`). A page served by anything else needs the same routes proxied the
+# same way.
 [[proxy]]
 rewrite = "/data"
 backend = "http://127.0.0.1:5000/data"
@@ -13,9 +14,10 @@ backend = "http://127.0.0.1:5000/data"
 rewrite = "/pollUpdate"
 backend = "http://127.0.0.1:5000/pollUpdate"
 
-# The page may not ask YNOproject directly: that host allows exactly one origin, and the credential
-# it answers to is a cookie a browser only keeps for the origin that served it. `dreamweaver` answers
-# both of these and hands that cookie back for this origin on the way past -- see its `relay`.
+# The page may not reach YNOproject directly: that host allows exactly one origin, and the
+# credential it answers to is a cookie a browser only keeps for the origin that served it.
+# `dreamweaver` answers both of these and hands that cookie back for this origin on the way past --
+# see its `relay`.
 [[proxy]]
 rewrite = "/yno/"
 backend = "http://127.0.0.1:5000/yno/"
@@ -31,7 +33,7 @@ backend = "http://127.0.0.1:5000/ynoauth/"
 #
 # The header is the whole point of the route. The wiki's edge answers 403 to a request carrying any
 # other `Origin` and to one carrying none, so a browser -- which sets that header itself and will
-# not be talked out of it -- cannot ask for these at all. Hence a proxy, which is not a browser and
+# not be talked out of it -- cannot fetch these at all. Hence a proxy, which is not a browser and
 # says what `detail::ORIGIN` says on native.
 [[proxy]]
 rewrite = "/img/"

@@ -5,9 +5,9 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-# The wiki is asked over its own `api.php`, which answers in JSON, so talking to it needs nothing but
-# a transport and a deserializer. `rustls` explicitly: the default platform verifier is right for the
-# app but drags a native TLS stack into a server build that has no use for one.
+# The wiki is queried over its own `api.php`, which answers in JSON, so talking to it needs nothing
+# but a transport and a deserializer. `rustls` explicitly: the default platform verifier is right
+# for the app but drags a native TLS stack into a server build that has no use for one.
 # Named only to pick the provider; see the same dep in the workspace root.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "http2", "query", "rustls-no-provider"] }
@@ -22,7 +22,7 @@ axum = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The stamp is written out by hand in `sync::stamp`, so no formatting feature; `parsing` is there
-# because a soft sync reads it back to know what to ask the wiki about.
+# because a soft sync reads it back to know which moment to query the wiki from.
 time = { version = "0.3", features = ["parsing"] }
 tokio = { version = "1.53", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tracing = "0.1"

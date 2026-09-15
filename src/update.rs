@@ -4,8 +4,7 @@
 //! module -- see the stand-in in `app.rs`.
 //!
 //! The manifest is a file on the release rather than a service, `latest/download` always resolving
-//! to the newest one. So `.github/workflows/release.yml` uploading `latest.json` beside the
-//! packages is the whole of the server side.
+//! to the newest one, so uploading `latest.json` beside the packages is the whole server side.
 
 use cargo_packager_updater::{Config, Update, semver};
 
@@ -13,16 +12,15 @@ use super::i18n::t;
 
 const MANIFEST: &str = "https://github.com/Desdaemon/yumezu/releases/latest/download/latest.json";
 
-/// The key `.github/workflows/release.yml` signs the packages with. Passed at build time rather
-/// than written here, so a build that was never given one -- a local `cargo run` -- cannot be
-/// talked into installing anything, and draws no update controls at all.
+/// The key `.github/workflows/release.yml` signs the packages with. Passed at build time, so a
+/// build never given one -- a local `cargo run` -- cannot be talked into installing anything.
 const PUBKEY: Option<&str> = option_env!("YUMEZU_UPDATE_PUBKEY");
 
 enum State {
-    /// Nobody has asked this run.
+    /// Nobody has checked this run.
     Never,
     Checking,
-    /// Asked, and this build is the newest there is.
+    /// Checked, and this build is the newest there is.
     Current,
     Ready(Box<Update>),
     Installing,

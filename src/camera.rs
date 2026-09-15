@@ -10,8 +10,7 @@ pub(super) const FOV_Y_DEGREES: f32 = 45.0;
 /// move reads as travel across the graph rather than a cut, so the person keeps their bearings.
 const FRAMING_WINDOW_MS: f32 = 600.0;
 /// Slack left around a framed route, as a fraction of the distance that would touch it to the
-/// window edges. The framed sphere already holds the whole of the pictures on its rim, so this is
-/// breathing room and nothing more.
+/// window edges. Breathing room only: the framed sphere already holds the pictures on its rim.
 const FRAMING_MARGIN: f32 = 1.1;
 
 /// How near the goal the camera has to be to count as arrived, as a fraction of the framed radius
@@ -19,12 +18,10 @@ const FRAMING_MARGIN: f32 = 1.1;
 const FRAMING_ARRIVAL_TOLERANCE: f32 = 0.01;
 
 /// Time constant of each of the lean's two eases, in milliseconds. Far longer than
-/// [`FRAMING_WINDOW_MS`]: a framing move is asked for and should feel like travel, where a lean is
-/// only a row under the pointer and should barely register as motion at all.
+/// [`FRAMING_WINDOW_MS`]: a lean is only a row under the pointer, and should barely register.
 const LEAN_WINDOW_MS: f32 = 1200.0;
 /// How near its goal the lean has to be to stop, as a fraction of how far the camera stands off
-/// its centre -- the yardstick that keeps the floor the same size on screen however far out the
-/// view is. Asymptotic as the framing ease is, and needing a floor for the same reason.
+/// its centre, which keeps the floor the same size on screen however far out the view is.
 const LEAN_ARRIVAL_TOLERANCE: f32 = 0.001;
 pub(super) struct AppStatics {
     pub(super) control: OrbitControl,
@@ -37,26 +34,24 @@ pub(super) struct AppStatics {
     pub(super) touches: Touches,
     pub(super) walk: Walk,
     /// What the orbit centre is easing onto, itself easing onto where the pointed world is. Two
-    /// eases in series rather than one: a single ease is at its fastest the instant it starts,
-    /// which is the jolt a row under the pointer should never give.
+    /// eases in series, a single one being at its fastest the instant it starts.
     pub(super) lean_aim: Vec3,
-    /// Whether the window is the one being typed at. What the dashes march for is somebody
-    /// watching them, so this is what lets a settled layout stop being drawn at all rather than
-    /// go on at [`IDLE_REDRAW_HZ`] for as long as the app is open.
+    /// Whether the window is the one being typed at, which lets a settled layout stop being drawn
+    /// rather than go on at [`pacing::IDLE_REDRAW_HZ`] for as long as the app is open.
     ///
-    /// Not read on the page, where the canvas is unfocused until it is clicked and the browser
-    /// already stops serving frames to a tab nobody is looking at. A phone hands the drawing
-    /// surface back instead: see [`App::suspended`].
+    /// Not read on the page, where the canvas is unfocused until clicked and the browser already
+    /// stops serving frames to a hidden tab. A phone hands the surface back: see
+    /// [`App::suspended`].
     pub(super) focused: bool,
 }
 
-/// A key says only that it went down or came up, and walking has to carry on between the two, so
-/// what is held is kept here and read once a frame as the distance it stands for.
 /// Logical pixels a second: read against the window rather than the graph, because
 /// [`AppStatics::world_per_pixel`] already scales a screen distance into world units at whatever
 /// distance the camera stands.
 const WALK_SPEED: f32 = 800.0;
 
+/// A key says only that it went down or came up, so what is held is kept here and read once a
+/// frame as the distance it stands for.
 #[derive(Default)]
 pub(super) struct Walk {
     left: bool,
@@ -92,9 +87,7 @@ impl Walk {
     /// How far the held keys walk over `dt` seconds: across the view, and into it.
     ///
     /// Both in logical pixels, so [`AppStatics::pan_by`] and [`AppStatics::dolly_by`] scale them
-    /// alike and a step sideways covers as much ground as a step forward. Across is signed as a
-    /// drag rather than a move, because that is what a pan is given: pushing the view right is
-    /// pulling the graph left.
+    /// alike. Across is signed as a drag rather than a move, which is what a pan is given.
     pub(super) fn travel(&self, dt: f32) -> (f32, f32) {
         let (across, into) = (
             (self.left as i32 - self.right as i32) as f32,
@@ -110,12 +103,10 @@ impl Walk {
 /// The fingers on the screen, which the mouse events the app is otherwise driven by cannot say
 /// enough about.
 ///
-/// three-d turns a touch into a mouse: the first finger presses, drags and releases the left
-/// button, and a second turns the pair into a wheel so a pinch zooms. What it never carries is
-/// that the second finger is there at all, so a pinch ends with a left release that reads as a tap
-/// and throws the selection away, and the travel of the pair across the screen -- the only pan
-/// gesture a screen with no second button has -- is dropped. Both are read here instead, off the
-/// events winit delivers before three-d ever sees them.
+/// three-d turns a touch into a mouse but never carries that a second finger is there, so a pinch
+/// ends with a left release that reads as a tap and throws the selection away, and the pair's
+/// travel -- the only pan a screen with no second button has -- is dropped. Both are read here
+/// instead, off the winit events three-d never sees.
 #[derive(Default)]
 pub(super) struct Touches {
     /// Every finger down, by the id winit gave it, at its latest position in physical pixels.
@@ -126,9 +117,8 @@ pub(super) struct Touches {
     pub(super) travel: (f32, f32),
     /// Whether a second finger has landed and not every finger has left since.
     ///
-    /// Latched rather than read off the count, because the fingers do not lift together: the one
-    /// still down when the other leaves would otherwise carry on as an orbit, and the last to
-    /// leave would release as a tap.
+    /// Latched rather than read off the count, the fingers not lifting together: the one still
+    /// down would carry on as an orbit, and the last to leave would release as a tap.
     pub(super) pinching: bool,
 }
 
@@ -174,7 +164,7 @@ impl Touches {
         })
     }
 
-    /// The travel since this was last asked, in the logical pixels a pan is measured in.
+    /// The travel since this was last read, in the logical pixels a pan is measured in.
     pub(super) fn take_travel(&mut self, device_pixel_ratio: f32) -> (f32, f32) {
         let travel = std::mem::take(&mut self.travel);
         (travel.0 / device_pixel_ratio, travel.1 / device_pixel_ratio)
@@ -219,7 +209,7 @@ impl AppStatics {
         panned
     }
 
-    /// Shared by the two ways of asking for a pan: a button the mouse has spare, and the two
+    /// Shared by the two ways of starting a pan: a button the mouse has spare, and the two
     /// fingers a screen has instead.
     pub(super) fn pan_by(&mut self, delta: (f32, f32), device_pixel_ratio: f32) -> bool {
         if delta == (0.0, 0.0) {
@@ -236,9 +226,8 @@ impl AppStatics {
 
     /// `travel` is in logical pixels, as a pan's is.
     ///
-    /// The orbit centre travels with the camera, which is what makes this a move through the graph
-    /// rather than the wheel's zoom: the two never close on each other, so the view keeps its
-    /// speed instead of creeping to a halt against a point it can never reach.
+    /// The orbit centre travels with the camera, which makes this a move through the graph rather
+    /// than the wheel's zoom: the two never close on each other, so the view keeps its speed.
     pub(super) fn dolly_by(&mut self, travel: f32, device_pixel_ratio: f32) -> bool {
         if travel == 0.0 {
             return false;
@@ -250,9 +239,8 @@ impl AppStatics {
         true
     }
 
-    /// World units per logical pixel on the plane through the orbit centre. What keeps a drag
-    /// holding whatever it started on, and a walk covering the same apparent ground however far
-    /// out the camera is standing.
+    /// World units per logical pixel on the plane through the orbit centre, which keeps a drag
+    /// holding what it started on however far out the camera is standing.
     fn world_per_pixel(&self, device_pixel_ratio: f32) -> f32 {
         let distance = self.control.target.distance(self.camera.position());
         let logical_height = self.camera.viewport().height as f32 / device_pixel_ratio;
@@ -274,8 +262,8 @@ impl AppStatics {
     }
 
     /// Turns the camera square to the `z = 0` plane, keeping where it looks and how far off it
-    /// stands. The one turn two-dimensional mode makes on its own, because it is also the one the
-    /// person can no longer make: see [`lock_rotation`].
+    /// stands. Made on the app's own, two-dimensional mode locking the turn: see
+    /// [`lock_rotation`].
     pub(super) fn face_plane(&mut self) {
         let target = self.control.target;
         let distance = target.distance(self.camera.position());
@@ -289,8 +277,8 @@ impl AppStatics {
     /// How far off the camera has to stand to hold a sphere of `radius`.
     ///
     /// Read against whichever field of view angle is narrower, so a route that fits vertically
-    /// cannot still hang off the sides of a tall window, and against the bounding sphere, so the
-    /// fit does not depend on which way what is framed is turned relative to the camera.
+    /// cannot hang off the sides of a tall window, and against the bounding sphere, so the fit
+    /// does not depend on how the subject is turned.
     fn framing_distance(&self, radius: f32) -> f32 {
         let viewport = self.camera.viewport();
         let half_y = FOV_Y_DEGREES.to_radians() * 0.5;
@@ -362,9 +350,8 @@ impl AppStatics {
         true
     }
 
-    /// `at`, pulled along the line the eye sees it on to the nearest point the orbit's own zoom
-    /// limits allow a centre. A centre nearer than the zoom can go turns the view inside out, and
-    /// one on the eye leaves no direction to look at all.
+    /// `at`, pulled along the line the eye sees it on to the nearest point the orbit's zoom limits
+    /// allow a centre: nearer than that turns the view inside out.
     fn within_orbit(&self, at: Vec3) -> Vec3 {
         let eye = self.camera.position();
         let reach = at - eye;
@@ -406,9 +393,8 @@ impl AppStatics {
 }
 /// Swallows the left-button motion [`OrbitControl`] would turn the camera with.
 ///
-/// Called after the gesture is resolved, so a drag belonging to a node has already been taken and
-/// only the camera's share is left. Presses and releases are left alone: they still resolve
-/// clicks, and neither turns anything.
+/// Called after the gesture is resolved, so a drag belonging to a node has already been taken.
+/// Presses and releases are left alone: they still resolve clicks, and neither turns anything.
 pub(super) fn lock_rotation(events: &mut [Event]) {
     for event in events {
         if let Event::MouseMotion {
@@ -427,8 +413,7 @@ pub(super) fn lock_rotation(events: &mut [Event]) {
 pub(super) fn billboard(camera: &Camera) -> Mat4 {
     let forward = camera.view_direction();
     // Normalized because the camera's own up need only be the axis the view is kept upright
-    // against, not a unit vector square to it. The orbit control refuses to look straight along
-    // it, so the cross product cannot collapse.
+    // against. The orbit control refuses to look straight along it, so this cannot collapse.
     let right = camera.right_direction().normalize();
     let up = right.cross(forward);
     Mat4::from_cols(

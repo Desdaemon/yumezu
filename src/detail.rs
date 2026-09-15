@@ -1,8 +1,8 @@
 //! Full-size world pictures, for the few worlds the view has come close enough to.
 //!
-//! Past [`SWITCH_PIXELS`] the screen asks for more texels than the atlas cell has, so the wiki's
-//! own copy is fetched and drawn over the world's atlas quad. Only [`HELD`] at once, each being a
-//! texture and a draw call of its own where the atlas is one of each for the whole graph.
+//! Past [`SWITCH_PIXELS`] the screen needs more texels than the atlas cell has, so the wiki's own
+//! copy is fetched and drawn over the world's atlas quad. Only [`HELD`] at once, each costing a
+//! texture and a draw call where the atlas costs one of each for the whole graph.
 
 use std::collections::{HashMap, HashSet};
 
@@ -14,8 +14,8 @@ use super::{fetch, thumbnails};
 /// Node width on screen, in physical pixels, at which the full picture becomes worth fetching.
 ///
 /// Well past the [`super::thumbnails::CELL`] width where magnification begins: a thumbnail
-/// stretched a little is not visibly soft, and switching at the first magnified texel would spend a
-/// download on a node nobody is looking at yet.
+/// stretched a little is not visibly soft, and switching sooner spends a download on a node
+/// nobody is looking at yet.
 pub const SWITCH_PIXELS: f32 = 160.0;
 /// Node width at which a world gives its own picture back. Under [`SWITCH_PIXELS`] so a node
 /// sitting on the switch does not trade picture for atlas cell every other frame.
@@ -27,14 +27,13 @@ const HELD: usize = 8;
 /// picture. Only the native build sets it: the browser sets its own and will not be overridden.
 const ORIGIN: &str = "https://explorer.yume.wiki";
 /// How far in front of its own atlas quad a full picture is drawn, as a fraction of the node's
-/// radius: the two are otherwise coplanar and the depth test would pick between them per pixel.
-/// Small enough that the picture neither grows visibly nor pulls out of a crowded node.
+/// radius: coplanar, the depth test would pick between them per pixel.
 pub const LIFT: f32 = 0.02;
 /// What the art is drawn at.
 ///
-/// The wiki asks for this and enforces nothing: four in five uploads are the same art at exactly
-/// 2x, 3x, 4x or 6x, which [`sieve`] takes back down. An odd size is left as it came -- a filter
-/// is the only way down from one, and on the page it costs more than the memory it saves.
+/// The wiki calls for this and enforces nothing: four in five uploads are the same art at exactly
+/// 2x, 3x, 4x or 6x, which [`sieve`] takes back down. An odd size is left as it came, a filter
+/// being the only way down from one and costing more on the page than the memory it saves.
 const NATIVE: [u32; 2] = [320, 240];
 
 enum Held {
@@ -48,23 +47,22 @@ pub struct Detail {
     /// been to, which has no picture of its own to fetch.
     images: Vec<String>,
     held: HashMap<usize, Held>,
-    /// Kept so the wiki is not asked again every time the view comes back.
+    /// Kept so the wiki is not fetched from again every time the view comes back.
     missing: HashSet<usize>,
     /// Nearest the camera first, which is the order the budget is spent in.
     wanted: Vec<usize>,
     unvisited: Unvisited,
 }
 
-/// The picture every world the player has not been to is drawn as. One picture however many worlds
-/// wear it, so it is held once and drawn as a single instanced mesh -- a frontier can put hundreds
-/// on screen at once.
+/// The picture every world the player has not been to is drawn as. Held once and drawn as a single
+/// instanced mesh, a frontier putting hundreds on screen at once.
 ///
 /// Not a level of detail, unlike everything else here: it is the world's only picture, so it is
 /// drawn at every size and spends none of the [`HELD`] budget.
 #[derive(Default)]
 struct Unvisited {
     loading: Option<fetch::Pending<Option<CpuTexture>>>,
-    /// `None` until the picture arrives, and forever if it cannot be had, which leaves these worlds
+    /// `None` until the picture resolves, and forever if it cannot be had, which leaves these worlds
     /// their bare nodes.
     quads: Option<Gm<InstancedMesh, ColorMaterial>>,
     /// The same picture again on the subset a selection lights, for the overlay -- see
@@ -99,8 +97,6 @@ impl Detail {
         }
     }
 
-    /// Stands the placeholder on the quads it was handed. Every frame, because the layout moves the
-    /// nodes, the camera turns them, and a selection dims them.
     /// What keeps the window drawing while a world sharpens.
     pub fn pending(&self) -> bool {
         self.unvisited.loading.is_some()
@@ -110,6 +106,8 @@ impl Detail {
                 .any(|held| matches!(held, Held::Loading(_)))
     }
 
+    /// Stands the placeholder on the quads it was handed. Every frame: the layout moves the nodes,
+    /// the camera turns them, and a selection dims them.
     pub fn place_unvisited(&mut self, context: &Context, quads: &Instances, lit: &Instances) {
         if let Some(loading) = &self.unvisited.loading
             && let Some(loaded) = loading.take()
@@ -143,11 +141,10 @@ impl Detail {
     }
 
     /// `magnified` is every world drawn wider than [`LEAVE_PIXELS`], nearest first. Anything past
-    /// [`HELD`] is left on the atlas, and anything held but no longer asked for is dropped.
+    /// [`HELD`] is left on the atlas, and anything held but no longer wanted is dropped.
     pub fn track(&mut self, context: &Context, magnified: &[Magnified]) {
-        // Filtered before the budget is counted: a world with no picture to be had already has the
-        // atlas cell or the placeholder, and a slot spent on it would push out a world that has
-        // one.
+        // Filtered before the budget is counted: a slot spent on a world with no picture to be
+        // had would push out a world that has one.
         let magnified: Vec<&Magnified> = magnified
             .iter()
             .filter(|it| !self.images[it.world].is_empty() && !self.missing.contains(&it.world))
@@ -191,8 +188,8 @@ impl Detail {
 
     pub fn drawn(&self) -> impl Iterator<Item = &dyn Object> {
         // A world turning over wears both for a moment, and the placeholder wins on depth:
-        // [`LIFT`] lifts it against the node's whole radius where the picture is lifted against
-        // the shrinking radius it is drawn at.
+        // [`LIFT`] lifts it against the node's whole radius, the picture against the shrinking
+        // radius it is drawn at.
         self.unvisited
             .quads
             .iter()
@@ -203,8 +200,8 @@ impl Detail {
     /// The pictures of the worlds a selection lights.
     ///
     /// The overlay clears the depth [`Detail::drawn`] wrote, so a lit world it does not draw again
-    /// falls back to the atlas quad underneath. Only the lit ones -- a magnified world outside the
-    /// selection belongs under the overlay, not in it.
+    /// falls back to the atlas quad underneath. Only the lit ones: a magnified world outside the
+    /// selection belongs under the overlay.
     pub fn drawn_lit<'a>(&'a self, lit: &'a [usize]) -> impl Iterator<Item = &'a dyn Object> {
         self.unvisited
             .lit
@@ -230,8 +227,8 @@ impl Detail {
 }
 
 /// Cropping is what makes the switch invisible: `tools/atlas` centre-crops every picture to
-/// [`thumbnails::ASPECT`] before packing it, and the node's quad has that aspect ratio, so a full
-/// picture shown whole would jump to a different framing of the same screenshot.
+/// [`thumbnails::ASPECT`], which the node's quad also has, so a full picture shown whole would
+/// jump to a different framing.
 fn quad(context: &Context, picture: &CpuTexture) -> Gm<Mesh, ColorMaterial> {
     Gm::new(
         Mesh::new(context, &CpuMesh::square()),
@@ -257,9 +254,9 @@ fn quad_material(context: &Context, picture: &CpuTexture) -> ColorMaterial {
             mipmap: Some(Mipmap::default()),
             wrap_s: Wrapping::ClampToEdge,
             wrap_t: Wrapping::ClampToEdge,
-            // The wiki serves these as 320x240 pixel art. Interpolating one up is a blur of the
-            // grid it is drawn on, which is the whole look. Minification keeps the mips above --
-            // nearest there crawls as the layout moves.
+            // The wiki serves these as 320x240 pixel art, and interpolating one up blurs the grid
+            // that is the whole look. Minification keeps its mips: nearest there crawls as the
+            // layout moves.
             mag_filter: Interpolation::Nearest,
             ..picture.clone()
         },
@@ -273,8 +270,7 @@ fn quad_material(context: &Context, picture: &CpuTexture) -> ColorMaterial {
 }
 
 /// `None` for anything that cannot be had or read, which is fatal nowhere this is called from: a
-/// world keeps its slightly soft atlas cell, and a map says it has no picture. [`ORIGIN`] and the
-/// decoder are what separate a picture from a challenge page.
+/// world keeps its slightly soft atlas cell, and a map says it has no picture.
 pub fn load(url: String) -> fetch::Pending<Option<CpuTexture>> {
     fetch::spawn(async move {
         let bytes = match download(&url).await {
@@ -331,8 +327,7 @@ fn whole_multiple(width: u32, height: u32) -> u32 {
 /// Every `by`th texel of every `by`th row, and the whole picture at a `by` of 1.
 ///
 /// Sound only where `by` divides both sides: the texels it steps over are copies of the one it
-/// keeps, the upload being the same art at a whole scale. Cheaper than the plain copy it replaces,
-/// reading a `by` squared share of the texels.
+/// keeps, the upload being the same art at a whole scale.
 fn sieve<T: Copy>(texels: &[T], width: u32, by: u32) -> Vec<T> {
     if by == 1 {
         return texels.to_vec();

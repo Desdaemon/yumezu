@@ -1,4 +1,4 @@
-//! Asking yume.wiki's Semantic MediaWiki store for itself, rather than through [the wrapper].
+//! Querying yume.wiki's Semantic MediaWiki store itself, rather than through [the wrapper].
 //!
 //! The store keeps the structured half of what the wiki knows: a world's infobox, the connections
 //! out of it, the people credited for it and the releases it lived through are properties and
@@ -10,9 +10,9 @@
 //!   further than [`MAX_OFFSET`] rows into a result set, and rather than saying so it answers with
 //!   the first page again -- which is what the wrapper's `continueKey` passes on when it appears to
 //!   wrap. Yume 2kki has more connections than that, so alphabetically the last sixty-odd worlds'
-//!   exits were silently missing from every dump. Asking directly does not lift the cap; it lets
+//!   exits were silently missing from every dump. Querying directly does not lift the cap; it lets
 //!   the question be cut into pieces that fit under it. See [`connections`].
-//! - The **worlds** and the **authors** it answers correctly, and this asks the store anyway so
+//! - The **worlds** and the **authors** it answers correctly, and this queries the store anyway so
 //!   every fetch can be steered by the same account of what has changed -- see [`changed_since`].
 //!   The one difference from the wrapper is that the store writes a world's several primary authors
 //!   as several values rather than one comma-separated string, which [`LocationRow::location`]
@@ -50,9 +50,8 @@ const PREFIX: &str = "Yume 2kki:";
 const LIMIT: u32 = 500;
 
 /// How far into a result set the store will look before it stops telling the truth: a request past
-/// this comes back with the first page and an offset that carries on counting, so there is nothing
-/// to notice it by. Every query here is shaped to stay under it, and one that does not is cut short
-/// with a complaint rather than quietly wrapped.
+/// this comes back with the first page and an offset that carries on counting. Every query here is
+/// shaped to stay under it, and one that does not is cut short with a complaint.
 const MAX_OFFSET: u32 = 5000;
 
 /// Newest first, patches included: a world's infobox names whichever release added it and half of
@@ -81,11 +80,11 @@ pub async fn versions(http: &reqwest::Client) -> Result<Vec<Version>> {
 /// pieces.
 ///
 /// The question is cut up because the whole of it does not fit under [`MAX_OFFSET`]. A piece is
-/// every connection out of a world whose page begins with one character, so the pieces cannot
-/// overlap and together cover every connection there is; the largest is a few hundred rows.
+/// every connection out of a world whose page begins with one character, so the pieces cover
+/// everything without overlapping; the largest is a few hundred rows.
 ///
 /// The pieces are kept apart because a connection belongs to the page that writes it up, so a piece
-/// is exactly what one edited world can invalidate: a soft sync re-asks only the moved pieces.
+/// is exactly what one edited world can invalidate: a soft sync re-reads only the moved pieces.
 pub async fn connections(
     http: &reqwest::Client,
     initials: BTreeSet<char>,
@@ -113,9 +112,9 @@ pub async fn connections(
 
 /// Every location the wiki documents, with the fields a world page carries in its infobox.
 ///
-/// One query for sixteen hundred worlds: the pictures, music and maps hang off a world as
-/// subobjects, and the store writes them into the same answer rather than a request each. The
-/// pages in the category that document no location are left out -- see [`indexes`].
+/// One query for sixteen hundred worlds, the pictures, music and maps hanging off a world as
+/// subobjects the store writes into the same answer. Pages documenting no location are left out --
+/// see [`indexes`].
 pub async fn locations(http: &reqwest::Client) -> Result<Vec<Location>> {
     let (rows, indexes) = tokio::try_join!(
         askargs::<LocationRow>(
@@ -137,10 +136,9 @@ pub async fn locations(http: &reqwest::Client) -> Result<Vec<Location>> {
 const LOCATIONS: &str = "Category:Yume 2kki Locations";
 
 /// The pages in [`LOCATIONS`] that are not a location: an area written up across several pages is
-/// listed under one that carries no infobox, and so answers with none of the fields a world is
-/// made of.
+/// listed under one carrying no infobox, which answers with none of a world's fields.
 ///
-/// Asked for rather than written into the query above as something to skip: the store cannot say
+/// Requested rather than written into the query above as something to skip: the store cannot say
 /// "not in this category", its comparators being for property values alone.
 async fn indexes(http: &reqwest::Client) -> Result<BTreeSet<String>> {
     let rows = askargs::<serde::de::IgnoredAny>(
@@ -184,9 +182,9 @@ pub async fn authors(http: &reqwest::Client) -> Result<Vec<Author>> {
 /// steers by.
 ///
 /// Edits, new pages and log entries all count, so a world deleted or renamed reads as a change.
-/// Only Yume 2kki's namespace is looked at, which is the hole in it: a template or file the worlds
-/// are built out of lives elsewhere, and an edit to one changes what the store answers without any
-/// page here being touched. A full sync on start-up is the backstop.
+/// Only Yume 2kki's namespace is looked at, which is the hole in it: an edit to a template
+/// elsewhere changes what the store answers with no page here touched. A full sync on start-up is
+/// the backstop.
 ///
 /// Titles come back without the namespace, each once however many times it was edited.
 pub async fn changed_since(http: &reqwest::Client, when: &str) -> Result<Vec<String>> {
@@ -237,7 +235,7 @@ pub struct Version {
 }
 
 /// Only the fields the dump carries. The store also holds the colours a world's page is themed in
-/// and the authors beyond the primary one, which [`locations`] does not ask for.
+/// and the authors beyond the primary one, which [`locations`] does not request.
 pub struct Location {
     /// The English page title, which is the identity everything else refers to it by.
     pub title: String,
@@ -333,8 +331,7 @@ struct Change {
 /// One request, and the ones after it the answer says are still to come.
 ///
 /// The store pages by row offset rather than by cursor. This stops at the last page, and short of
-/// [`MAX_OFFSET`] with a complaint: past that the answers are the first page over again, and taking
-/// them would be worse than missing them.
+/// [`MAX_OFFSET`] with a complaint, past which the answers are the first page over again.
 ///
 /// Each row comes back with the subject it was found on -- a page title, or a subobject name of the
 /// store's own devising. Only [`locations`] has any use for it.
@@ -692,9 +689,8 @@ mod tests {
         );
     }
 
-    /// A field read as one value is a claim about the wiki, and a debug build holds it to that so
-    /// the model is widened rather than the second value quietly lost. A release build takes the
-    /// first and carries on.
+    /// A field read as one value is a claim about the wiki, which a debug build holds it to so the
+    /// model is widened rather than a second value lost. A release build takes the first.
     #[test]
     fn a_property_the_dump_publishes_once_is_refused_when_the_wiki_writes_two() {
         let one_each = r#"{"query":{"results":[{"Yume 2kki:Authors# 56aa30":{"printouts":{
@@ -715,8 +711,7 @@ mod tests {
     }
 
     /// A world's picture, music and maps are subobjects rather than properties, and the store
-    /// writes a subobject's fields under `item` beside a description of the property. Read that
-    /// wrong and a world silently loses its music.
+    /// writes a subobject's fields under `item` beside a description of the property.
     #[test]
     fn a_world_is_read_out_of_the_store_with_what_hangs_off_it() {
         let answer = r#"{"query":{"results":[{"Yume 2kki:3D Structures Path":{"printouts":{

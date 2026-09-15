@@ -1,17 +1,15 @@
 //! The page's input method, which is a hidden text element parked under the caret.
 //!
 //! winit's web backend has `set_ime_allowed` as an empty function and never sends
-//! [`winit::event::WindowEvent::Ime`], so a page has no input method unless one is built out of the
-//! browser's own. A browser reports a word being built up only against an element that can be typed
-//! into, and a `<canvas>` is not one. So an `<input>` is put on the page, made invisible, moved
-//! under wherever egui says the caret is, and given the focus while something is typed. The canvas
-//! is then sent no keys, so those are read off the element here too.
+//! [`winit::event::WindowEvent::Ime`], and a browser reports a word being built up only against an
+//! element that can be typed into, which a `<canvas>` is not. So an invisible `<input>` is put on
+//! the page, moved under the caret and focused while something is typed. The canvas is then sent
+//! no keys, so those are read off the element here too.
 //!
 //! # Where this comes from
 //!
-//! Carried from `eframe`, the one piece of it that cannot be depended on instead: the rest of what
-//! `eframe` does for an input method is `egui-winit`'s, which [`super::gui`] uses directly, and
-//! `eframe` itself wants the window, context and event loop that belong to the 3D renderer.
+//! Carried from `eframe`, the one piece of it that cannot be depended on instead: `eframe` wants
+//! the window, context and event loop that belong to the 3D renderer.
 //!
 //! - Upstream: `crates/eframe/src/web/text_agent.rs` at tag `0.36.0`, plus `on_keydown` and
 //!   `on_keyup` from `crates/eframe/src/web/events.rs`, the focus half of
@@ -43,10 +41,10 @@
 //!
 //! - Events are left on [`egui_winit::State::egui_input_mut`] for the next frame to take, where
 //!   upstream pushes them onto its own `AppRunner`.
-//! - The canvas is winit's, asked for through `WindowExtWebSys`, not one `eframe` made.
+//! - The canvas is winit's, reached through `WindowExtWebSys`, not one `eframe` made.
 //! - `update` and the focus that upstream keeps in `handle_platform_output` are one call here,
 //!   [`TextAgent::follow`], because there is one caller and one place it can be made from.
-//! - Nothing asks for a repaint: this app is a render loop around a 3D scene, so the next frame
+//! - Nothing requests a repaint: this app is a render loop around a 3D scene, so the next frame
 //!   is already coming, where upstream is drawn on demand.
 //! - The keys are translated inline. Upstream's `should_prevent_default_for_key` and
 //!   `should_stop_propagation` are dropped: this page has nothing else on it to defend a key from,
@@ -91,8 +89,8 @@ impl Agent {
 
         // Only an insertion says anything egui can act on; the element is emptied for the rest of
         // the `inputType` list so the next line starts clean. `insertCompositionText` outside a
-        // composition is how the tail of a finished word arrives after `compositionend` has already
-        // committed it, so taking it would type the word twice.
+        // composition is the tail of a word `compositionend` already committed, so taking it would
+        // type the word twice.
         let kind = event.input_type();
         let insertion = kind == "insertText" || kind == "insertReplacementText";
         if !composing && !insertion {
@@ -222,9 +220,9 @@ impl TextAgent {
         input.set_attribute("autocapitalize", "off")?;
         input.set_attribute("aria-hidden", "true")?;
 
-        // Invisible rather than hidden or off-screen: an element the page will not draw is one the
-        // browser will not let an input method open against either. Starts over the canvas' top
-        // left so focusing it before anything is typed cannot scroll the page elsewhere.
+        // Invisible rather than hidden or off-screen: a browser will not open an input method
+        // against an element the page does not draw. Starts over the canvas' top left so focusing
+        // it cannot scroll the page elsewhere.
         let style = input.style();
         style.set_property("position", "absolute")?;
         style.set_property("top", &format!("{}px", canvas.offset_top()))?;
@@ -325,10 +323,10 @@ impl TextAgent {
         self.placed.set(ime);
         let Some(ime) = ime else { return };
 
-        // egui measures in points and the page places in CSS pixels; the zoom factor is the whole
-        // of the difference, both sides already agreeing on the device's pixel ratio. Offsets
-        // rather than a bounding rect, to measure from the same corner `position: absolute` does.
-        // Clamped inside the canvas so a caret scrolled out of sight cannot scroll the page to it.
+        // egui measures in points and the page places in CSS pixels, the zoom factor being the
+        // whole difference. Offsets rather than a bounding rect, to measure from the same corner
+        // `position: absolute` does, and clamped inside the canvas so a caret scrolled out of
+        // sight cannot scroll the page to it.
         let zoom = ctx.zoom_factor();
         let ratio = pixel_ratio();
         let caret = ime.cursor_rect.center();

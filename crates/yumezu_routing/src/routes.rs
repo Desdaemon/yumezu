@@ -1,6 +1,6 @@
 //! The tree of routes over what a player can walk, run outward from a world or inward to one.
 
-use super::{Ask, Demand, ESCAPE, Gate, Step};
+use super::{Conditions, Demand, ESCAPE, Gate, Step};
 
 /// The route from every world to the world a walk was seeded at: the origin for the canonical
 /// tree, and the destination for a set of directions.
@@ -78,16 +78,16 @@ pub fn routes_from(connections: &[Vec<Step>], origin: usize) -> Routes {
 }
 
 /// The same walk for a player who can already get past everything up to and including `passable`:
-/// those steps ask nothing, so the route through them falls to the shortest one. At
-/// [`Gate::Revisit`] nothing is asked anywhere and the walk counts connections alone.
+/// those steps demand nothing, so the route through them falls to the shortest one. At
+/// [`Gate::Revisit`] nothing is demanded anywhere and the walk counts connections alone.
 pub fn routes_from_passing(connections: &[Vec<Step>], origin: usize, passable: Gate) -> Routes {
     // Standing at a world, the worlds it can be walked on to.
     walk(connections, origin, None, move |_, step| {
-        let asks = step.out.as_ref()?.gate;
+        let conditions = step.out.as_ref()?.gate;
         Some(Taken {
             world: step.world,
-            gate: met(asks, passable),
-            onward: asks.onward(),
+            gate: met(conditions, passable),
+            onward: conditions.onward(),
         })
     })
 }
@@ -101,10 +101,10 @@ pub fn routes_toward(connections: &[Vec<Step>], destination: usize) -> Routes {
     // world the search is seeded at -- everywhere else, walking on from it is what it does not
     // allow.
     walk(connections, destination, None, |at, step| {
-        let asks = step.back.as_ref()?.gate;
-        (asks.onward() || at == destination).then_some(Taken {
+        let conditions = step.back.as_ref()?.gate;
+        (conditions.onward() || at == destination).then_some(Taken {
             world: step.world,
-            gate: asks,
+            gate: conditions,
             onward: true,
         })
     })
@@ -113,7 +113,7 @@ pub fn routes_toward(connections: &[Vec<Step>], destination: usize) -> Routes {
 /// What taking a step comes to for the walk.
 struct Taken {
     world: usize,
-    /// What it asks, which is what the route it is part of is ordered by.
+    /// What it demands, which is what the route it is part of is ordered by.
     gate: Gate,
     /// Whether the walk can go on from where it lands. See [`Gate::onward`].
     onward: bool,
@@ -188,16 +188,16 @@ fn walk(
     routes
 }
 
-/// What a step asks of a player who can already get past everything up to `passable`.
-fn met(asks: Gate, passable: Gate) -> Gate {
-    match asks <= passable {
+/// What a step demands of a player who can already get past everything up to `passable`.
+fn met(conditions: Gate, passable: Gate) -> Gate {
+    match conditions <= passable {
         true => Gate::Free,
-        false => asks,
+        false => conditions,
     }
 }
 
-fn escape_ask() -> Ask {
-    Ask::of([Demand {
+fn escape_conditions() -> Conditions {
+    Conditions::of([Demand {
         gate: Gate::Effect,
         detail: Some(ESCAPE.to_owned()),
     }])
@@ -207,40 +207,41 @@ fn escape_ask() -> Ask {
 fn escape_step(hub: usize) -> Step {
     Step {
         world: hub,
-        out: Some(escape_ask()),
+        out: Some(escape_conditions()),
         back: None,
     }
 }
 
-/// What stepping from one world to the next asks, the way home the game gives a player everywhere
-/// included. `None` where there is no walking it.
-pub fn step_asks(
+/// What stepping from one world to the next demands, the way home the game gives a player
+/// everywhere included. `None` where there is no walking it.
+pub fn step_conditions(
     connections: &[Vec<Step>],
     hub: Option<usize>,
     from: usize,
     to: usize,
-) -> Option<Ask> {
+) -> Option<Conditions> {
     let listed = connections[from]
         .iter()
         .find(|step| step.world == to)
         .and_then(|step| step.out.clone());
-    listed.or_else(|| (hub == Some(to) && hub != Some(from)).then(escape_ask))
+    listed.or_else(|| (hub == Some(to) && hub != Some(from)).then(escape_conditions))
 }
 
 /// Whether a way backs out through an exit point anywhere along it.
 fn backs_out(connections: &[Vec<Step>], hub: Option<usize>, way: &[usize]) -> bool {
     way.windows(2).any(|pair| {
-        step_asks(connections, hub, pair[0], pair[1]).is_some_and(|ask| ask.gate == Gate::ExitPoint)
+        step_conditions(connections, hub, pair[0], pair[1])
+            .is_some_and(|step| step.gate == Gate::ExitPoint)
     })
 }
 
-/// The harshest thing a way asks anywhere along it, and how many of its steps ask anything at all.
-/// Read in the order the way is walked, `from` first.
-fn asked_of(connections: &[Vec<Step>], hub: Option<usize>, way: &[usize]) -> (Gate, u32) {
-    asked_passing(connections, hub, way, Gate::Free)
+/// The harshest thing a way demands anywhere along it, and how many of its steps demand anything
+/// at all. Read in the order the way is walked, `from` first.
+fn conditions_of(connections: &[Vec<Step>], hub: Option<usize>, way: &[usize]) -> (Gate, u32) {
+    conditions_passing(connections, hub, way, Gate::Free)
 }
 
-fn asked_passing(
+fn conditions_passing(
     connections: &[Vec<Step>],
     hub: Option<usize>,
     way: &[usize],
@@ -248,11 +249,14 @@ fn asked_passing(
 ) -> (Gate, u32) {
     way.windows(2)
         .map(|pair| {
-            step_asks(connections, hub, pair[0], pair[1])
-                .map_or(Gate::Free, |ask| met(ask.gate, passable))
+            step_conditions(connections, hub, pair[0], pair[1])
+                .map_or(Gate::Free, |step| met(step.gate, passable))
         })
-        .fold((Gate::Free, 0), |(harshest, demands), asks| {
-            (harshest.max(asks), demands + u32::from(asks != Gate::Free))
+        .fold((Gate::Free, 0), |(harshest, demands), conditions| {
+            (
+                harshest.max(conditions),
+                demands + u32::from(conditions != Gate::Free),
+            )
         })
 }
 
@@ -279,12 +283,12 @@ fn ways_between(
                refused: &std::collections::HashSet<(usize, usize)>|
      -> Option<Vec<usize>> {
         let routes = walk(connections, spur, hub, |at, step| {
-            let asks = step.out.as_ref()?.gate;
+            let conditions = step.out.as_ref()?.gate;
             let barred = shut[step.world] || refused.contains(&(at, step.world));
             (!barred).then_some(Taken {
                 world: step.world,
-                gate: met(asks, passable),
-                onward: asks.onward(),
+                gate: met(conditions, passable),
+                onward: conditions.onward(),
             })
         });
         routes.depth[to]?;
@@ -324,8 +328,8 @@ fn ways_between(
             }
         }
         let best = candidates.iter().enumerate().min_by_key(|(_, way)| {
-            let (asks, demands) = asked_passing(connections, hub, way, passable);
-            (asks, way.len(), demands)
+            let (conditions, demands) = conditions_passing(connections, hub, way, passable);
+            (conditions, way.len(), demands)
         });
         let Some((best, _)) = best else {
             break;
@@ -335,7 +339,7 @@ fn ways_between(
     found
 }
 
-/// How much of the game a way may assume the player has already got past. Every level is asked,
+/// How much of the game a way may assume the player has already got past. Every level is run,
 /// because the ordering is what a level changes: the way a player with nothing can walk and the
 /// shortest one with every door open are each some level's own first answer, and neither is near
 /// the top of the other's list.
@@ -350,7 +354,7 @@ enum Passing {
 impl Passing {
     const ALL: [Self; 3] = [Self::Nothing, Self::Conditions, Self::Everything];
 
-    /// The harshest gate this level walks through as though it asked nothing.
+    /// The harshest gate this level walks through as though it demanded nothing.
     fn met(self) -> Gate {
         match self {
             Self::Nothing => Gate::Free,
@@ -362,41 +366,38 @@ impl Passing {
 
 /// One way between two worlds, and what taking it comes to.
 pub struct Way {
-    /// `from` first, as [`ways`] was asked.
+    /// `from` first, as [`ways`] was given them.
     pub walk: Vec<usize>,
-    /// The harshest thing it asks anywhere along it, and how many of its steps ask anything at
-    /// all: what one way is told apart from another by, the length aside.
-    pub asks: Gate,
+    /// The harshest thing it demands anywhere along it, and how many of its steps demand
+    /// anything at all: what one way is told apart from another by, the length aside.
+    pub conditions: Gate,
     pub demands: u32,
     /// Whether it backs out through an exit point anywhere along it.
     pub backs_out: bool,
 }
 
 /// What a way costs a reader: whether it needs a door opened from its far side, then how many of
-/// its steps ask anything at all.
+/// its steps demand anything at all.
 ///
-/// [`Gate::in_place`] leads, because a way round asking several things a player can meet where
+/// [`Gate::in_place`] leads, because a way round demanding several things a player can meet where
 /// they stand is still a way in and one far-side lock is not, however many fewer steps it takes.
-fn price(asks: Gate, demands: u32) -> (bool, u32) {
-    (!asks.in_place(), demands)
+fn price(conditions: Gate, demands: u32) -> (bool, u32) {
+    (!conditions.in_place(), demands)
 }
 
 /// At most `want` ways from `from` to `to`, by what each [`price`] costs a reader and shorter with
 /// every class: the trade the reader is being offered.
 ///
-/// A class is only offered where it beats every way of a freer one, so a way that asks more
-/// without saving a connection is no alternative to one that asks less, and where the freest way
-/// is also the shortest there is nothing else to say. A class may hold as many ways as it asks
-/// things: one unconditional way, one asking a single thing, two asking two, and so on. The more a
-/// class asks, the more likely a reader is to be unable to meet some of it, and so the more use a
-/// second way of the same price is. A way that backs out through an exit point is tallied apart
-/// and only ever one to a class: an exit point is a yes or no the player makes on the spot, so
-/// such ways are alike enough that several would crowd out the ways round without offering the
-/// reader a further choice.
+/// A class is only offered where it beats every way of a freer one, so a way that demands more
+/// without saving a connection is no alternative. A class holds as many ways as it demands things,
+/// a reader being likelier to fall short of a demanding class and so to want a second way of the
+/// same price. Ways that back out through an exit point are tallied apart and held to one a class:
+/// an exit point is a yes or no made on the spot, so several would crowd out the ways round
+/// without offering a further choice.
 ///
-/// What every [`Passing`] level finds, pooled and then read once for what a way actually asks
+/// What every [`Passing`] level finds, pooled and then read once for what a way actually demands
 /// rather than for the level that found it. A few hundred whole-graph searches, so it is run where
-/// a reader asks for the ways rather than wherever they are read.
+/// a reader wants the ways rather than wherever they are read.
 pub fn ways(
     connections: &[Vec<Step>],
     from: usize,
@@ -416,8 +417,8 @@ pub fn ways(
     // only separates two of a class that are the same length, so a reader offered one of them is
     // offered the gentler.
     found.sort_by_key(|walk| {
-        let (asks, demands) = asked_of(connections, hub, walk);
-        (price(asks, demands), walk.len(), asks)
+        let (conditions, demands) = conditions_of(connections, hub, walk);
+        (price(conditions, demands), walk.len(), conditions)
     });
 
     let mut ways: Vec<Way> = Vec::new();
@@ -425,12 +426,12 @@ pub fn ways(
         if ways.len() == want {
             break;
         }
-        let (asks, demands) = asked_of(connections, hub, &walk);
-        let class = price(asks, demands);
+        let (conditions, demands) = conditions_of(connections, hub, &walk);
+        let class = price(conditions, demands);
         let backs_out = backs_out(connections, hub, &walk);
         let kept = ways
             .iter()
-            .filter(|way| price(way.asks, way.demands) == class && way.backs_out == backs_out)
+            .filter(|way| price(way.conditions, way.demands) == class && way.backs_out == backs_out)
             .count();
         let room = kept
             < if backs_out {
@@ -440,13 +441,13 @@ pub fn ways(
             };
         let beats = ways
             .iter()
-            .all(|way| price(way.asks, way.demands) >= class || walk.len() < way.walk.len());
+            .all(|way| price(way.conditions, way.demands) >= class || walk.len() < way.walk.len());
         if !room || !beats {
             continue;
         }
         ways.push(Way {
             walk,
-            asks,
+            conditions,
             demands,
             backs_out,
         });

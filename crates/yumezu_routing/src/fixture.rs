@@ -38,7 +38,7 @@ pub struct Place {
 fn conn(to: usize, flags: ConnType, worded: Option<&str>) -> Connection {
     Connection {
         target_id: to,
-        flags: flags.bits(),
+        bits: flags.bits(),
         type_params: worded
             .map(|words| {
                 (
@@ -64,21 +64,56 @@ fn cond(to: usize, words: &str) -> Connection {
 
 pub fn dream_tree() -> Vec<Place> {
     [
-        ("Urotsuki's Room", vec![free(1), free(2), free(3), cond(12, "having seen the ledger")]),
+        (
+            "Urotsuki's Room",
+            vec![
+                free(1),
+                free(2),
+                free(3),
+                cond(12, "having seen the ledger"),
+            ],
+        ),
         ("Lantern Causeway", vec![free(4)]),
-        ("Mural Vestibule", vec![conn(4, ConnType::CHANCE, Some("1/8"))]),
-        ("Quiet Ledger", vec![conn(4, ConnType::SEASONAL, Some("Winter"))]),
-        ("Nexus", vec![free(5), conn(6, ConnType::EFFECT, Some("Lantern Cloak"))]),
+        (
+            "Mural Vestibule",
+            vec![conn(4, ConnType::CHANCE, Some("1/8"))],
+        ),
+        (
+            "Quiet Ledger",
+            vec![conn(4, ConnType::SEASONAL, Some("Winter"))],
+        ),
+        (
+            "Nexus",
+            vec![free(5), conn(6, ConnType::EFFECT, Some("Lantern Cloak"))],
+        ),
         ("Sunken Orchard", vec![free(7)]),
         ("Static Shoreline", vec![cond(7, "having lit the beacon")]),
-        ("Marzipan Road", vec![free(8), conn(9, ConnType::DEAD_END, None)]),
-        ("Clockwork Dunes", vec![conn(10, ConnType::UNLOCK, None), cond(14, "having wound the drum")]),
+        (
+            "Marzipan Road",
+            vec![free(8), conn(9, ConnType::DEAD_END, None)],
+        ),
+        (
+            "Clockwork Dunes",
+            vec![
+                conn(10, ConnType::UNLOCK, None),
+                cond(14, "having wound the drum"),
+            ],
+        ),
         ("Violet Aquifer", vec![]),
-        ("Chalk Observatory", vec![conn(8, ConnType::LOCKED, None), conn(11, ConnType::ONE_WAY, None)]),
+        (
+            "Chalk Observatory",
+            vec![
+                conn(8, ConnType::LOCKED, None),
+                conn(11, ConnType::ONE_WAY, None),
+            ],
+        ),
         ("Hollow Carnival", vec![free(12), free(14)]),
         // The only way in to Ember Terrace, and its words name Ember Terrace: a condition only a
         // player already there could meet, which is what `Gate::Revisit` is.
-        ("Glass Aviary", vec![cond(13, "having been to Ember Terrace")]),
+        (
+            "Glass Aviary",
+            vec![cond(13, "having been to Ember Terrace")],
+        ),
         ("Ember Terrace", vec![]),
         ("Drowned Switchboard", vec![free(15)]),
         ("Tin Solarium", vec![]),

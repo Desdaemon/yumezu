@@ -1,18 +1,16 @@
 //! Serves yumezu its world dump.
 //!
-//! The wiki explorer this replaces keeps a MySQL database, a scraper for a dozen wiki pages and a
-//! background worker; this keeps one JSON document. It asks the wiki's Semantic MediaWiki store for
-//! structured data instead of reading HTML -- see [`smw`] -- and a dump rebuilt from scratch every
-//! time has nothing to reconcile.
+//! The wiki explorer this replaces keeps a MySQL database, a scraper and a background worker; this
+//! keeps one JSON document, queried out of the wiki's Semantic MediaWiki store rather than scraped
+//! -- see [`smw`] -- and rebuilt from scratch, so there is nothing to reconcile.
 //!
 //! Effects, menu themes, wallpapers and the soundtrack are written in wiki prose, so their fields
-//! are published empty. Nothing here parses HTML, and nothing here should: none of those four says
-//! anything about how the worlds join up.
+//! are published empty: none of the four says anything about how the worlds join up.
 //!
 //! The dump is kept current on the server's own clock: a sync runs every `--sync-every` hours, and
 //! `GET /data` is answered from the file whether or not one is running. A sync re-reads only the
-//! parts of the wiki whose pages have been edited; once a week one reads the whole of it instead
-//! of asking what has changed -- see [`FULL_EVERY`]. Until the first sync lands there is nothing to
+//! parts of the wiki whose pages have been edited; once a week one reads the whole of it instead of
+//! querying what has changed -- see [`FULL_EVERY`]. Until the first sync lands there is nothing to
 //! serve, so `/data` answers `503 needs update` and the client waits on `GET /pollUpdate`.
 //!
 //! ```text
@@ -20,7 +18,7 @@
 //! ```
 //!
 //! Besides the dump it answers four routes carrying what YNOproject knows about the player reading
-//! the page, put through because the page may not ask YNOproject directly. See [`relay`].
+//! the page, put through because the page may not reach YNOproject directly. See [`relay`].
 //!
 //! `--listen` takes either a `host:port` or, so that nginx can reach it the other way its
 //! `proxy_pass` knows, the path of a Unix socket -- see [`Listen`].
@@ -38,7 +36,7 @@ mod depth;
 mod model;
 mod next;
 mod progress;
-/// What the page asks about a player's own YNOproject account, put through to YNOproject. See
+/// What the page reads about a player's own YNOproject account, put through to YNOproject. See
 /// [`relay::routes`].
 mod relay;
 mod smw;
@@ -52,14 +50,14 @@ const DATA: &str = "data.json";
 /// Where the server listens with no `--listen`.
 const LISTEN: &str = "127.0.0.1:5000";
 
-/// A pass that finds the wiki unmoved costs one small request, so what sets this is how soon an edit
-/// should show rather than what the asking costs. It is also the window the wiki is asked about: a
-/// shorter interval means more passes each covering less, not more of the wiki read.
+/// A pass that finds the wiki unmoved costs one small request, so this is set by how soon an edit
+/// should show. It is also the window each pass queries over, so a shorter one means more passes
+/// each covering less, not more of the wiki read.
 const SYNC_EVERY: u64 = 2;
 
 /// A soft sync takes the wiki's account of its own edits at its word, and an edit that account
-/// misses -- a template the worlds are built out of, outside the one namespace that is watched --
-/// is missed for good: nothing later asks about that week again.
+/// misses -- a template outside the watched namespace -- is missed for good, nothing querying that
+/// week again.
 const FULL_EVERY: time::Duration = time::Duration::weeks(1);
 
 #[derive(Clone)]
@@ -95,7 +93,7 @@ async fn main() -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-/// The client the wiki is asked over.
+/// The client the wiki is queried over.
 fn http() -> reqwest::Client {
     // `rustls-no-provider` leaves the provider to the process, and reqwest panics building a
     // client without one.
@@ -208,9 +206,9 @@ async fn build(server: &Server, fetched: &mut sync::Fetched) -> smw::Result<Opti
 
 /// How much of the wiki this refresh should read, or `None` for one that need not run at all.
 ///
-/// Only a sync with a dump to compare against, and a week not yet up, has a choice to make. Three
-/// answers stand it down or widen it: nothing has changed; the dump is older than the wiki
-/// remembers, so all of it is read; and the wiki cannot be asked at all, which reads all of it too.
+/// Only a sync with a dump to compare against, and a week not yet up, has a choice to make: it is
+/// stood down where nothing has changed, and widened to the whole wiki where the dump is older
+/// than the wiki remembers or the wiki answers nothing.
 async fn plan(server: &Server, previous: &model::Dump) -> Option<sync::Refresh> {
     server.progress.at(progress::CHANGES);
     // Nothing to compare against is a first sync, and a first sync reads all of it.
@@ -222,10 +220,10 @@ async fn plan(server: &Server, previous: &model::Dump) -> Option<sync::Refresh> 
         return Some(sync::Refresh::Everything);
     };
     if full_due(previous) {
-        tracing::info!("the week is up; reading the whole wiki rather than asking what changed");
+        tracing::info!("the week is up; reading the whole wiki rather than querying what changed");
         return Some(sync::Refresh::Everything);
     }
-    let Some(since) = sync::asked_from(built, time::OffsetDateTime::now_utc()) else {
+    let Some(since) = sync::looking_from(built, time::OffsetDateTime::now_utc()) else {
         tracing::info!("the dump is older than the wiki's memory of what it changed; reading all");
         return Some(sync::Refresh::Everything);
     };
@@ -235,7 +233,7 @@ async fn plan(server: &Server, previous: &model::Dump) -> Option<sync::Refresh> 
             tracing::info!("{} pages edited since {since}", pages.len());
             Some(sync::Refresh::Pages(pages))
         }
-        // Rebuilding a dump that did not need it costs a minute of asking; the other mistake is a
+        // Rebuilding a dump that did not need it costs a minute of querying; the other mistake is a
         // dump that quietly stops following the wiki.
         Err(error) => {
             tracing::warn!("cannot tell what the wiki has changed: {error}");
@@ -273,7 +271,7 @@ impl<'a> Listen<'a> {
     }
 }
 
-/// Runs until asked to stop.
+/// Runs until told to stop.
 async fn serve(server: Server, options: Options) {
     let app = axum::Router::new()
         // `/data` is what the reference implementation serves it as; `/data.json` is what a build
@@ -282,7 +280,7 @@ async fn serve(server: Server, options: Options) {
         .route("/data.json", get(data))
         .route("/pollUpdate", get(poll_update))
         // The one route that answers a question rather than handing over the dump, and the one
-        // YNOproject's game client asks. See `next`.
+        // YNOproject's game client calls. See `next`.
         .route("/getNextLocations", get(next::get_next_locations))
         // Kept here rather than left to whatever serves the page: the sign-in's cookie has to be
         // handed back for this origin to be keepable at all.
@@ -311,9 +309,8 @@ async fn serve(server: Server, options: Options) {
             };
             tracing::info!("listening on unix:{}", path.display());
             run(listener, app).await;
-            // A socket outlives the process that bound it, and the one left behind is both a door
-            // that answers nothing and the file the next run must clear. This covers the graceful
-            // stop; `bind` covers every other ending.
+            // A socket outlives the process that bound it, leaving a door that answers nothing.
+            // This covers the graceful stop; `bind` covers every other ending.
             if let Err(error) = std::fs::remove_file(path) {
                 tracing::warn!("cannot remove {}: {error}", path.display());
             }
@@ -324,12 +321,12 @@ async fn serve(server: Server, options: Options) {
 /// Opens the socket `--listen` named, clearing a stale one out of the way.
 ///
 /// Made world-reachable: the default umask would let nothing but this program's own user connect,
-/// and nginx's user is not something this program can guess. What decides who may connect is the
-/// directory the socket sits in, which the host chooses along with the path.
+/// and nginx's user cannot be guessed. Who may connect is decided by the directory the socket sits
+/// in, which the host chooses along with the path.
 fn bind(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
     // Only a socket, and only one nothing is listening on: `bind` fails with "address in use"
-    // against a live one, and refusing to unlink anything else keeps a mistyped `--listen` from
-    // eating a real file.
+    // against a live one, and refusing anything else keeps a mistyped `--listen` from eating a
+    // real file.
     if std::os::unix::net::UnixStream::connect(path).is_err()
         && std::fs::symlink_metadata(path).is_ok_and(|file| file.file_type().is_socket())
     {
@@ -358,9 +355,9 @@ where
 
 /// `GET /data` -- the dump, exactly as it sits on disk, or `503 needs update` before there is one.
 ///
-/// An empty dump is never served: a client cannot tell it from a wiki with no worlds in it and
-/// would draw the second. A sync under way is no reason to withhold the dump standing: on a pass
-/// that publishes nothing, that is the same document the client would be handed a minute later.
+/// An empty dump is never served: a client cannot tell it from a wiki with no worlds in it. A sync
+/// under way is no reason to withhold the dump standing, which a pass publishing nothing would
+/// hand back unchanged anyway.
 async fn data(State(server): State<Server>) -> axum::response::Response {
     let snapshot = server.store.snapshot();
     if snapshot.dump.worlds.is_empty() {
@@ -391,8 +388,7 @@ async fn poll_update(State(server): State<Server>) -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     /// `rustls-no-provider` moves the choice of provider out of reqwest's features and into
-    /// [`super::http`], where nothing but a run can prove it was made: the builder panics instead
-    /// of failing to compile.
+    /// [`super::http`], where the builder panics at run time rather than failing to compile.
     #[test]
     fn the_client_has_a_crypto_provider() {
         super::http();

@@ -1,8 +1,8 @@
 # dreamweaver
 
-Builds and serves `data.json`, the world dump yumezu draws. It asks yume.wiki's Semantic MediaWiki
-store for the Yume 2kki world data and keeps the result in one JSON file, which is both what it
-serves and what it reads back when it restarts.
+Builds and serves `data.json`, the world dump yumezu draws. It queries yume.wiki's Semantic
+MediaWiki store for the Yume 2kki world data and keeps the result in one JSON file, which is both
+what it serves and what it reads back when it restarts.
 
 ```
 dreamweaver [--listen ADDR|PATH] [--data PATH] [--sync-every HOURS]
@@ -47,12 +47,12 @@ socket is removed when the server stops.
 Every `GET /data` is answered from the file, including the ones that arrive while a sync is running.
 
 A server that has not finished its first sync answers **`503 needs update`**. Poll `/pollUpdate`
-until it says `done`, then ask again. An empty dump is never served: it is indistinguishable from a
+until it says `done`, then try again. An empty dump is never served: it is indistinguishable from a
 wiki with no worlds in it, and the reader on the other end would draw the second.
 
-The four `yno` routes carry a player's own YNOproject session, because a browser may not ask
+The four `yno` routes carry a player's own YNOproject session, because a browser may not reach
 YNOproject directly. **A signed-in request therefore goes through this host, and this host sees the
-session.** The native builds ask YNOproject directly instead.
+session.** The native builds reach YNOproject directly instead.
 
 ### `GET /getNextLocations`
 
@@ -79,13 +79,13 @@ A world the dump does not hold is answered with `200` and:
 
 ## Syncing
 
-Every `--sync-every` hours the server does a **soft** sync: it asks the wiki which pages have been
-edited since the dump was built, and asks again only for what those edits made stale. Once a week it
+Every `--sync-every` hours the server does a **soft** sync: it queries the wiki for which pages have
+been edited since the dump was built, and re-reads only what those edits made stale. Once a week it
 does a **full** sync instead, reading the whole wiki.
 
 Syncs are timed from when the dump on disk was built, so restarting is not a way to make the server
 re-read the wiki. Three other cases read the whole wiki: a server coming up with nothing on disk, a
-dump more than thirty days old, and a wiki that cannot be asked what it changed.
+dump more than thirty days old, and a wiki that cannot say what it changed.
 
 **Deleting `--data` and restarting is the only way to demand a full read.** There is no route for it.
 Expect the atlas to need repacking afterwards: a cold build has no previous dump to carry cells

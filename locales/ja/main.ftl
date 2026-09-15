@@ -5,7 +5,7 @@
 #
 # A message left out here is read from `en-US` instead, so this file may be short of that one
 # without anything going blank. What it may not do is disagree with it about what a message is
-# named or which values it asks for.
+# named or which values it takes.
 
 language-name = 日本語
 language = 言語
@@ -206,7 +206,7 @@ map-fit = マップ全体をウィンドウに収める
 map-maximize = ウィンドウを画面いっぱいに広げる
 map-restore = ウィンドウを元の大きさに戻す
 
-## What a connection asks of a player walking it.
+## What a connection demands of a player walking it.
 
 gate-effect = エフェクトが必要
 gate-chance = 確率あり

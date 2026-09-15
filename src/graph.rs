@@ -1,4 +1,4 @@
-//! The graph as something to point at and ask about: what the simulation is told, what the
+//! The graph as something to point at and read: what the simulation is told, what the
 //! pointer is over, what a selection lights, and what the camera should be shown.
 
 use super::*;
@@ -6,8 +6,8 @@ use super::*;
 /// Force per unit of distance between a grabbed node and the cursor.
 ///
 /// The cursor pulls the node rather than placing it, so the graph attached to it travels along.
-/// Momentum makes the response second order, so the gain has to stay well under what would close
-/// the gap in a single frame.
+/// Momentum makes the response second order, so the gain stays well under closing the gap in one
+/// frame.
 const GRAB_STIFFNESS: f32 = 0.5;
 /// So a cursor flung across the window cannot throw a grabbed node clear of the layout.
 const GRAB_FORCE_MAX: f32 = 2000.0;
@@ -53,30 +53,27 @@ const SEARCH_CANDIDATES: usize = 10;
 pub(super) enum Highlight {
     /// The world's canonical route back to the origin. A plain click.
     Route(usize),
-    /// Everything whose route home passes through the world. Asked for from the right-click menu.
+    /// Everything whose route home passes through the world. Picked from the right-click menu.
     Descendants(usize),
-    /// Every world an author is credited with, indexed into [`AppEntities::authors`]. Asked for by
+    /// Every world an author is credited with, indexed into [`AppEntities::authors`]. Picked by
     /// clicking a name, in the panel or in the catalog.
     Author(usize),
-    /// What a release added, indexed into [`AppEntities::versions`]. Asked for from the catalog.
+    /// What a release added, indexed into [`AppEntities::versions`]. Picked from the catalog.
     Version(usize),
-    /// Every world exactly this many connections from the origin. Asked for by the rocker in the
+    /// Every world exactly this many connections from the origin. Picked by the rocker in the
     /// bottom corner. See `Panel::rocker`.
     Layer(u32),
-    /// The two worlds one connection joins and the line between them, and nothing else. Asked for
+    /// The two worlds one connection joins and the line between them, and nothing else. Picked
     /// from the ways on a world offers: see [`Panel::ways_on`].
     ///
     /// Held as the world it was picked from and then the world at the far end. Not a direction --
-    /// which ways round it can be walked is read off the connection itself -- but the order is
-    /// what keeps the panel on the world the reader is reading.
+    /// that is read off the connection -- but the order keeps the panel on the world being read.
     Connection(usize, usize),
     /// At most [`UNTAKEN_WORLDS`] of the worlds the player has stood in with the most unwalked
-    /// ways out. Asked for from the panel with nothing selected, and only in a run drawing a
-    /// frontier: the whole game has no unwalked way to count.
+    /// ways out. Only in a run drawing a frontier: the whole game has no unwalked way to count.
     Untaken,
-    /// The way from one world to another, held as walked-from then walked-to. Asked for from the
-    /// right-click menu, and the one highlight [`AppEntities::routes`] cannot answer -- so the
-    /// walks themselves are kept in [`AppEntities::ways`].
+    /// The way from one world to another, held as walked-from then walked-to. The one highlight
+    /// [`AppEntities::routes`] cannot answer, so the walks are kept in [`AppEntities::ways`].
     Path(usize, usize),
 }
 
@@ -85,9 +82,9 @@ impl Highlight {
     /// to name, and no route home for the panel to walk.
     pub(super) fn world(self) -> Option<usize> {
         match self {
-            // A connection answers with the world it was picked from -- the one whose ways on the
-            // panel is listing -- so clicking through them leaves the reader where they started.
-            // A path answers with where it arrives, which is what was asked for.
+            // A connection answers with the world it was picked from, so clicking through the
+            // panel's list leaves the reader where they started. A path answers with where it
+            // arrives, which is what was picked.
             Self::Route(world)
             | Self::Descendants(world)
             | Self::Connection(world, _)
@@ -120,23 +117,20 @@ pub(super) enum Gesture {
 }
 /// The worlds and the connections between them, laid out by the simulation.
 ///
-/// A connection carries whether a player can only walk it one way, which is the one thing about it
-/// a frame has to know. Its stored direction is the walkable one, so a one-way connection's dashes
-/// march the way the player can go. See [`AppEntities::march_dashes`].
+/// A connection's stored direction is the walkable one, so a one-way connection's dashes march the
+/// way the player can go. See [`AppEntities::march_dashes`].
 pub(super) type Graph = ForceGraph<(), bool>;
 /// The worlds a player still has somewhere to go from.
 ///
-/// A way out counts only where the player could actually take it: the far end has to be somewhere
-/// they have not been, and the connection walkable in that direction -- the same reading
-/// `world::Dump::showing` builds the frontier by, so the list cannot disagree with the graph.
+/// A way out counts only where the player could take it: the far end somewhere they have not been,
+/// and the connection walkable that way -- the reading `world::Dump::showing` builds the frontier
+/// by, so the list cannot disagree with the graph.
 ///
 /// Ranked most first, ties by world so the list is the same every time it is built, and cut to
-/// [`UNTAKEN_WORLDS`]. The counts order the list and are then dropped: a number beside each would
-/// invite the reader to weigh two of them against each other, which is a question they did not ask.
+/// [`UNTAKEN_WORLDS`]. The counts order the list and are then dropped.
 ///
-/// Empty exactly when the graph has no frontier, which is what tells the panel whether to offer
-/// the list at all -- read off the graph rather than the account that asked for it, the same way
-/// the placeholders are.
+/// Empty exactly when the graph has no frontier, which tells the panel whether to offer the list.
+/// Read off the graph rather than the account that opened it, as the placeholders are.
 pub(super) fn untaken(connections: &[Vec<world::Step>], unknown: &[bool]) -> Vec<usize> {
     let mut ranked: Vec<(usize, usize)> = connections
         .iter()
@@ -191,9 +185,8 @@ impl AppEntities {
     pub(super) fn track_gesture(&mut self, camera: &Camera, events: &mut [Event], pinching: bool) {
         for event in events.iter_mut() {
             match event {
-                // While more than one finger is down the left button belongs to the pinch, so
-                // neither its travel nor its release is a gesture of its own. Swallowed rather
-                // than skipped, so the orbit control downstream does not read them either.
+                // While more than one finger is down the left button belongs to the pinch.
+                // Swallowed rather than skipped, so the orbit control does not read it either.
                 Event::MousePress {
                     button: MouseButton::Left,
                     handled,
@@ -265,10 +258,9 @@ impl AppEntities {
                         self.gesture = Some(awarded);
                     }
                 }
-                // The right button is contested too -- it pans the camera -- so it is nominated
-                // the same way the left one is, and left unhandled for the pan to claim its
-                // motion. Any press closes the open menu, a pan carrying the graph out from
-                // under it.
+                // The right button pans the camera too, so it is nominated like the left one and
+                // left unhandled for the pan to claim its motion. Any press closes the open menu,
+                // a pan carrying the graph out from under it.
                 Event::MousePress {
                     button: MouseButton::Right,
                     position,
@@ -323,9 +315,7 @@ impl AppEntities {
         }
         // Retested every frame rather than only on motion: the layout is usually still moving and
         // the camera can be flown with the keys, so what is under a still cursor changes anyway.
-        // One walk of the nodes, a fraction of the walk [`AppEntities::magnified`] already makes
-        // per frame. Nothing hovers mid-gesture: the pointer is dragging a node or turning the
-        // camera.
+        // Nothing hovers mid-gesture: the pointer is dragging a node or turning the camera.
         self.hover = match self.gesture {
             None => self
                 .cursor
@@ -335,9 +325,8 @@ impl AppEntities {
         };
     }
 
-    /// Against the node positions rather than the drawn geometry: the plates are one instanced
-    /// mesh, so there is nothing per node to intersect. The test is how far the node lands from
-    /// the cursor on screen, which is the only distance the person clicking can see.
+    /// Against the node positions rather than the drawn geometry, the plates being one instanced
+    /// mesh. The test is how far the node lands from the cursor on screen.
     fn pick(&self, camera: &Camera, cursor: PhysicalPoint) -> Option<Grab> {
         let origin = camera.position_at_pixel(cursor);
         let direction = camera.view_direction_at_pixel(cursor);
@@ -388,8 +377,7 @@ impl AppEntities {
     }
 
     /// The selected node and every step from it back to the origin world, selection first, or the
-    /// directions asked for where those are what is lit. Empty with nothing selected, whatever the
-    /// selection lights: the route is what the panel walks.
+    /// directions picked where those are what is lit. Empty with nothing selected.
     ///
     /// Arrival first either way. [`world::Way`] is kept the way it is walked, so a chosen way is
     /// turned round here rather than everything that reads a route being written twice.
@@ -412,8 +400,7 @@ impl AppEntities {
         match self.selected {
             None => Vec::new(),
             // One step on rather than the whole subtree, which is `Highlight::Descendants`. The
-            // chain and the children meet at that world and nowhere else, so `repaint` can colour
-            // them apart.
+            // chain and the children meet only at that world, so `repaint` can colour them apart.
             Some(Highlight::Route(world)) => {
                 let mut lit = self.route();
                 lit.extend(
@@ -453,11 +440,9 @@ impl AppEntities {
 
     /// At most [`NOTABLE_WORLDS`], and empty unless a subtree is what is lit.
     ///
-    /// Two kinds are worth a name, for opposite reasons: a junction, where the subtree opens out,
-    /// and a dead end, where it stops. Neither measure ranks the other, so the two are ranked
-    /// apart -- junctions by how many ways they offer, dead ends by how far out they are -- and
-    /// then taken in turns, which keeps the list from filling with junctions before it names a
-    /// single place the subtree ends.
+    /// Two kinds are worth a name: a junction, where the subtree opens out, and a dead end, where
+    /// it stops. Ranked apart -- junctions by how many ways they offer, dead ends by how far out
+    /// they are -- then taken in turns, or the list fills with junctions.
     pub(super) fn notable(&self) -> Vec<usize> {
         let Some(Highlight::Descendants(root)) = self.selected else {
             return Vec::new();
@@ -493,9 +478,8 @@ impl AppEntities {
         notable
     }
 
-    /// Everything the selection lights, except a route the reader has not asked to see whole:
-    /// that is framed on the world at its end, which is what was picked and what the panel is
-    /// reading. See [`Self::frame_route`].
+    /// Everything the selection lights, except a route the reader has not chosen to see whole:
+    /// that is framed on the world at its end, which is what was picked. See [`Self::frame_route`].
     fn framed(&self) -> Vec<usize> {
         match self.selected {
             Some(Highlight::Route(world)) if !self.frame_route => vec![world],
@@ -504,9 +488,9 @@ impl AppEntities {
             None => self
                 .opening
                 .map_or_else(Vec::new, |root| self.routes.subtree(root)),
-            // The chain home, not everything a route lights: the button asks for the way there,
-            // not for however much of the game hangs off its end. Directions have no such button:
-            // they fall through to be framed whole, the way there being all that was asked for.
+            // The chain home, not everything a route lights: the button frames the way there, not
+            // however much of the game hangs off its end. Directions have no such button and fall
+            // through to be framed whole.
             Some(Highlight::Route(_)) => self.route(),
             _ => self.highlighted(),
         }
@@ -515,12 +499,11 @@ impl AppEntities {
     /// `None` for a run with nothing selected and no world to open on.
     ///
     /// Centred on the middle of the bounding box rather than on the average, so a route that piles
-    /// up near the origin and reaches out with a few steps is still framed around what it spans
-    /// instead of around where most of it sits.
+    /// up near the origin and reaches out with a few steps is framed around what it spans.
     ///
     /// The reach counts each world's own radius, so the sphere holds the thumbnails rather than
-    /// the points they hang on: that is what a lone world is framed by, and what keeps a hub on
-    /// the rim of a group whole instead of clipped by the window edge.
+    /// the points they hang on -- what a lone world is framed by, and what keeps a hub on the rim
+    /// of a group from being clipped.
     pub(super) fn framing_bounds(&self) -> Option<Bounds> {
         let highlighted = self.framed();
         if highlighted.is_empty() {
@@ -535,17 +518,16 @@ impl AppEntities {
 
     /// The sphere every world sits in, whatever is selected and whatever the run opened on.
     ///
-    /// For `profile` alone: a run being measured wants the graph on screen rather than the pose a
-    /// reader would have opened on, which is one world filling the window. See
-    /// [`super::profile::pan_aside`].
+    /// For `profile` alone: a run being measured wants the graph on screen rather than the one
+    /// world filling the window a reader would have opened on. See [`super::profile::pan_aside`].
     #[cfg(feature = "profile")]
     pub(super) fn whole_bounds(&self) -> Option<Bounds> {
         self.bounds_of(&vec![true; self.titles.len()])
     }
 
     /// What a refresh turned up is what a person pressed refresh to see, and it may be nowhere
-    /// near the part of the map they were looking at. `None` once the arrival is over, which is
-    /// what hands the camera back.
+    /// near the part of the map they were looking at. `None` once the arrival hands the camera
+    /// back.
     ///
     /// The arriving worlds only, not their neighbours: a new world may join back to somewhere
     /// nowhere near the rest of it, and one edge like that drags the sphere across the whole graph.
@@ -597,8 +579,7 @@ impl AppEntities {
     }
 
     /// At most [`SEARCH_CANDIDATES`], ranked by where the match falls and then by how much title
-    /// is left over: a world whose name starts with what was typed comes before one that merely
-    /// contains it, and an exact name before the longer names that extend it.
+    /// is left over, so a prefix beats a substring and an exact name beats both.
     ///
     /// Empty for an empty needle -- ten arbitrary worlds are noise rather than suggestions.
     pub(super) fn search(&self, needle: &str) -> Vec<usize> {
@@ -695,8 +676,8 @@ mod tests {
     fn only_ways_out_a_player_could_walk_are_counted_as_untaken() {
         let step = |world, out: bool| world::Step {
             world,
-            out: out.then(world::Ask::free),
-            back: Some(world::Ask::free()),
+            out: out.then(world::Conditions::free),
+            back: Some(world::Conditions::free()),
         };
         // 0 visited, joined to three unknowns -- one it can walk to, one it can only come back
         // through, one it can walk to again -- and to a fourth world it has been to.
@@ -715,8 +696,8 @@ mod tests {
     fn untaken_worlds_are_ranked_most_first_and_cut_to_the_ten_named() {
         let out = |world| world::Step {
             world,
-            out: Some(world::Ask::free()),
-            back: Some(world::Ask::free()),
+            out: Some(world::Conditions::free()),
+            back: Some(world::Conditions::free()),
         };
         // Twelve visited worlds, each joined to a different number of unknowns: world 0 to one,
         // world 11 to twelve. The unknowns are numbered above all of them.
@@ -741,8 +722,8 @@ mod tests {
     fn a_graph_with_no_frontier_has_nothing_untaken() {
         let both = |world| world::Step {
             world,
-            out: Some(world::Ask::free()),
-            back: Some(world::Ask::free()),
+            out: Some(world::Conditions::free()),
+            back: Some(world::Conditions::free()),
         };
         let connections = vec![vec![both(1)], vec![both(0)]];
         assert!(super::untaken(&connections, &[false, false]).is_empty());

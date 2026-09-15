@@ -1,9 +1,8 @@
 //! `GET /getNextLocations` -- which way out of here leads to where the player is trying to get.
 //!
-//! The one question about the dump that handing over the dump does not answer: the caller is
-//! YNOproject's game client, which knows where a player is standing and has no graph to walk. The
-//! walk is [`yumezu_routing`]'s, the same one the app walks, so a door offered here is a door that
-//! app draws a line through.
+//! The one question about the dump that handing over the dump does not answer, the caller being
+//! YNOproject's game client, which has no graph to walk. The walk is [`yumezu_routing`]'s, the same
+//! one the app walks.
 
 use axum::extract::{Query, State};
 use axum::http::{HeaderValue, header};
@@ -13,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::model::{ConnType, Dump};
 use crate::store::Routing;
 
-/// The one site that asks, as the reference implementation pins it.
-const ASKED_BY: &str = "https://ynoproject.net";
+/// The only site that calls it, as the reference implementation pins it.
+const CALLED_BY: &str = "https://ynoproject.net";
 
 /// As many ways on as the reference implementation offers.
 const CANDIDATES: usize = 3;
@@ -127,8 +126,7 @@ fn ways_on<'a>(
 /// The connection out of `origin` towards `world`, as the dump publishes it.
 ///
 /// The wiki writes a connection once, so the origin's own page need not list it. Where it does not,
-/// the way out is what the far side's listing implies: locked where that side says it unlocks
-/// something, unconditional otherwise, and no words either way.
+/// the way out is locked if the far side says it unlocks something and unconditional otherwise.
 fn leaving(
     dump: &Dump,
     origin: usize,
@@ -142,13 +140,13 @@ fn leaving(
         .iter()
         .find(|connection| connection.target_id == world)
     {
-        return (listed.flags, listed.type_params.clone());
+        return (listed.bits, listed.type_params.clone());
     }
     let back = dump.worlds[world]
         .connections
         .iter()
         .find(|connection| connection.target_id == origin)
-        .map(|connection| connection.conditions())
+        .map(|connection| connection.flags())
         .unwrap_or_default();
     let inferred = match back.contains(ConnType::UNLOCK) {
         true => ConnType::LOCKED,
@@ -161,7 +159,7 @@ fn answer(body: impl IntoResponse) -> Response {
     (
         [(
             header::ACCESS_CONTROL_ALLOW_ORIGIN,
-            HeaderValue::from_static(ASKED_BY),
+            HeaderValue::from_static(CALLED_BY),
         )],
         body,
     )
@@ -244,7 +242,7 @@ mod tests {
             .iter()
             .find(|connection| connection.target_id == from)
             .expect("the far side lists what the origin does not");
-        let locked = back.conditions().contains(super::ConnType::UNLOCK);
+        let locked = back.flags().contains(super::ConnType::UNLOCK);
         assert_eq!(
             conn_type,
             super::ConnType::LOCKED.bits() * u16::from(locked)

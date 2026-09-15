@@ -5,9 +5,8 @@
 //! says how deep the world sits at best. The reader draws the graph by the first and ranks by the
 //! second.
 //!
-//! Neither is a plain shortest path, because the graph is not connected under either rule: whole
-//! branches hang off connections locked from both ends. A run that leaves worlds unreached gives up
-//! one condition at a time, weakest first, and tries again from what it already knows.
+//! Neither is a plain shortest path: whole branches hang off connections locked from both ends, so
+//! a run that leaves worlds unreached gives up one condition at a time, weakest first.
 
 use crate::model::ConnType;
 
@@ -23,7 +22,7 @@ pub struct Node {
     pub out: Vec<(usize, ConnType)>,
 }
 
-/// The conditions `depth` refuses: a connection that asks for any of them is not a step a player
+/// The conditions `depth` refuses: a connection that demands any of them is not a step a player
 /// can take unconditionally.
 fn walkable() -> ConnType {
     ConnType::NO_ENTRY
@@ -62,7 +61,7 @@ fn distances(worlds: &[Node], refused: ConnType) -> Vec<i32> {
     };
     depth[start] = Some(0);
 
-    // Everything reached here is measured under the conditions asked for.
+    // Everything reached here is measured under the conditions given.
     relax(worlds, refused, &mut depth, &mut through_removed, false);
 
     let mut refused = refused;
@@ -74,9 +73,7 @@ fn distances(worlds: &[Node], refused: ConnType) -> Vec<i32> {
         };
         refused = weaker;
         // A world already measured keeps the distance the stricter pass gave it: giving up a
-        // condition reaches what could not be reached at all, it does not discount everything
-        // else. A world four honest steps in does not become three because a locked door
-        // somewhere would have been a shortcut.
+        // condition reaches what could not be reached at all, and does not discount the rest.
         relax(worlds, refused, &mut depth, &mut through_removed, true);
     }
 
@@ -88,9 +85,8 @@ fn distances(worlds: &[Node], refused: ConnType) -> Vec<i32> {
 /// The next condition to stop refusing, weakest first.
 ///
 /// The reference implementation's order, and one of confidence rather than difficulty: a
-/// conditional connection is the most likely to be walkable in practice, a no-entry connection the
-/// least,
-/// since walking one means going the way the wiki says you cannot.
+/// conditional connection is the likeliest to be walkable in practice, a no-entry connection the
+/// least, since walking one means going the way the wiki says you cannot.
 fn give_up(refused: ConnType) -> Option<ConnType> {
     for condition in [
         ConnType::LOCKED_CONDITION,
@@ -107,9 +103,8 @@ fn give_up(refused: ConnType) -> Option<ConnType> {
 }
 
 /// Nearest first out of a heap rather than a breadth-first sweep: every pass after the first starts
-/// from seeds sitting at every distance at once, and taking the nearest each time is what makes the
-/// distance a world is first given the shortest one it has -- which matters because `keep` forbids
-/// improving it afterwards.
+/// from seeds at every distance at once, and `keep` forbids improving a distance afterwards, so the
+/// first one a world is given has to be its shortest.
 ///
 /// `keep` leaves the worlds that already have a distance exactly as they are, and is how a pass that
 /// has given up a condition reaches further without rewriting what a stricter pass decided.

@@ -211,7 +211,7 @@ fn the_lane_loop_vectorizes_on_the_host() {
     let ir = kernel_ir(None, "").expect("the host target is always installed");
     // Four lanes is what the baseline of every target the application ships on provides: SSE2 on
     // x86-64, NEON on aarch64. A machine with AVX2 gets eight, and `<4 x float>` would then be
-    // missing, so this asks for whichever the build chose.
+    // missing, so this takes whichever the build chose.
     assert!(
         ir.contains("<4 x float>") || ir.contains("<8 x float>"),
         "the lane loop is scalar: no vector type in the emitted IR"

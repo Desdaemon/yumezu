@@ -9,7 +9,7 @@
 
 use std::sync::RwLock;
 
-/// Asking the wiki what it has changed, where a soft sync starts and often ends.
+/// Querying the wiki for what it has changed, where a soft sync starts and often ends.
 pub const CHANGES: &str = "init";
 pub const WORLDS: &str = "fetchWorldData";
 /// Reading the connections, and with them the authors and the release history.

@@ -12,7 +12,9 @@
 pub mod fixture;
 mod routes;
 
-pub use routes::{Routes, Way, routes_from, routes_from_passing, routes_toward, step_asks, ways};
+pub use routes::{
+    Routes, Way, routes_from, routes_from_passing, routes_toward, step_conditions, ways,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -57,10 +59,10 @@ bitflags::bitflags! {
 pub struct Connection {
     #[serde(rename = "targetId")]
     pub target_id: usize,
-    /// The wiki's own bitfield, as the bare number the dump carries. [`Connection::conditions`]
+    /// The wiki's own bitfield, as the bare number the dump carries. [`Connection::flags`]
     /// types it.
     #[serde(rename = "type")]
-    pub flags: u16,
+    pub bits: u16,
     /// The wiki's own words for a demand, keyed by the flag making it. Ordered, so two dumps of
     /// the same wiki compare equal as text.
     #[serde(rename = "typeParams", default)]
@@ -77,12 +79,12 @@ pub struct TypeParams {
 }
 
 impl Connection {
-    pub fn conditions(&self) -> ConnType {
-        ConnType::from_bits_truncate(self.flags)
+    pub fn flags(&self) -> ConnType {
+        ConnType::from_bits_truncate(self.bits)
     }
 
-    fn ask(&self) -> Ask {
-        Ask::of(Gate::all_of(self.conditions()).map(|gate| {
+    fn conditions(&self) -> Conditions {
+        Conditions::of(Gate::all_of(self.flags()).map(|gate| {
             Demand {
                 gate,
                 detail: gate
@@ -142,15 +144,15 @@ pub struct Demand {
 /// Everything a connection demands, harshest first.
 ///
 /// The flags are independent and a connection can carry several -- locked *and* wanting an effect
-/// -- so a reader has to be told all of them. A route is ordered by [`Ask::gate`] alone, being only
-/// as free as the strictest of them.
+/// -- so a reader has to be told all of them. A route is ordered by [`Conditions::gate`] alone,
+/// being only as free as the strictest of them.
 #[derive(Clone)]
-pub struct Ask {
+pub struct Conditions {
     pub gate: Gate,
     pub demands: Vec<Demand>,
 }
 
-impl Ask {
+impl Conditions {
     pub(crate) fn of(demands: impl IntoIterator<Item = Demand>) -> Self {
         let demands: Vec<_> = demands.into_iter().collect();
         Self {
@@ -168,7 +170,7 @@ impl Ask {
         Self::just(Gate::Free)
     }
 
-    /// The words for the harshest demand, which is the one [`Ask::gate`] names.
+    /// The words for the harshest demand, which is the one [`Conditions::gate`] names.
     pub fn detail(&self) -> Option<&str> {
         self.demands
             .first()
@@ -266,9 +268,9 @@ impl Gate {
 pub struct Step {
     pub world: usize,
     /// `None` where there is no way there.
-    pub out: Option<Ask>,
+    pub out: Option<Conditions>,
     /// `None` where there is no way back.
-    pub back: Option<Ask>,
+    pub back: Option<Conditions>,
 }
 
 impl Step {
@@ -278,7 +280,8 @@ impl Step {
     }
 }
 
-/// Per world, every world it is joined to, each with what the connection asks in either direction.
+/// Per world, every world it is joined to, each with what the connection demands in either
+/// direction.
 ///
 /// One entry per connection rather than one per listing: a connection is nearly always listed by
 /// both worlds it joins and is still one connection. A world's own listings come first, in the
@@ -290,7 +293,11 @@ pub fn connections(worlds: &[impl World]) -> Vec<Vec<Step>> {
     let gates: std::collections::HashMap<_, _> = walkable_steps(worlds)
         .into_iter()
         .enumerate()
-        .flat_map(|(from, steps)| steps.into_iter().map(move |(to, ask)| ((from, to), ask)))
+        .flat_map(|(from, steps)| {
+            steps
+                .into_iter()
+                .map(move |(to, terms)| ((from, to), terms))
+        })
         .collect();
 
     let mut joined: Vec<Vec<usize>> = vec![Vec::new(); worlds.len()];
@@ -338,7 +345,7 @@ pub fn connections(worlds: &[impl World]) -> Vec<Vec<Step>> {
 /// directions. Where only one side lists it, the other is inferred the way the wiki's own path
 /// finder infers it: [`ConnType::ONE_WAY`] means there is no way back, [`ConnType::UNLOCK`] means
 /// the way back is [`Gate::Locked`].
-pub fn walkable_steps(worlds: &[impl World]) -> Vec<Vec<(usize, Ask)>> {
+pub fn walkable_steps(worlds: &[impl World]) -> Vec<Vec<(usize, Conditions)>> {
     let listed: std::collections::HashSet<_> = worlds
         .iter()
         .enumerate()
@@ -353,20 +360,20 @@ pub fn walkable_steps(worlds: &[impl World]) -> Vec<Vec<(usize, Ask)>> {
     let mut steps = vec![Vec::new(); worlds.len()];
     for (from, world) in worlds.iter().enumerate() {
         for connection in world.connections() {
-            let (to, flags) = (connection.target_id, connection.conditions());
+            let (to, flags) = (connection.target_id, connection.flags());
             if to == from || to >= worlds.len() {
                 continue;
             }
             if !flags.contains(ConnType::NO_ENTRY) {
-                steps[from].push((to, connection.ask().first_visit(worlds[to].title())));
+                steps[from].push((to, connection.conditions().first_visit(worlds[to].title())));
             }
             if !listed.contains(&(to, from)) && !flags.contains(ConnType::ONE_WAY) {
                 // No words: the wiki wrote none for a direction it did not list at all.
-                let ask = Ask::just(match flags.contains(ConnType::UNLOCK) {
+                let back = Conditions::just(match flags.contains(ConnType::UNLOCK) {
                     true => Gate::Locked,
                     false => Gate::Free,
                 });
-                steps[to].push((from, ask));
+                steps[to].push((from, back));
             }
         }
     }
@@ -376,7 +383,7 @@ pub fn walkable_steps(worlds: &[impl World]) -> Vec<Vec<(usize, Ask)>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Ask, ConnType, Connection, Demand, Gate, Step, TypeParams, World, connections,
+        Conditions, ConnType, Connection, Demand, Gate, Step, TypeParams, World, connections,
         routes_toward, ways,
     };
 
@@ -404,7 +411,7 @@ mod tests {
                 connections: (at + 1 < titles.len())
                     .then(|| Connection {
                         target_id: at + 1,
-                        flags: flags.bits(),
+                        bits: flags.bits(),
                         type_params: Default::default(),
                     })
                     .into_iter()
@@ -442,7 +449,7 @@ mod tests {
     fn a_connection_keeps_the_words_of_every_demand() {
         let connection = Connection {
             target_id: 0,
-            flags: (ConnType::LOCKED | ConnType::EFFECT).bits(),
+            bits: (ConnType::LOCKED | ConnType::EFFECT).bits(),
             type_params: [(
                 ConnType::EFFECT.bits(),
                 TypeParams {
@@ -454,11 +461,12 @@ mod tests {
             .collect(),
         };
 
-        let ask = connection.ask();
+        let conditions = connection.conditions();
 
-        assert_eq!(ask.gate, Gate::Locked);
+        assert_eq!(conditions.gate, Gate::Locked);
         assert_eq!(
-            ask.demands
+            conditions
+                .demands
                 .iter()
                 .map(|demand| (demand.gate, demand.detail.as_deref()))
                 .collect::<Vec<_>>(),
@@ -487,14 +495,14 @@ mod tests {
     // wiki writes no flag for it -- only the sentence.
     #[test]
     fn a_condition_naming_where_it_leads_is_not_a_way_in() {
-        let ask = |gate, detail: &str| {
-            Ask::of([Demand {
+        let one = |gate, detail: &str| {
+            Conditions::of([Demand {
                 gate,
                 detail: Some(detail.to_owned()),
             }])
         };
         assert_eq!(
-            ask(
+            one(
                 Gate::LockedCondition,
                 "If Fluorescent Halls has been visited before"
             )
@@ -503,13 +511,13 @@ mod tests {
             Gate::Revisit
         );
         assert_eq!(
-            ask(Gate::LockedCondition, "View Ending #1 at least once")
+            one(Gate::LockedCondition, "View Ending #1 at least once")
                 .first_visit("Oil Puddle World B")
                 .gate,
             Gate::LockedCondition
         );
         assert_eq!(
-            ask(Gate::Effect, "Chainsaw the Tree of Life in Blood Cell Sea")
+            one(Gate::Effect, "Chainsaw the Tree of Life in Blood Cell Sea")
                 .first_visit("Blood Cell Sea")
                 .gate,
             Gate::Effect
@@ -524,7 +532,7 @@ mod tests {
         };
         let conn = |to, flags: ConnType| Connection {
             target_id: to,
-            flags: flags.bits(),
+            bits: flags.bits(),
             type_params: Default::default(),
         };
         let worlds = [
@@ -546,8 +554,8 @@ mod tests {
             ways.iter().map(|way| way.walk.clone()).collect::<Vec<_>>(),
             [vec![0, 1, 2, 3], vec![0, 4, 3]]
         );
-        assert_eq!(ways[0].asks, Gate::Effect);
-        assert_eq!(ways[1].asks, Gate::Locked);
+        assert_eq!(ways[0].conditions, Gate::Effect);
+        assert_eq!(ways[1].conditions, Gate::Locked);
     }
 
     #[test]

@@ -106,7 +106,7 @@ egui_glow = { version = "0.35", default-features = false }
 skrifa = "0.44"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-# Named only to pick the provider. Both are compiled in if anything in the graph asks for the
+# Named only to pick the provider. Both are compiled in if anything in the graph pulls in the
 # other, and aws-lc-rs costs ~900KiB of the binary over ring for the same suites.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 fontique = { version = "0.11", default-features = false, features = ["system"] }

@@ -1,5 +1,5 @@
-# Serves the page. `just dreamweaver` has to be running alongside it: the page asks its own host
-# for the world dump, and `Trunk.toml` puts that request through to the server.
+# Serves the page. `just dreamweaver` has to be running alongside it: the page fetches the world
+# dump from its own host, and `Trunk.toml` puts that request through to the server.
 serve: assets
     trunk serve --release
 

@@ -1,11 +1,10 @@
 //! The overlay's own half of the window: the input egui is given, and the painter that draws what
 //! it returns.
 //!
-//! Hand-paired from [`egui_winit::State`] and [`egui_glow::Painter`] rather than taken from
-//! either crate above them. `three_d`'s own `GUI` drops egui's [`egui::PlatformOutput`], which
-//! leaves an input method nowhere to reach -- never allowed, never placed under the caret, and an
-//! uncommitted word never reported. `eframe` wants the window, the context and the loop, all
-//! three of which the 3D renderer that draws first already owns.
+//! Hand-paired from [`egui_winit::State`] and [`egui_glow::Painter`] rather than taken from either
+//! crate above them. `three_d`'s own `GUI` drops egui's [`egui::PlatformOutput`], which leaves an
+//! input method nowhere to reach; `eframe` wants the window, the context and the loop, which the
+//! 3D renderer that draws first already owns.
 //!
 //! The page has no winit input method at all: its `set_ime_allowed` is empty and it never sends
 //! [`winit::event::WindowEvent::Ime`]. See [`super::text_agent`].
@@ -22,8 +21,7 @@ pub(crate) struct Gui {
     textures: egui::TexturesDelta,
     pixels_per_point: f32,
     /// How long egui is content to wait before it is drawn again: zero while something in the
-    /// panel is animating, [`Duration::MAX`] when the overlay would come out identical. What
-    /// stops [`super::app::App`] idling the window over a fade or a blinking caret.
+    /// panel is animating, [`Duration::MAX`] when the overlay would come out identical.
     repaint_after: std::time::Duration,
     #[cfg(target_family = "wasm")]
     agent: super::text_agent::TextAgent,
@@ -75,8 +73,7 @@ impl Gui {
     }
 
     /// The caller passes the event to the 3D scene regardless: whether the overlay took it is
-    /// settled after layout by [`egui::Context::wants_pointer_input`], because a press only
-    /// becomes the panel's once the panel has been laid out under it.
+    /// settled after layout by [`egui::Context::wants_pointer_input`].
     pub(crate) fn on_window_event(&mut self, window: &Window, event: &WindowEvent) {
         let _ = self.state.on_window_event(window, event);
     }
@@ -86,7 +83,7 @@ impl Gui {
         self.agent.lend_focus(&mut self.state);
 
         let input = self.state.take_egui_input(window);
-        // Only the root viewport is read: this app opens one window and never asks for another.
+        // Only the root viewport is read: this app opens one window and never opens another.
         let output = self.ctx.run_ui(input, run_ui);
         self.repaint_after = output
             .viewport_output

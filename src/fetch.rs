@@ -1,9 +1,8 @@
-//! Loading something off the network without stalling the frame that asked for it.
+//! Loading something off the network without stalling the frame that started it.
 //!
 //! The app draws on one thread and never blocks, so a load is started rather than awaited and the
-//! caller keeps a [`Pending`] to look in on each frame. The two platforms have different
-//! executors and no shared way to reach one, so [`spawn`] is the seam: everything above it is the
-//! same on both.
+//! caller keeps a [`Pending`] to look in on each frame. [`spawn`] is the seam between the two
+//! platforms' executors; everything above it is the same on both.
 
 use std::sync::{Arc, Mutex};
 
@@ -34,8 +33,7 @@ pub fn spawn<T: Send + 'static>(
 }
 
 /// The browser already runs the executor the future needs, so this hands it over rather than
-/// starting one. [`Send`] is therefore not asked for, the only way this differs from the native
-/// signature.
+/// starting one, and [`Send`] is therefore not required.
 #[cfg(target_family = "wasm")]
 pub fn spawn<T: 'static>(work: impl std::future::Future<Output = T> + 'static) -> Pending<T> {
     let slot = Pending(Arc::default());
@@ -45,9 +43,8 @@ pub fn spawn<T: 'static>(work: impl std::future::Future<Output = T> + 'static) -
 }
 
 /// The middleware carrying the cache wraps the client in a type of its own, so the two platforms
-/// no longer name the same one. Aliased so everything above is written once: the surface a caller
-/// touches -- `get`, `header`, `send` -- is identical, and [`Error`] converts from `reqwest`'s
-/// own, so `?` still reaches it.
+/// no longer name the same one. The surface a caller touches is identical, and [`Error`] converts
+/// from `reqwest`'s own so `?` still reaches it.
 #[cfg(not(target_family = "wasm"))]
 pub type Client = reqwest_middleware::ClientWithMiddleware;
 /// See [`Client`].
@@ -68,16 +65,15 @@ pub type Error = reqwest_middleware::Error;
 pub type Error = reqwest::Error;
 
 /// Unbuilt and unwrapped on the page: this is a thin cover over the browser's `fetch`, which
-/// pools connections and keeps an HTTP cache without being asked.
+/// pools connections and keeps an HTTP cache without being told to.
 #[cfg(target_family = "wasm")]
 pub fn client() -> Client {
     reqwest::Client::new()
 }
 
-/// Built once and handed out by the clone, which is cheap because everything behind it is shared.
-/// Sharing is the point: one connection pool, so the second picture off the wiki reuses the
-/// first's socket and TLS session. Built lazily, and so on the executor [`spawn`] put the first
-/// request on, which is where it has to be.
+/// Built once and handed out by the clone, which shares one connection pool, so the second picture
+/// off the wiki reuses the first's socket and TLS session. Built lazily, so it lands on the
+/// executor [`spawn`] put the first request on -- where it has to be.
 #[cfg(not(target_family = "wasm"))]
 pub fn client() -> Client {
     static CLIENT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
@@ -96,9 +92,8 @@ pub async fn bytes(url: &str) -> Result<Vec<u8>, Error> {
         .to_vec())
 }
 
-/// Order is the whole of it. A builder runs its middleware outermost first, so [`judged`] is added
-/// before the cache and therefore wraps it, the only position the cache's verdict can be read
-/// from -- it is written onto the response on the way back out.
+/// A builder runs its middleware outermost first, so [`judged`] is added before the cache and
+/// wraps it -- the only position the verdict, written on the way back out, can be read from.
 #[cfg(not(target_family = "wasm"))]
 fn build() -> Client {
     let mut middleware = reqwest_middleware::ClientBuilder::new(transport()).with(judged);
@@ -111,14 +106,12 @@ fn build() -> Client {
 }
 
 /// Logs what the cache made of every request, which is otherwise unobservable: the store is one
-/// opaque file, and the point of a hit is that no traffic leaves the device to watch. At `debug`:
-/// it is a line per request, which a run drawing a sidebar of pictures makes far too many of to sit
-/// at `info`.
+/// opaque file, and a hit leaves no traffic to watch. At `debug`, being a line per request.
 ///
-/// `x-cache-lookup` says whether the store had anything for the address at all and `x-cache`
-/// whether that thing was served, so `HIT`/`MISS` was held but had to be revalidated or could not
-/// be used. Neither header means this client has no cache, which is what [`build`] warns about.
-/// Named here rather than imported: the crate keeps its own constants behind a private re-export.
+/// `x-cache-lookup` says whether the store had anything for the address and `x-cache` whether it
+/// was served, so `HIT`/`MISS` was held but had to be revalidated. Neither header means this
+/// client has no cache, which is what [`build`] warns about. Named here rather than imported: the
+/// crate keeps its own constants behind a private re-export.
 #[cfg(not(target_family = "wasm"))]
 fn judged<'a>(
     request: reqwest::Request,
@@ -156,10 +149,9 @@ fn transport() -> reqwest::Client {
     let builder = reqwest::Client::builder();
     // reqwest 0.13 made `rustls-platform-verifier` its one way to check a certificate, and that
     // verifier reaches the system trust store through a Java class which must be in the apk and
-    // initialised over JNI before the first request. This apk has no Java in it at all -- see
-    // `android/build.sh` -- so the call would panic on the first picture fetched. Compiled-in
-    // roots instead, at the cost of only changing when a build does. Every other platform keeps
-    // the OS verifier. <https://github.com/seanmonstar/reqwest/pull/2891>
+    // initialised over JNI. This apk has no Java in it -- see `android/build.sh` -- so the call
+    // would panic on the first picture fetched. Compiled-in roots instead, at the cost of only
+    // changing when a build does. <https://github.com/seanmonstar/reqwest/pull/2891>
     #[cfg(target_os = "android")]
     let builder =
         builder.tls_certs_only(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().map(|root| {
@@ -169,9 +161,8 @@ fn transport() -> reqwest::Client {
 }
 
 /// Ordinary HTTP rules, which is all the wiki needs: it serves its pictures with a `max-age` and
-/// an `ETag`, so a picture fetched once is reused without a request until it goes stale, then
-/// revalidated conditionally. Nothing here caps the size -- the system empties the directory
-/// holding the store when the device wants the room, and that is the whole of the policy.
+/// an `ETag`. Nothing here caps the size -- the system empties the directory holding the store
+/// when the device wants the room.
 ///
 /// `None` if there is nowhere to keep it or it cannot be opened, which is not worth failing a run
 /// over.
@@ -185,13 +176,11 @@ fn cache() -> Option<http_cache_reqwest::Cache<http_cache_reqwest::RedbManager>>
 }
 
 /// Kept apart from [`cache`] so [`clear`] reaches the same store. Opened once: two handles on one
-/// redb file is a lock the second would fail on, and emptying a second store would leave the
-/// client serving out of the first.
+/// redb file is a lock the second would fail on.
 ///
-/// Every store made durable, rather than the manager's default of one batch in sixty-four. The
-/// rest of a batch is made durable by dropping the manager, and this one is never dropped -- it
-/// lives here for the length of the process, so a run downloading fewer than sixty-four things
-/// kept none of them and started the next run empty.
+/// Every store made durable, rather than the manager's default of one batch in sixty-four: the
+/// rest of a batch is flushed by dropping the manager, and this one lives for the length of the
+/// process, so a run downloading fewer than sixty-four things kept none of them.
 #[cfg(not(target_family = "wasm"))]
 fn store() -> Option<&'static http_cache_reqwest::RedbManager> {
     static STORE: std::sync::OnceLock<Option<http_cache_reqwest::RedbManager>> =
@@ -215,12 +204,11 @@ fn store() -> Option<&'static http_cache_reqwest::RedbManager> {
 }
 
 /// How far [`clear`] has got, which is what the button in the settings tab draws. Absent on the
-/// page, which has no store of this app's own -- the browser keeps that HTTP cache, and only the
-/// person reading can empty it.
+/// page, where the browser keeps the HTTP cache and only the person reading can empty it.
 #[cfg(not(target_family = "wasm"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Cleared {
-    /// Nobody has asked this run.
+    /// Nobody has cleared it this run.
     Never,
     Clearing,
     Done,
@@ -230,7 +218,7 @@ pub enum Cleared {
 }
 
 /// Global because the cache is: one store behind one client, so one answer however many places
-/// ask.
+/// read it.
 #[cfg(not(target_family = "wasm"))]
 static CLEARED: Mutex<Cleared> = Mutex::new(Cleared::Never);
 
@@ -246,8 +234,7 @@ pub fn cleared() -> Cleared {
 /// nothing and fills it again.
 ///
 /// What this frees is the cache, not the disk: redb hands the emptied pages back to its own free
-/// list, leaves the file the size it had grown to, and the manager offers no compaction. The room
-/// comes back as later downloads are written into it.
+/// list and offers no compaction, so the room comes back only as later downloads reuse it.
 #[cfg(not(target_family = "wasm"))]
 pub fn clear() {
     *CLEARED.lock().unwrap() = Cleared::Clearing;
@@ -274,8 +261,7 @@ pub fn clear() {
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     /// `rustls-no-provider` moves the choice of provider out of reqwest's features and into
-    /// [`super::transport`], where nothing but a run can prove it was made: the builder panics
-    /// instead of failing to compile.
+    /// [`super::transport`], where the builder panics at run time rather than failing to compile.
     #[test]
     fn transport_has_a_crypto_provider() {
         super::transport();

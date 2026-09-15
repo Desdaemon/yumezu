@@ -585,7 +585,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
             stepped = true;
             if self.rest.settled {
                 // Holding it would hand the next thing to wake the layout a part-step it did not
-                // ask for.
+                // call for.
                 self.unspent = 0.0;
                 break;
             }
@@ -830,7 +830,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         }
     }
 
-    /// Applies the axis constraints the current mode asks for, after the forces have moved the
+    /// Applies the axis constraints the current mode calls for, after the forces have moved the
     /// nodes freely.
     ///
     /// Returns whether every constraint has reached its target, the other half of deciding that
@@ -1120,6 +1120,7 @@ fn inv_cube(d2: f32) -> f32 {
 /// `minNum`, which return the operand that is *not* NaN when one side is NaN. The hardware minimum
 /// and maximum do the opposite — `maxps`/`minps` on x86, `f32x4.pmax`/`pmin` on wasm — and need a
 /// NaN test and a select per bound to correct.
+///
 /// aarch64 alone has the IEEE rule in hardware, as `fmaxnm`/`fminnm`, where it is the comparisons
 /// that need the second instruction. `tests/codegen.rs` checks that the intended one arrived.
 #[inline(always)]
@@ -1894,7 +1895,7 @@ mod test {
             .map(|i| {
                 graph.add_node(NodeData {
                     x: i as f32 * 10.0,
-                    // Deliberately not the y the layer asks for: the constraint has to place it.
+                    // Deliberately not the y the layer names: the constraint has to place it.
                     y: 500.0,
                     level: i as f32,
                     ..Default::default()

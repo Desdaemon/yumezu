@@ -67,9 +67,9 @@ fn file(key: &str) -> Option<std::path::PathBuf> {
     Some(directory.join(key))
 }
 
-/// Deliberately not [`file`]'s directory, which holds what a person chose and must survive. Android
-/// may empty this one when the device is short of room and a desktop `cache` may be swept by a
-/// cleaner, which is why [`super::fetch`] is allowed to grow here.
+/// Deliberately not [`file`]'s directory, which holds what a person chose and must survive.
+/// Android may empty this one when the device is short of room, and a desktop `cache` may be
+/// swept -- which is why [`super::fetch`] is allowed to grow here.
 #[cfg(not(target_family = "wasm"))]
 pub(super) fn cache_directory() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "android")]
@@ -88,7 +88,7 @@ pub(super) fn cache_directory() -> Option<std::path::PathBuf> {
     Some(directory)
 }
 
-/// Asked of Java because the activity glue publishes only `internalDataPath`, the app's *files*
+/// Read from Java because the activity glue publishes only `internalDataPath`, the app's *files*
 /// directory, which nothing ever reclaims -- a cache left there would grow until uninstall.
 #[cfg(target_os = "android")]
 fn android_cache_directory() -> Option<std::path::PathBuf> {

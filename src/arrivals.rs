@@ -14,8 +14,7 @@ const ARRIVAL_STAGGER: f32 = 0.05;
 /// How long the camera goes on following what arrived after the last of it finished growing.
 ///
 /// Worlds dropped into a settled layout go on pushing their neighbours around, so a camera handed
-/// back the moment the last one reached full size would leave what it was showing to drift out of
-/// frame. A pan or an orbit takes it back at any point.
+/// back the moment the last reached full size would let its subject drift out of frame.
 const ARRIVAL_TRACKED_SECONDS: f32 = 4.0;
 
 /// Where the worlds of a graph were standing, so the one built after it can start from there
@@ -27,13 +26,12 @@ pub(super) type Standing = std::collections::HashMap<String, [f32; 3]>;
 
 /// As much of the graph a new one is replacing as the new one should carry on from.
 ///
-/// A rebuild is not a new run: the person is still looking at the same map and has only asked what
-/// else is on it. Everything here was theirs rather than the dump's, and losing any of it would
-/// read as the app having restarted. See [`resume_from`] and [`Arrivals`].
+/// Everything here was the person's rather than the dump's, and losing any of it would read as
+/// the app having restarted. See [`resume_from`] and [`Arrivals`].
 pub(super) struct Before {
     pub(super) standing: Standing,
-    /// Which worlds were drawn as placeholders, by the same name. What a world has become is not
-    /// readable from the new graph alone: a world with a picture may have had one all along. See
+    /// Which worlds were drawn as placeholders, by the same name: the new graph alone cannot say
+    /// what a world has become, a world with a picture perhaps having had one all along. See
     /// [`Coming::Known`].
     pub(super) unvisited: std::collections::HashSet<String>,
     /// A refresh is the same map with more of it known, not a reason to put someone back in a view
@@ -49,20 +47,18 @@ enum Coming {
     Already,
     /// Not in the graph before at all. Grows in from nothing this many seconds after it was built.
     New(f32),
-    /// Was a placeholder and is a world now: the player has been somewhere they had only been
-    /// shown the edge of. Shrinks away as the placeholder and grows back as itself, so the swap
-    /// happens when there is nothing on screen to swap. See [`Arrivals::veiled`].
+    /// Was a placeholder and is a world now. Shrinks away as the placeholder and grows back as
+    /// itself, so the swap happens at the size where neither is visible. See [`Arrivals::veiled`].
     Known(f32),
 }
 
 /// The worlds coming into a graph that was already standing, and how far in each of them is.
 ///
-/// A refresh does not redraw the same graph: it builds another one, out of a dump cut back by an
-/// account that has been somewhere new since. Left alone that lands as a jump -- a hundred worlds
-/// where a moment ago there were none, and a placeholder that is suddenly a photograph.
+/// A refresh builds another graph rather than redrawing this one, and left alone that lands as a
+/// jump: a hundred worlds where a moment ago there were none.
 ///
 /// `None` for the first graph of a run, where everything is simply there. That also keeps the cost
-/// off every other frame: a graph with no arrivals has no vector, no clock, and nothing to ask.
+/// off every other frame: a graph with no arrivals has no vector, no clock, and nothing to read.
 #[derive(Default)]
 pub(super) struct Arrivals {
     /// Per world, what it is doing. `None` where nothing is doing anything.
@@ -78,11 +74,8 @@ impl Arrivals {
     /// arriving. `unknown` says which worlds are placeholders now, which against
     /// [`Before::unvisited`] tells a world that has become known from one that was always either.
     ///
-    /// The turning over goes first and the new worlds follow, because that is the order it
-    /// happened in: the player walked into a world, and what lies past it is what that opened.
-    /// Arrivals are ordered by depth, so they spread outward from what the player already had
-    /// rather than speckling the graph, and spaced to fit [`ARRIVAL_WINDOW`] however many there
-    /// are.
+    /// The turning over goes first and the new worlds follow, in the order it happened in. Those
+    /// are ordered by depth, so they spread outward rather than speckling the graph.
     pub(super) fn new(
         names: &[&str],
         unknown: &[bool],
@@ -125,7 +118,7 @@ impl Arrivals {
         Self {
             // When the last arrival begins its final `ARRIVAL_SECONDS`. A turning over is two of
             // those, one each way, so it begins its second at `after` -- where the first new world
-            // starts too, every one after that being later still.
+            // starts too.
             last: match arriving.is_empty() {
                 true => ARRIVAL_SECONDS,
                 false => after + (arriving.len() - 1) as f32 * stagger,
@@ -158,8 +151,7 @@ impl Arrivals {
     /// The worlds that have become known and not yet shrunk away.
     ///
     /// The placeholder is drawn over a world's own quad rather than instead of it, so this is all
-    /// the swap takes: underneath, the picture has been the world's own all along, and it comes
-    /// out from under the placeholder at the size where neither can be seen.
+    /// the swap takes: the picture underneath was the world's own all along.
     pub(super) fn veiled(&self) -> impl Iterator<Item = usize> + '_ {
         self.coming
             .iter()
@@ -182,9 +174,8 @@ impl Arrivals {
 
     /// Which worlds moved, or `None` for a graph with nothing arriving into it.
     ///
-    /// Answers past the end of the growing, for as long as the camera is still following them:
-    /// see [`ARRIVAL_TRACKED_SECONDS`] and [`AppEntities::arrival_bounds`], which is what frames
-    /// them.
+    /// Answers past the end of the growing, for as long as the camera is still following them.
+    /// See [`ARRIVAL_TRACKED_SECONDS`] and [`AppEntities::arrival_bounds`].
     pub(super) fn arriving(&self) -> Option<impl Iterator<Item = usize> + '_> {
         let coming = self.coming.as_ref()?;
         Some(
@@ -209,7 +200,7 @@ impl Arrivals {
         let grown = self.last + ARRIVAL_SECONDS;
         if self.clock > grown + ARRIVAL_TRACKED_SECONDS {
             // Dropped rather than left at rest: from here on this graph is one like any other,
-            // and asking it about arrivals costs nothing again.
+            // and reading it for arrivals costs nothing again.
             *self = Self::default();
             return false;
         }
@@ -227,9 +218,9 @@ fn eased(through: f32) -> f32 {
 /// Puts the worlds this graph shares with the one before it back where they were standing, and
 /// starts the new ones off among the neighbours they attach to.
 ///
-/// Without this a refresh would reshuffle the whole graph to say that a handful of worlds had been
-/// added, and the arrival would be lost in the churn. A returning world is stopped dead as well as
-/// replaced, its velocity belonging to a layout that no longer exists.
+/// Without this a refresh would reshuffle the whole graph to say a handful of worlds had been
+/// added. A returning world is stopped dead as well as replaced, its velocity belonging to a
+/// layout that no longer exists.
 ///
 /// A world with nothing to stand near keeps the scatter: nothing in the graph says where it
 /// belongs until the layout has been stepped.
@@ -240,8 +231,8 @@ pub(super) fn resume_from(data: &mut AppEntities, before: &Standing) {
         .map(|title| before.get(&title.en).copied())
         .collect();
     // New worlds are placed among the ones already there, so each comes in out of what it connects
-    // to rather than from the far edge of the spawn volume. Read off the old positions rather than
-    // the placements being made, so no world is seeded from another seed.
+    // to rather than from the far edge of the spawn volume. Read off the old positions, so no world
+    // is seeded from another seed.
     let seeded: Vec<Option<[f32; 3]>> = (0..standing.len())
         .map(|world| {
             if standing[world].is_some() {
