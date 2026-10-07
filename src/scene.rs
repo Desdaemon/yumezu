@@ -3,7 +3,6 @@
 
 use super::*;
 
-/// How thick a connection is drawn.
 const EDGE_RADIUS: f32 = 0.05;
 /// Sides of the tube a connection is drawn as. Tens of thousands of them come out a pixel wide, so
 /// the cost is triangle setup rather than fill and the sides are very nearly the whole of it.
@@ -123,8 +122,7 @@ fn dash_line() -> CpuMesh {
     let Positions::F32(positions) = &mesh.positions else {
         unreachable!("`cylinder` builds its positions as f32");
     };
-    // `cylinder` carries no uvs of its own. `u` is the fraction along the line, which each
-    // instance scales into world units for `dash.frag` to measure the pattern against.
+    // `cylinder` has no uvs; `u` is the fraction along the line, scaled for `dash.frag`.
     mesh.uvs = Some(positions.iter().map(|at| vec2(at.x, 0.0)).collect());
     mesh
 }
@@ -155,13 +153,11 @@ pub(super) fn entities(
 
     let worlds = &dump.worlds;
     let connections = world::connections(worlds);
-    // Depth computed once for both the colors and, in layered mode, the layer each world is
-    // pinned to, so the two agree.
+    // One depth for the colors and the layered pins, so the two agree.
     let routes = world::routes_from(&connections, world::origin_world(worlds));
     let deepest = routes.depth.iter().flatten().copied().max().unwrap_or(0);
     let furthest = deepest.max(1) as f32;
-    // Sized by how much of the graph hangs off each world, through a logarithm so a deep world
-    // with a handful behind it lands within reach of a shallow one with a hundred.
+    // Logarithmic, so a deep world with a handful behind it nears a shallow one with a hundred.
     let descendants = routes.descendant_counts();
     let node_radii: Vec<_> = descendants
         .iter()
@@ -171,8 +167,6 @@ pub(super) fn entities(
         })
         .collect();
 
-    // How the graph before this one was being read, or how the last run was left. Either way the
-    // person is put back where they were.
     let layout = before.map_or_else(Layout::remembered, |before| before.layout);
     let Layout {
         dimensions,
@@ -195,37 +189,31 @@ pub(super) fn entities(
         settle_after: Some(SETTLE_AFTER),
         ..Default::default()
     });
-    // Positions come from `scatter` below, so the initial layout and a restart agree.
+    // Positions come from `scatter`, so the initial layout and a restart agree.
     let nodes: Vec<_> = routes
         .depth
         .iter()
         .enumerate()
         .map(|(world, depth)| {
             graph.add_node(NodeData {
-                // Worlds the origin cannot reach have no depth to share a layer with, so they get
-                // one of their own past the deepest that does.
+                // Unreachable worlds get a layer past the deepest.
                 level: depth.map_or(furthest + 1.0, |depth| depth as f32),
                 mass: node_mass(node_radii[world], hub_repulsion),
                 ..Default::default()
             })
         })
         .collect();
-    // Counted off the same connections the edges are built from, so the panel calls a world a
-    // junction on exactly the lines it draws for it.
+    // Counted off the edges' connections, so the panel's junctions match the drawn lines.
     let mut degrees = vec![0; worlds.len()];
-    // One dash instance per one-way connection.
     let mut dashed = 0;
     for (from, steps) in connections.iter().enumerate() {
         for step in steps {
-            // Once per connection rather than per world it joins: two springs on the same two
-            // nodes would pull them together twice as hard.
+            // Once per connection: two springs on one pair would pull twice as hard.
             if step.world <= from {
                 continue;
             }
             let to = step.world;
-            // Stored from the end a player can leave, so the dashes march the way they can walk.
-            // Walkable both ways or neither keeps the dump's own order, nothing drawn on such a
-            // connection meaning anything to a direction.
+            // From the leavable end, so the dashes march the walkable way.
             let (from, to) = if step.out.is_none() && step.back.is_some() {
                 (to, from)
             } else {
@@ -249,7 +237,7 @@ pub(super) fn entities(
         }
     }
 
-    // Not drawn on the worlds themselves, which carry pictures: the connections wear the depth.
+    // The connections wear the depth; the worlds carry pictures.
     let depth_colors: Vec<_> = routes
         .depth
         .iter()
@@ -259,8 +247,7 @@ pub(super) fn entities(
         })
         .collect();
     let edge_colors = edge_colors(&graph, &routes, &descendants, &depth_colors);
-    // The worlds the placeholder is drawn on. Read off the same thing the atlas cells are, so the
-    // two cannot disagree.
+    // Read off the same source as the atlas cells.
     let unvisited: Vec<usize> = worlds
         .iter()
         .enumerate()
@@ -268,17 +255,16 @@ pub(super) fn entities(
         .collect();
     let titles: Vec<world::Title> = worlds.iter().map(world::World::titles).collect();
     let maps: Vec<Vec<world::Map>> = worlds.iter().map(world::World::maps).collect();
-    // Built once here: both group every world, which is not work a frame can afford.
+    // Both group every world, too costly per frame.
     let (authors, author_of) = dump.authors();
     let versions = dump.versions();
-    // White, so a picture reaches the screen as itself. Only a selection ever changes them.
+    // White, so a picture shows as itself.
     let thumbnail_instances = Instances {
         transformations: vec![Mat4::identity(); worlds.len()],
         colors: Some(vec![Srgba::WHITE; worlds.len()]),
         ..Default::default()
     };
-    // One instance per solid line, and [`EDGE_DASHES`] per one-way one. The colors are left to
-    // the first `repaint` below, where the same fan-out has to live anyway.
+    // Colors are left to the first `repaint`, which owns the same fan-out.
     let solid = edge_colors.len() - dashed;
     let edge_instances = Instances {
         transformations: vec![Mat4::identity(); solid],
@@ -288,14 +274,13 @@ pub(super) fn entities(
     let dash_instances = Instances {
         transformations: vec![Mat4::identity(); dashed],
         colors: Some(vec![Srgba::WHITE; dashed]),
-        // Not a texture: each line's own length, which `dash.frag` measures the pattern against.
+        // Not a texture: each line's length, for `dash.frag`.
         texture_transformations: Some(vec![Mat3::identity(); dashed]),
     };
     let backdrop = ColorMaterial {
         color: Srgba::WHITE,
         texture: Some(Texture2DRef::from_cpu_texture(ctx, &panorama_tile())),
-        // Colour only and no depth test: the quad stands in for the cleared background, so it
-        // must neither occlude the graph nor be occluded by the cleared depth buffer.
+        // Colour only, no depth test: the quad stands in for the cleared background.
         render_states: RenderStates {
             write_mask: WriteMask::COLOR,
             depth_test: DepthTest::Always,
@@ -303,27 +288,20 @@ pub(super) fn entities(
         },
         is_transparent: false,
     };
-    // Quads rather than cubes, turned to face the camera every frame: a cube's uv coordinates
-    // unwrap its six faces across the image rather than giving each the whole of it. No texture
-    // yet -- the atlas is still on its way in.
+    // Billboarded quads: a cube's uvs spread the image across six faces.
     let thumbnails = Gm::new(
         InstancedMesh::new(ctx, &thumbnail_instances, &CpuMesh::square()),
         ColorMaterial::default(),
     );
-    // The same quad again, added to what is on the screen rather than covering it: a lit node is
-    // drawn white, so no multiplier is left that would brighten it. It samples the same atlas.
+    // Additive, since a lit node is already white.
     let glow = Gm::new(
         Mesh::new(ctx, &CpuMesh::square()),
         ColorMaterial {
             color: scaled(Srgba::WHITE, POINTED_BRIGHTNESS),
             texture: None,
             render_states: RenderStates {
-                // Depth read but not written: the quad stands in front of the node it brightens,
-                // and a node genuinely in front of that one still hides it.
                 write_mask: WriteMask::COLOR,
-                // Equal passes because at these distances the lift toward the camera is smaller
-                // than one step of the depth buffer. The quad is never *behind* the node it
-                // copies, so a strict test would drop the glow wherever the rounding tied.
+                // Equal passes: the lift toward the camera is under one depth step here.
                 depth_test: DepthTest::LessOrEqual,
                 blend: Blend::ADD,
                 ..Default::default()
@@ -343,8 +321,7 @@ pub(super) fn entities(
         InstancedMesh::new(ctx, &dash_instances, &dash_line()),
         dash_material(),
     );
-    // The scene's own materials: the overlay is put in front by its depth being cleared first,
-    // not by refusing the depth test, so two lit worlds that overlap settle it as any two do.
+    // The overlay comes first by a depth clear, not by skipping the depth test.
     let (lit_thumbnail_instances, lit_edge_instances) =
         (Instances::default(), Instances::default());
     let lit_thumbnails = Gm::new(
@@ -364,7 +341,6 @@ pub(super) fn entities(
         dash_material(),
     );
 
-    // Before the graph takes the names over.
     let mut unknown = vec![false; worlds.len()];
     for &world in &unvisited {
         unknown[world] = true;
@@ -400,8 +376,6 @@ pub(super) fn entities(
         hover: None,
         pointed: None,
         leaning_at: None,
-        // A graph with worlds coming into it moves the camera onto them. A pan or an orbit takes
-        // it back at any point.
         framing: arriving,
         frame_route: false,
         ways: Vec::new(),
@@ -411,7 +385,7 @@ pub(super) fn entities(
         node_radii,
         hub_repulsion,
         link_reach,
-        descendants,
+        descendant_counts: descendants,
         connections,
         untaken,
         degrees,
@@ -439,7 +413,6 @@ pub(super) fn entities(
         sheet: None,
         cells: worlds.iter().map(world::World::cell).collect(),
         unvisited: unvisited.clone(),
-        // White until the first `place_unvisited`, the same fan-out the thumbnails' colors take.
         unvisited_quads: Instances {
             transformations: vec![Mat4::identity(); unvisited.len()],
             colors: Some(vec![Srgba::WHITE; unvisited.len()]),
@@ -451,20 +424,16 @@ pub(super) fn entities(
         },
         detail: detail::Detail::new(
             worlds.iter().map(|world| world.image.clone()).collect(),
-            // Or one on its way out from under a placeholder, which needs the same picture for as
-            // long as it takes to shrink away.
+            // Or one shrinking out from under a placeholder.
             !unvisited.is_empty() || arrivals.turning(),
         ),
         dash_phase: 0.0,
-        // Rebuilt on the first frame either way, a fresh layout not having settled.
         billboard: Mat4::identity(),
         arrivals,
     };
-    // The instance colors have been sized above but not written.
     data.repaint();
     scatter(&mut data);
-    // Over the top of the scatter, so a graph replacing another carries on from where that one
-    // stood instead of restarting.
+    // A replacement graph carries on from where the previous one stood.
     if let Some(before) = before {
         resume_from(&mut data, &before.standing);
     }
@@ -483,8 +452,7 @@ impl AppEntities {
             on_route[node] = true;
         }
         let lit = self.selected.is_some();
-        // Per world on the walk being read out, the world it is stepped to from; empty for a
-        // selection that is not a walk.
+        // Per world on the walk, the world it is stepped to from.
         let mut walked = vec![None; self.titles.len()];
         if matches!(
             self.selected,
@@ -496,8 +464,6 @@ impl AppEntities {
             }
         }
 
-        // White leaves a picture as itself, so a world is only ever painted to push it back behind
-        // what a selection lights.
         let colors = self.thumbnail_instances.colors.as_mut().unwrap();
         for (color, &on_route) in colors.iter_mut().zip(&on_route) {
             *color = if !lit || on_route {
@@ -525,17 +491,14 @@ impl AppEntities {
         let (lit_lines, lit_dashed) = (&mut self.lit_lines, &mut self.lit_dashed);
         lit_lines.clear();
         lit_dashed.clear();
-        // The same order, and the same split between the two, that [`Self::rebuild_instances`] and
-        // [`Self::march_dashes`] write the transformations in.
+        // Same order and split as [`Self::rebuild_instances`] and [`Self::march_dashes`].
         let (mut edge, mut line, mut dash) = (0, 0, 0);
         self.graph.visit_edges(|a, b, data| {
             let (a, b) = (a.index().index(), b.index().index());
-            // Whether this edge is a canonical step: from one of its ends to that end's parent.
             let step = routes[a] == Some(b) || routes[b] == Some(a);
             let (color, shown) = match self.selected {
                 None => (base[edge], false),
-                // The one line it is about, and not even the step home from either of its ends,
-                // which is a different way through the graph than the one the reader picked.
+                // Only the line itself, not the step home from either end.
                 Some(Highlight::Connection(at, far)) => {
                     if (a, b) == (at, far) || (a, b) == (far, at) {
                         (ROUTE_COLOR, true)
@@ -543,22 +506,15 @@ impl AppEntities {
                         (dim(base[edge]), false)
                     }
                 }
-                // A layer is a shell rather than a walk, so what is worth seeing is where it is
-                // stitched to itself. Both ends being lit is the whole test, and such an edge is
-                // never a canonical step, so it keeps its distance color and only escapes the
-                // dimming.
+                // Never a canonical step, so it keeps its distance color.
                 Some(Highlight::Layer(_)) if on_route[a] && on_route[b] => (base[edge], true),
-                // Both ends being lit is not enough: it also has to be a step the walk takes, or a
-                // shortcut across the route would light up as if the walk went through it.
+                // Or a shortcut across the route would light up.
                 Some(_) if walked[a] == Some(b) || walked[b] == Some(a) => (ROUTE_HOME_COLOR, true),
-                // Directions are their own steps and nothing else, the canonical tree not being
-                // the way they go.
+                // Directions do not follow the canonical tree.
                 Some(Highlight::Path(..)) => (dim(base[edge]), false),
                 Some(_) if step && on_route[a] && on_route[b] => (ROUTE_COLOR, true),
                 Some(_) => (dim(base[edge]), false),
             };
-            // Every dash of a one-way connection takes the same color, so it reads as the one
-            // line it stands for.
             if data.user_data {
                 dashed[dash] = color;
                 if shown {
@@ -584,8 +540,7 @@ impl AppEntities {
     /// Called wherever the scene's own buffers are written, this being a copy of their lit slots
     /// and nothing more.
     fn gather_lit(&mut self) {
-        // Each upload builds four GPU buffers however many instances it is handed, so an overlay
-        // that is empty and was already empty is worth not writing.
+        // Each upload builds four GPU buffers, so an empty overlay stays unwritten.
         let lighting =
             !self.lit_nodes.is_empty() || !self.lit_lines.is_empty() || !self.lit_dashed.is_empty();
         let standing = self.lit_thumbnails.instance_count() > 0
@@ -685,11 +640,9 @@ impl AppEntities {
         let arrivals = &self.arrivals;
         self.graph.visit_nodes(|node| {
             let world = node.index().index();
-            // A world that has not arrived is drawn at none of its size, which is the whole of how
-            // an arrival looks: everything hung off the node quads is copied from these.
+            // Everything hung off the node quads copies this size.
             let radius = self.node_radii[world] * arrivals.grown(world);
-            // Wider than tall, in the shape of the pictures: a square node would either crop a
-            // third off every screenshot or stretch them all.
+            // The pictures' aspect, so none are cropped or stretched.
             thumbnails.push(
                 Mat4::from_translation(world_pos(node.position()))
                     * billboard
@@ -721,22 +674,19 @@ impl AppEntities {
             let (from, to) = (world_pos(a.position()), world_pos(b.position()));
             let dir = to - from;
             let span = dir.magnitude();
-            // As thin as the later of the two worlds it joins is small, so a line is not drawn to
-            // somewhere that is not there yet.
             let grown = arrivals
                 .grown(a.index().index())
                 .min(arrivals.grown(b.index().index()));
             let one_way = data.user_data;
             let radius = grown * if one_way { dash_radius } else { radius };
-            // World to world: the pictures are opaque and write their depth first, so what a line
-            // lays inside one is hidden there rather than having to be held out of it.
+            // World to world: the opaque pictures write depth first and hide the line inside them.
             let placed = match span > 0.0 {
                 true => {
                     Mat4::from_translation(from)
                         * rotation_matrix_from_dir_to_dir(vec3(1.0, 0.0, 0.0), dir / span)
                         * Mat4::from_nonuniform_scale(span, radius, radius)
                 }
-                // Two worlds in the same place point a line nowhere; collapsed, not left a NaN.
+                // Coincident worlds would make a NaN.
                 false => Mat4::from_scale(0.0),
             };
             match one_way {
@@ -766,8 +716,6 @@ impl AppEntities {
         let forward = camera.view_direction();
         let nodes = &self.thumbnail_instances;
         let painted = nodes.colors.as_ref();
-        // The worlds with no picture of their own, and the ones still shrinking out from under
-        // the placeholder.
         let wearing = self.unvisited.iter().copied().chain(self.arrivals.veiled());
         let (transformations, colors) = (
             &mut self.unvisited_quads.transformations,
@@ -789,8 +737,7 @@ impl AppEntities {
             let placed =
                 Mat4::from_translation(-forward * (self.node_radii[world] * detail::LIFT)) * node;
             let color = painted.map_or(Srgba::WHITE, |painted| painted[world]);
-            // Searched rather than scanned: `lit_nodes` is in world order, being read off a flag
-            // per world, and this runs over every world wearing the placeholder.
+            // `lit_nodes` is in world order.
             if lit_nodes.binary_search(&world).is_ok() {
                 lit_transformations.push(placed);
                 lit_colors.push(color);
@@ -805,8 +752,7 @@ impl AppEntities {
     /// Every frame, unlike the rest of the geometry: the marching is the whole point of the
     /// dashes, and a settled layout is exactly when it has to carry on regardless.
     pub(super) fn march_dashes(&mut self, dt: f32) {
-        // Past one period every dash stands where the dash ahead of it stood, so the phase can
-        // start over rather than growing until it loses its precision.
+        // Wrapped at one period so the phase keeps its precision.
         self.dash_phase = (self.dash_phase + dt * EDGE_DASH_SPEED).rem_euclid(EDGE_DASH_PERIOD);
         self.dashes.material.phase = self.dash_phase;
         self.lit_dashes.material.phase = self.dash_phase;
@@ -833,8 +779,6 @@ impl AppEntities {
                 None => return,
             },
         };
-        // Logged where it is found. The graph goes on being drawn as it was before thumbnails
-        // existed, so the only cost of another try is the try.
         let Some(atlas) = loaded else {
             self.atlas = Atlas::Waiting(ATLAS_RETRIED_AFTER_SECONDS);
             return;
@@ -846,12 +790,11 @@ impl AppEntities {
         };
         self.thumbnail_instances.texture_transformations = Some(cells);
         self.thumbnails.set_instances(&self.thumbnail_instances);
-        // One upload, sampled by both: a [`Texture2DRef`] is a handle over a shared texture, so
-        // the clone costs a Mat3 and an atomic rather than a second copy of the atlas.
+        // One upload: a [`Texture2DRef`] clone is a Mat3 and an atomic.
         let atlas = Texture2DRef::from_cpu_texture(context, &atlas);
         self.glow.material.texture = Some(atlas.clone());
         self.lit_thumbnails.material.texture = Some(atlas.clone());
-        // Last, being what [`Self::drawn_thumbnails`] reads to decide the quads are drawable.
+        // Last: [`Self::drawn_thumbnails`] reads it to decide the quads are drawable.
         self.thumbnails.material.texture = Some(atlas);
         self.gather_lit();
     }
@@ -914,8 +857,6 @@ impl AppEntities {
         self.graph.visit_nodes(|node| {
             let world = node.index().index();
             let position = world_pos(node.position());
-            // Behind the camera a projection says nothing useful, and off the edge of the window
-            // there is nothing to sharpen.
             if (position - camera.position()).dot(forward) <= 0.0 {
                 return;
             }
@@ -929,7 +870,7 @@ impl AppEntities {
             }
             let full = self.node_radii[world];
             let grown = self.arrivals.grown(world);
-            // Ranked and admitted at the size it is settling at, drawn at the size it is now.
+            // Ranked at the settling size, drawn at the current one.
             let width = drawn_width(camera, across, full, position, center);
             if width < detail::LEAVE_PIXELS {
                 return;
@@ -948,8 +889,7 @@ impl AppEntities {
                 },
             ));
         });
-        // Not by drawn width: perspective inflates a node as it goes off-axis, a third wider in
-        // the corner, so width would spend the budget on the worlds leaving the window.
+        // Not drawn width: perspective inflates a node a third in the corner.
         magnified.sort_by(|(a, _), (b, _)| a.total_cmp(b));
         magnified.into_iter().map(|(_, it)| it).collect()
     }
@@ -963,8 +903,7 @@ fn panorama_tile() -> CpuTexture {
     let mut data = Vec::with_capacity(PANORAMA_TILE_TEXELS * PANORAMA_TILE_TEXELS);
     for y in 0..PANORAMA_TILE_TEXELS {
         for x in 0..PANORAMA_TILE_TEXELS {
-            // Every cell whose glow could reach here, the tile's own neighbours included, so the
-            // glows straddling an edge match up when the tile repeats.
+            // Neighbours included, so glows straddling an edge match when the tile repeats.
             let mut glow: f32 = 0.0;
             for cell_y in -1..=1 {
                 for cell_x in -1..=1 {
@@ -1027,8 +966,6 @@ fn srgb_to_linear(channel: f32) -> f32 {
 /// stays continuous all the way around instead of snapping where an angle wraps.
 pub(super) fn panorama_transform(viewport: Viewport, device_pixel_ratio: f32, view: Vec3) -> Mat3 {
     let tile = PANORAMA_TILE_PIXELS * device_pixel_ratio;
-    // Sampling further along an axis pulls the backdrop the opposite way on screen, so turning
-    // the camera right drifts the backdrop left, as something in the distance does.
     let drift = vec2(view.x, view.y) * PANORAMA_PARALLAX;
     Mat3::from_translation(drift)
         * Mat3::from_nonuniform_scale(viewport.width as f32 / tile, viewport.height as f32 / tile)
@@ -1088,11 +1025,9 @@ fn edge_colors(
     descendants: &[u32],
     depth_colors: &[Srgba],
 ) -> Vec<Srgba> {
-    // Against the busiest world there is, so the brightest connection is the one the whole game
-    // hangs off rather than one at an arbitrary count.
+    // Against the busiest world, which the whole game hangs off.
     let busiest = (1.0 + descendants.iter().copied().max().unwrap_or(0) as f32).ln();
-    // The dimmest the ramp's own stops reach, so the correction only ever darkens and no channel
-    // has to clip. Sampled rather than restated, the ramp being [`distance_color`]'s to define.
+    // The ramp's floor, so the correction only darkens; [`distance_color`] defines the ramp.
     const SAMPLES: u32 = 64;
     let floor = (0..=SAMPLES)
         .map(|step| luminance(distance_color(step as f32 / SAMPLES as f32)))
@@ -1100,8 +1035,7 @@ fn edge_colors(
     let mut colors = Vec::with_capacity(graph.edge_count());
     graph.visit_edges(|a, b, _| {
         let (a, b) = (a.index().index(), b.index().index());
-        // Unreachable worlds are deeper than any depth rather than shallower than every one,
-        // which is what `Option`'s own order would make of them.
+        // Unreachable worlds sort deepest, unlike `Option`'s order.
         let depth = |world: usize| routes.depth[world].unwrap_or(u32::MAX);
         let from = match (routes.parents[b], routes.parents[a]) {
             (Some(parent), _) if parent == a => a,
@@ -1111,8 +1045,7 @@ fn edge_colors(
         };
         let to = if from == a { b } else { a };
         let reach = (1.0 + descendants[to] as f32).ln() / busiest.max(f32::MIN_POSITIVE);
-        // Never above 1: a color already dimmer than the ramp's floor -- [`UNREACHED_COLOR`],
-        // which is off the ramp entirely -- is left alone rather than lifted onto it.
+        // Never above 1: [`UNREACHED_COLOR`] is off the ramp and stays as it is.
         let even = (floor / luminance(depth_colors[from]).max(f32::MIN_POSITIVE)).min(1.0);
         colors.push(scaled(
             depth_colors[from],

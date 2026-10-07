@@ -13,31 +13,17 @@ members = [
 [lib]
 crate-type = ["cdylib"]
 
-# Not `yumezu`: the lib target is already that, and trunk cannot tell two artifacts of one name
-# apart -- `found more than one target artifact`. The name reaches the desktop packages as the
-# installed file name, which `productName` below overrides everywhere a person reads it.
+# Not `yumezu`: trunk cannot tell it from the lib target (`found more than one target artifact`).
 [[bin]]
 name = "yumezu_main"
 path = "src/main.rs"
 
 [features]
-# Builds `src/profile.rs` in place of its do-nothing stand-in: a report of what a frame cost every
-# couple of seconds, the GPU's own clock over the whole frame or over each pass, and the switches
-# for both in the settings tab. Never shipped. The page gets all of it but the GPU's clock,
-# which needs a timer query only some browsers hand out -- see `profile::readable`.
+# Per-frame cost report and GPU pass timers in the settings tab; never shipped.
 profile = []
 
-# Desktop packaging. `cargo packager` reads this table but does not build anything: the binary has
-# to exist under `binariesDir` first, which is why `just package` builds before packaging. Keys are
-# camelCase because the config denies unknown fields and only some of them carry a kebab alias.
-#
-# No wix, deb or pacman: dropping wix keeps the WiX toolchain off the Windows runner, and one
-# format per platform is enough everywhere else. `app` rides along with `dmg` on macOS -- the dmg
-# is what a person installs, the `.app` is what `cargo-packager-updater` replaces in place, and
-# `dmg` is the one format here it cannot. See `src/update.rs`.
-#
-# `App` and `Nsis` are not gated on the host the way the rest are, and on the wrong one write a
-# broken package rather than fail. So every caller passes `--formats`, which overrides this list.
+# `cargo packager` builds nothing; `just package` builds the binary into `binariesDir` first.
+# `App` and `Nsis` write a broken package on the wrong host, so every caller passes `--formats`.
 [package.metadata.packager]
 productName = "yumezu"
 identifier = "dev.yumemiru.yumezu"
@@ -45,10 +31,7 @@ description = "A 3D graph of every world in Yume 2kki"
 category = "Reference"
 homepage = "https://explorer.yumemiru.dev"
 formats = ["appimage", "nsis", "app", "dmg"]
-# The `.icns` is built rather than derived: the packager folds the list into one itself, and
-# 1024x1024 is no icns type at 1x -- only 512@2x -- so `icon.png` alone fails with `No matching
-# IconType`. A list holding one is copied verbatim instead. The Linux formats skip every entry
-# that is not a png, and NSIS reads `installerIcon` below, so only macOS sees it.
+# Prebuilt `.icns`: 1024x1024 has no 1x icns type, so `icon.png` alone fails `No matching IconType`.
 icons = ["icons/icon.png", "icons/icon.icns"]
 outDir = "target/packages"
 
@@ -58,20 +41,13 @@ installerIcon = "icons/icon.ico"
 [profile.min]
 inherits = "release"
 opt-level = "z"
-# Off so that the override below can take effect. Both LTO modes defer the vectorizers to the
-# post-link pipeline, which runs at the `opt-level` above and ignores per-package ones, and a
-# size level there turns off the unroller that the force-graph hot loops need widened before
-# anything can vectorize them. Measured, this pairing is also the smallest the application has
-# been after brotli. See `crates/force_graph_3d/IMPL_DETAILS.md`.
+# LTO would run the vectorizers at this `opt-level`, ignoring the force_graph_3d override below.
 lto = false
 codegen-units = 1
 panic = "abort"
 strip = true
 
-# The one crate that is compiled for speed. Its inner loops are fixed-width and have to be
-# unrolled before they vectorize at all; at a size level they run one lane at a time and the
-# `+simd128` in `.cargo/config.toml` buys nothing.
-# `crates/force_graph_3d/tests/codegen.rs` fails if this goes away.
+# Its loops vectorize only once unrolled; `crates/force_graph_3d/tests/codegen.rs` asserts it.
 [profile.min.package.force_graph_3d]
 opt-level = 3
 
@@ -82,48 +58,42 @@ log = "0.4.34"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 three-d = { version = "0.20.0", git = "https://github.com/asny/three-d" }
-# explicitly depended to override features
+# Depended on only to enable features.
 three-d-asset = { version = "0.10", features = ["jpeg", "png"] }
-# the decoder `three-d-asset` already pulls, depended on directly to resample before upload
+# Already pulled by `three-d-asset`; resamples before upload.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["charset", "http2", "system-proxy", "rustls-no-provider"] }
 winit = "0.30"
-# `std::time::Instant` panics on the page; this is the same type everywhere else.
+# `std::time::Instant` panics on wasm.
 web-time = "1"
-# For the one clock this app reads: the dump's stamp, said in the reader's own zone. `wasmbind`
-# is what gets the page's offset off `Date`, there being no tzdb to read there.
+# `wasmbind` reads the page's timezone offset off `Date`.
 chrono = { version = "0.4", default-features = false, features = ["clock", "wasmbind"] }
 egui_material_icons = "0.7.0"
 fluent-bundle = "0.16"
 unic-langid = "0.9"
 sys-locale = "0.3"
-# pinned via egui_material_icons
+# Pinned by egui_material_icons.
 egui = "0.35"
 # upgrade blocked by https://github.com/emilk/egui/issues/8436
 egui-winit = { version = "0.35", default-features = false }
 egui_glow = { version = "0.35", default-features = false }
-# to help with measuring different fonts' baselines
 skrifa = "0.44"
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-# Named only to pick the provider. Both are compiled in if anything in the graph pulls in the
-# other, and aws-lc-rs costs ~900KiB of the binary over ring for the same suites.
+# aws-lc-rs costs ~900KiB over ring for the same suites.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 fontique = { version = "0.11", default-features = false, features = ["system"] }
 egui-winit = { version = "0.35", default-features = false, features = ["clipboard"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
 reqwest-middleware = "0.5.2"
 http-cache-reqwest = "=1.0.0-alpha.8"
-# Named to open the download store itself -- see `src/fetch.rs`. The version has to be the one
-# `http-cache-reqwest` builds against: the manager takes the `Database`.
+# Must match the version `http-cache-reqwest` builds against.
 redb = "4.2"
 http = "1.5"
 
 [target.'cfg(all(not(target_family = "wasm"), not(target_os = "android")))'.dependencies]
 env_logger = { version = "0.11", default-features = false }
-# The desktop packages replace themselves through this; see `src/update.rs`. It carries its own
-# reqwest, a major behind the one above, so the desktop binary holds two -- desktop being the one
-# target here with no size budget.
+# Carries a second, older reqwest; desktop has no size budget.
 cargo-packager-updater = "0.2"
 
 [target.'cfg(target_family = "wasm")'.dependencies]
@@ -135,7 +105,6 @@ console_log = "1.1.0"
 console_error_panic_hook = "0.1.7"
 web-sys = { version = "0.3.104", features = [
   "Location", "MediaQueryList", "Navigator", "Storage", "UrlSearchParams", "Window",
-  # used by text_agent.rs
   "CompositionEvent", "CssStyleDeclaration", "Document", "Element", "Event", "EventTarget",
   "FocusOptions", "HtmlCanvasElement", "HtmlElement", "HtmlInputElement", "InputEvent",
   "KeyboardEvent", "Node",
@@ -143,7 +112,7 @@ web-sys = { version = "0.3.104", features = [
 
 
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
-# Pinned to `wasm-bindgen` itself, which the CLI generating the glue must also match exactly.
+# Must match `wasm-bindgen` and its CLI exactly.
 wasm-bindgen-test = "=0.3.77"
 
 [target.'cfg(target_os = "android")'.dependencies]
@@ -151,5 +120,5 @@ winit = { version = "0.30", features = ["android-native-activity"] }
 android_logger = "0.15"
 jni = "0.22"
 ndk-context = "0.1"
-# to handle TLS certs removed from reqwest
+# Compiled-in TLS roots; see `src/fetch.rs`.
 webpki-root-certs = "1"

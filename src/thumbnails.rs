@@ -15,11 +15,8 @@ use three_d::renderer::*;
 
 use super::fetch;
 
-// Under the host's own root on every target -- see [`read`]. Published with the page: the two
-// `copy-file` links in `index.html` are what put them there.
+// Published by the `copy-file` links in `index.html`.
 const PATH: &str = "static/thumbnails.jpg";
-// Written beside the atlas by the same command that packs it. Whole rather than the cell of it the
-// atlas also carries -- see [`placeholder`].
 const UNKNOWN: &str = "static/unknown_location.png";
 /// Size of one thumbnail in texels. Must match `tools/atlas`, which writes the atlas.
 pub const CELL: [u32; 2] = [64, 48];
@@ -43,7 +40,7 @@ pub fn load() -> fetch::Pending<Option<CpuTexture>> {
 ///
 /// `None` is not fatal: an unvisited world keeps its bare node.
 pub fn placeholder() -> fetch::Pending<Option<CpuTexture>> {
-    // A full chain, unlike the atlas: one picture, so no neighbour to bleed in from.
+    // Mipmapped, unlike the atlas: one picture has no neighbour to bleed in from.
     picture(UNKNOWN, None)
 }
 
@@ -56,8 +53,7 @@ fn picture(path: &'static str, mip_levels: Option<u32>) -> fetch::Pending<Option
                         max_levels: mip_levels.unwrap_or(u32::MAX),
                         ..Default::default()
                     }),
-                    // Cells reach the edge of the atlas, so an off-edge sample must pin rather
-                    // than wrap round to the far side.
+                    // Cells reach the atlas edge, so an off-edge sample must not wrap.
                     wrap_s: Wrapping::ClampToEdge,
                     wrap_t: Wrapping::ClampToEdge,
                     ..picture
@@ -103,9 +99,7 @@ pub fn cells(of: &[Option<usize>], atlas: &CpuTexture) -> Option<Vec<Mat3>> {
 fn uv(cell: usize, columns: u32, rows: u32) -> Mat3 {
     let size = vec2(1.0 / columns as f32, 1.0 / rows as f32);
     let (column, row) = (cell as u32 % columns, cell as u32 / columns);
-    // Rows count from the bottom because three-d builds a mesh's uv buffer as `1 - v`, so a quad's
-    // top edge arrives here as v = 1. Only the offset turns over: the direction within a cell is
-    // already right.
+    // three-d builds uv as `1 - v`, so rows count from the bottom; within a cell v is right.
     let row = rows - 1 - row;
     Mat3::from_translation(vec2(column as f32 * size.x, row as f32 * size.y))
         * Mat3::from_nonuniform_scale(size.x, size.y)
@@ -168,7 +162,7 @@ impl Sheet {
             return None;
         };
         Some(Self {
-            // No mipmaps: the cells are drawn at about their own size.
+            // No mipmaps: cells are drawn near their own size.
             texture: egui.load_texture(PATH, image, egui::TextureOptions::LINEAR),
             columns,
             rows,
@@ -190,11 +184,8 @@ impl Sheet {
 
 #[cfg(test)]
 mod tests {
-    // What makes an atlas outlive the dump it was packed from: a world packed into no atlas this
-    // old is a world without a picture, not a world wearing the last one's.
     #[test]
     fn a_cell_the_atlas_is_too_small_for_falls_back_to_the_placeholder() {
-        // 4x4, so the placeholder is cell 15 and the worlds run 0..15.
         let (columns, rows) = (4, 4);
         assert_eq!(super::held(Some(0), columns, rows), 0);
         assert_eq!(super::held(Some(14), columns, rows), 14);

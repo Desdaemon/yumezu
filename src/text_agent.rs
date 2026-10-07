@@ -87,10 +87,8 @@ impl Agent {
     fn typed(&self, event: &web_sys::InputEvent) {
         let composing = event.is_composing();
 
-        // Only an insertion says anything egui can act on; the element is emptied for the rest of
-        // the `inputType` list so the next line starts clean. `insertCompositionText` outside a
-        // composition is the tail of a word `compositionend` already committed, so taking it would
-        // type the word twice.
+        // The element is emptied for every other `inputType`. `insertCompositionText` outside a
+        // composition repeats a word `compositionend` already committed.
         let kind = event.input_type();
         let insertion = kind == "insertText" || kind == "insertReplacementText";
         if !composing && !insertion {
@@ -98,8 +96,7 @@ impl Agent {
             return;
         }
 
-        // Clears the suggestion strip a phone keyboard leaves behind. Plain typing only: during a
-        // composition this would end the word, and after one the input method's session.
+        // Clears a phone keyboard's suggestion strip; mid-composition this would end the word.
         if !composing {
             let _ = self.input.blur();
             let _ = self.input.focus();
@@ -115,8 +112,7 @@ impl Agent {
                 text: fresh,
                 active_range_chars: self.active_range(&text, kept),
             }));
-            // A word still being built is redrawn whole every time, so only the committed part is
-            // remembered: the rest is egui's to replace on the next event.
+            // egui redraws an uncommitted word whole on each event.
             *told = text.chars().take(kept).collect();
         } else {
             self.push(egui::Event::Text(fresh));
@@ -138,7 +134,7 @@ impl Agent {
         }
         let before = String::from_utf16_lossy(&utf16[..start]).chars().count();
         let inside = String::from_utf16_lossy(&utf16[start..end]).chars().count();
-        // Counted from the start of the word rather than the start of the line.
+        // Counted from the start of the word.
         let start = before.saturating_sub(kept);
         Some(start..start + inside)
     }
@@ -154,8 +150,7 @@ impl Agent {
 
     /// Every key the app gets while something is typed.
     fn key(&self, event: &web_sys::KeyboardEvent, pressed: bool) {
-        // A key choosing a candidate belongs to the input method, not the field, and a browser
-        // reports one either by saying so or by reporting 229 and nothing else.
+        // A browser reports an input method key by flag or by keycode 229 alone.
         if event.is_composing() || event.key_code() == 229 {
             return;
         }
@@ -169,8 +164,7 @@ impl Agent {
         self.modifiers.set(modifiers);
 
         let name = event.key();
-        // A key that is not one character is an editing key rather than text, and so is anything
-        // held with a modifier. Either way the element is about to change without reporting it.
+        // The element is about to change without reporting it.
         if pressed
             && (name.chars().count() > 1 || modifiers.ctrl || modifiers.alt || modifiers.mac_cmd)
         {
@@ -180,7 +174,7 @@ impl Agent {
         let Some(key) = egui::Key::from_name(&name) else {
             return;
         };
-        // Otherwise the browser hands the focus to whatever it thinks is next on the page.
+        // Otherwise the browser moves focus to the next element.
         if key == egui::Key::Tab {
             event.prevent_default();
         }
@@ -216,13 +210,10 @@ impl TextAgent {
             .create_element("input")?
             .dyn_into::<web_sys::HtmlInputElement>()?;
         input.set_type("text");
-        // A phone would otherwise capitalise the first letter of a world's name.
         input.set_attribute("autocapitalize", "off")?;
         input.set_attribute("aria-hidden", "true")?;
 
-        // Invisible rather than hidden or off-screen: a browser will not open an input method
-        // against an element the page does not draw. Starts over the canvas' top left so focusing
-        // it cannot scroll the page elsewhere.
+        // No input method opens on an undrawn element; top left, so focusing scrolls nothing.
         let style = input.style();
         style.set_property("position", "absolute")?;
         style.set_property("top", &format!("{}px", canvas.offset_top()))?;
@@ -233,11 +224,10 @@ impl TextAgent {
         style.set_property("outline", "none")?;
         style.set_property("background-color", "transparent")?;
         style.set_property("caret-color", "transparent")?;
-        // Under sixteen and a phone browser zooms the page in when the element takes the focus.
+        // A phone browser zooms in on focus under 16px.
         style.set_property("font-size", "16px")?;
 
-        // Next to the canvas rather than at the end of the body, so `position: absolute` resolves
-        // against whatever the canvas' own offsets are measured from and the two stay together.
+        // Beside the canvas, so `position: absolute` shares the canvas' offset parent.
         if let Some(parent) = canvas.parent_node() {
             parent.insert_before(&input, canvas.next_sibling().as_ref())?;
         } else {
@@ -252,8 +242,7 @@ impl TextAgent {
         });
         let mut listeners = Vec::new();
 
-        // Every way text arrives, composed or not. Deliberately no `compositionupdate` listener:
-        // the element's selection has not been updated yet when that fires.
+        // No `compositionupdate`: it fires before the selection updates.
         listen(&input, "input", &mut listeners, {
             let agent = Rc::clone(&agent);
             move |event: web_sys::InputEvent| agent.typed(&event)
@@ -264,8 +253,7 @@ impl TextAgent {
             move |_: web_sys::CompositionEvent| agent.composed()
         })?;
 
-        // The canvas is sent no keys while this element holds the focus, so winit hears none of
-        // these: backspace, the arrows, and the rest of what editing a line is made of.
+        // The canvas, and so winit, gets no keys while this element holds focus.
         for (name, pressed) in [("keydown", true), ("keyup", false)] {
             listen(&input, name, &mut listeners, {
                 let agent = Rc::clone(&agent);
@@ -300,7 +288,6 @@ impl TextAgent {
     pub(crate) fn follow(&self, ctx: &egui::Context, ime: Option<egui::output::IMEOutput>) {
         match ime {
             Some(ime) => {
-                // egui dropped the word being built, so what the element holds is owed to nobody.
                 if ime.should_interrupt_composition {
                     self.agent.clear();
                 }
@@ -323,12 +310,10 @@ impl TextAgent {
         self.placed.set(ime);
         let Some(ime) = ime else { return };
 
-        // egui measures in points and the page places in CSS pixels, the zoom factor being the
-        // whole difference. Offsets rather than a bounding rect, to measure from the same corner
-        // `position: absolute` does, and clamped inside the canvas so a caret scrolled out of
-        // sight cannot scroll the page to it.
+        // Offsets, measured from the corner `position: absolute` uses; clamped so a caret out of
+        // sight cannot scroll the page.
         let zoom = ctx.zoom_factor();
-        let ratio = pixel_ratio();
+        let ratio = device_pixel_ratio();
         let caret = ime.cursor_rect.center();
         let x = (caret.x * zoom).clamp(0.0, self.canvas.width() as f32 / ratio);
         let y = (caret.y * zoom).clamp(0.0, self.canvas.height() as f32 / ratio);
@@ -367,8 +352,7 @@ fn focus(element: &web_sys::HtmlElement) {
     let _ = element.focus_with_options(&options);
 }
 
-/// The device's own pixels per CSS pixel, which is what the canvas' size is counted in.
-fn pixel_ratio() -> f32 {
+fn device_pixel_ratio() -> f32 {
     let ratio = web_sys::window().unwrap().device_pixel_ratio() as f32;
     if ratio > 0.0 && ratio.is_finite() {
         ratio

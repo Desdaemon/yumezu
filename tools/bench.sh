@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
-# Times the kernel's spellings against each other, on this machine and on a phone if one is
-# attached. `IMPL_DETAILS.md` carries the results.
-#
-# Runs the whole simulation rather than costing a loop from a scheduling model, which is the only way
-# to see the memory system, the octree walk around the kernel, and the shipping cores `llvm-mca` has
-# no model for. `tools/variant.py` writes each variant to a scratch copy of the crate, so nothing
-# here touches the working tree.
-#
-# Args are the benchmark's: `<nodes> <theta> <steps>`. Wants ANDROID_HOME and a device on adb for the
-# phone half, and skips it without them.
+# Times the kernel's variants here and on an adb phone. `IMPL_DETAILS.md` carries the results.
+# Args: `<nodes> <theta> <steps>`. Skips the phone without ANDROID_HOME and a device.
 set -euo pipefail
 
 readonly TRIPLE=aarch64-linux-android
@@ -20,8 +12,7 @@ cd "$(dirname "$0")/.."
 readonly ROOT=$PWD
 readonly SCRATCH=${TMPDIR:-/tmp}/force_graph_3d-bench
 
-# The desktop build sets no `target-cpu`, so SSE2 is the floor it ships; the gap between the two
-# columns is what the wider vectors are worth.
+# The desktop build ships with no `target-cpu`, so SSE2.
 readonly HOST_CPUS=(x86-64 native)
 
 for variant in "${VARIANTS[@]}"; do
@@ -56,8 +47,7 @@ for variant in "${VARIANTS[@]}"; do
     cd "$ROOT"
 done
 
-# One core from each cluster, read off the device: a phone's cores are not alike and the scheduler
-# will move a short run between them.
+# A phone's clusters differ and the scheduler migrates short runs between them.
 mapfile -t freqs < <(adb shell 'cat /sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq' | tr -d '\r')
 slow=0 fast=0
 for i in "${!freqs[@]}"; do
@@ -69,7 +59,7 @@ echo "device: $(adb shell getprop ro.product.model | tr -d '\r')"
 for core in $slow $fast; do
     echo "  cpu$core, ${freqs[core]} kHz"
     for variant in "${VARIANTS[@]}"; do
-        # Best of three: a phone throttles, and the fastest run is the least contaminated.
+        # Best of three: a phone throttles.
         best=$(for _ in 1 2 3; do
             adb shell "taskset $(printf '%x' $((1 << core))) $REMOTE/bench-$variant $*" | tr -d '\r'
         done | sort -t' ' -k5 -n | head -1)

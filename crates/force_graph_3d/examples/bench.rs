@@ -19,15 +19,13 @@ fn main() {
 
     let mut graph = <ForceGraph>::new(SimulationParameters {
         theta,
-        // The layout must not settle partway through, or the later steps measure the early exit
-        // rather than the kernel.
+        // Settling would measure the early exit instead of the kernel.
         settle_speed: 0.0,
         settle_after: None,
         ..Default::default()
     });
 
-    // Deterministic, so two runs measure the same arrangement of work: positions decide how much
-    // of the octree a step walks, which is most of what varies between graphs.
+    // Deterministic: positions decide how much of the octree a step walks.
     let mut seed = 0x2545_F491_4F6C_DD1Du64;
     let mut next = || {
         seed ^= seed << 13;
@@ -50,7 +48,7 @@ fn main() {
         graph.add_edge(pair[0], pair[1], Default::default());
     }
 
-    // One step ahead of the clock: the first allocates the kernel's scratch buffers.
+    // Warm-up: the first step allocates the kernel's scratch buffers.
     graph.update(1.0 / 60.0);
     let start = Instant::now();
     for _ in 0..steps {

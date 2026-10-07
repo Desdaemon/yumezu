@@ -73,7 +73,7 @@ pub async fn building() -> Option<&'static str> {
     let said = match download(&url).await {
         Ok(said) => said,
         Err(error) => {
-            // Not a warning: most hosts have nothing to say about what they are building.
+            // Most hosts have no build status to report.
             log::debug!("cannot reach {url}: {error}");
             return None;
         }
@@ -123,7 +123,7 @@ pub async fn load(revealed: bool) -> Result<Option<Dump>, String> {
 /// dump being the one document with an answer that is neither itself nor a failure.
 async fn dump(url: &str) -> Result<Option<String>, fetch::Error> {
     let response = fetch::client().get(url).send().await?;
-    // The server is rebuilding. See `dreamweaver`'s `data`.
+    // The server is rebuilding.
     if response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
         return Ok(None);
     }
@@ -145,13 +145,11 @@ pub(super) async fn download(url: &str) -> Result<String, fetch::Error> {
 fn parse(json: &str, revealed: bool) -> serde_json::Result<Dump> {
     let mut dump = serde_json::from_str::<Dump>(json)?;
     hide(&mut dump.worlds, revealed);
-    // Every picture address the app fetches at runtime passes through here and only here.
-    // `tools/atlas` reads `data.json` itself and rightly misses this, running at build time.
+    // `tools/atlas` reads `data.json` at build time and bypasses this.
     #[cfg(target_family = "wasm")]
     for world in &mut dump.worlds {
         world.image = world.image.replace(WIKI_IMAGES, proxied_images());
         if let Some(urls) = &mut world.map_url {
-            // Whole rather than entry by entry: every address carries the same prefix.
             *urls = urls.replace(WIKI_IMAGES, proxied_images());
         }
     }

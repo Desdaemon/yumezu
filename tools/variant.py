@@ -15,12 +15,8 @@ import pathlib
 import shutil
 import sys
 
-# The lane loop written the way LLVM leaves a bounds check in the middle of it: five slices walked
-# by a common running index, which it will not prove `base + LANES <= n` for.
-INDEXED_FROM = """    // Chunked rather than indexed by a running base: a `&[[f32; LANES]]` carries the lane count
-    // in its type, so nothing in the body needs a bounds check that LLVM then has to prove
-    // redundant. It does not manage that proof for five slices indexed in step, and the check it
-    // leaves behind sits inside the vector body.
+# Five slices indexed by one running base, which LLVM leaves a bounds check in.
+INDEXED_FROM = """    // Chunked: LLVM leaves a bounds check in the loop for five slices indexed in step.
     let (xc, xr) = x.as_chunks::<LANES>();"""
 
 INDEXED_TO = """    let body = n - n % LANES;
@@ -85,7 +81,6 @@ crate = pathlib.Path(__file__).resolve().parent.parent / "crates/force_graph_3d"
 
 shutil.rmtree(destination, ignore_errors=True)
 shutil.copytree(crate, destination, ignore=shutil.ignore_patterns("target"))
-# Standalone, so that building it does not want the application's own dependencies.
 manifest = destination / "Cargo.toml"
 manifest.write_text("[workspace]\n" + manifest.read_text())
 

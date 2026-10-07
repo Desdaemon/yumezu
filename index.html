@@ -6,22 +6,16 @@
     <title>yumezu</title>
     <link data-trunk rel="icon" href="icons/favicon.png"/>
     <link data-trunk rel="scss" href="static/index.scss"/>
-    <!-- The world thumbnails, kept at the same relative path the native build reads them from.
-         Built by `just thumbnails`; the app draws the graph without pictures if it is missing. -->
     <link data-trunk rel="copy-file" href="static/thumbnails.jpg" data-target-path="static"/>
     <link data-trunk rel="copy-file" href="static/unknown_location.png" data-target-path="static"/>
     <link data-trunk rel="rust" data-target-name="yumezu"/>
   </head>
   <body>
     <canvas id="canvas"></canvas>
-    <!-- The wasm is a few megabytes, and until it has come down, compiled and reached its first
-         frame the canvas is a black rectangle. The same line the app's own loading frame shows, in
-         the same place; the first frame takes it off the page. -->
+    <!-- Shown until the app's first frame replaces it. -->
     <div id="loading"><span id="loading-text">Loading worlds…</span></div>
     <script>
-      // The same choice `src/i18n.rs` makes, made before the code that makes it is here. The words
-      // are `dump-loading` in `locales/`, written out again because a `.ftl` cannot be read without
-      // the app that reads it.
+      // Mirrors `src/i18n.rs` and `dump-loading` in `locales/`, before the app can read either.
       const named = new URLSearchParams(location.search).get("lang");
       if ((named || navigator.language || "").startsWith("ja"))
         document.getElementById("loading-text").textContent = "読み込み中...";

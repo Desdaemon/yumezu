@@ -1,25 +1,17 @@
-# One release per `v*` tag, carrying the four packages a person installs -- an AppImage, an NSIS
-# installer, a dmg, a signed apk -- and `latest.json`, which is the whole of the update server: an
-# installed desktop copy asks the release itself. See `src/update.rs`.
-#
-# The tests are `ci.yml` and none of them run here. A tag is pushed at a commit that has already
-# been through them.
+# `latest.json` on the release is the whole update server; see `src/update.rs`.
 name: Release
 
 on:
   push:
     tags: ["v*"]
 
-# The release job creates the release and uploads to it.
 permissions:
   contents: write
 
 env:
-  # Pinned so that a release is packaged by the version it was tested against.
   PACKAGER: cargo-packager@0.11.8
 
 jobs:
-  # Everything that can be known before four runners spend twenty minutes each.
   plan:
     runs-on: ubuntu-latest
     outputs:
@@ -32,20 +24,14 @@ jobs:
         run: |
           set -euo pipefail
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["package"]["version"])')
-          # `latest.json` announces this version and an installed copy compares it against the
-          # `CARGO_PKG_VERSION` it was built with. A tag that says otherwise would offer an update
-          # to a version nothing was ever built as.
+          # An installed copy compares `latest.json` against its `CARGO_PKG_VERSION`.
           if [ "$version" != "${GITHUB_REF_NAME#v}" ]; then
             echo "::error::tag $GITHUB_REF_NAME is not Cargo.toml's $version"
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      # All of them here rather than each where it is used: every one of them is missed either
-      # silently or an hour in. Without the pubkey a desktop package draws no update controls and
-      # nothing about it looks wrong; without the private key it gets no `.sig`, which the release
-      # job then cannot quote; without the keystore `android/build.sh` falls back to the debug key,
-      # and an apk signed with that can never upgrade one signed with the release key.
+      # Each fails silently or an hour in; a debug-signed apk can never upgrade a release one.
       - name: The keys have to be here before four runners spend an hour
         env:
           PUBKEY: ${{ vars.YUMEZU_UPDATE_PUBKEY }}
@@ -62,23 +48,14 @@ jobs:
             exit 1
           fi
 
-          # The keystore is a binary file carried as base64 -- Actions secrets are UTF-8 only, and
-          # the apk job decodes this one back. Checked here because a value that is not base64 at
-          # all is otherwise a failure twenty minutes in. Not the signing key below it: the
-          # packager takes either that key's contents or a path to it, so neither shape is wrong.
+          # Actions secrets are UTF-8 only, so the keystore is base64.
           printf '%s' "$KEYSTORE" | base64 -d > /dev/null 2>&1 \
             || { echo "::error::ANDROID_KEYSTORE does not decode as base64"; exit 1; }
 
-  # One package per host: linuxdeploy, NSIS and `create-dmg` each run only on the system they
-  # package for. macOS is arm64 only, as the apk is -- `macos-15` is that, and pinned for the
-  # reason the other two are.
-  #
-  # macOS gets two formats: a dmg is what a person installs and `.app` is what the updater
-  # replaces, so signing tars the bundle to `yumezu.app.tar.gz` and `latest.json` points there.
+  # `.app` is what the updater replaces, so signing tars it to `yumezu.app.tar.gz`.
   desktop:
     needs: plan
     strategy:
-      # All of them are wanted, and one platform failing should still say whether the others did.
       fail-fast: false
       matrix:
         include:
@@ -100,33 +77,26 @@ jobs:
         with:
           tool: just,${{ env.PACKAGER }}
 
-      # `fontique`, reached through `three-d`, links fontconfig and finds it with pkg-config.
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev
 
-      # The pubkey is compiled in, so it belongs to this step rather than to the packaging below.
+      # The pubkey is compiled in.
       - run: cargo build --release --locked --bin yumezu_main
         env:
           YUMEZU_UPDATE_PUBKEY: ${{ vars.YUMEZU_UPDATE_PUBKEY }}
 
-      # The private key is what writes the `.sig` beside each package, and an installed copy
-      # installs nothing that key did not sign.
       - run: cargo packager --release --formats ${{ matrix.formats }}
         env:
           CARGO_PACKAGER_SIGN_PRIVATE_KEY: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY }}
           CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD: ${{ secrets.CARGO_PACKAGER_SIGN_PRIVATE_KEY_PASSWORD }}
-          # linuxdeploy's own strip cannot read the `.relr.dyn` section that every library a
-          # current toolchain built has, and treats its own failure as fatal.
+          # linuxdeploy's strip cannot read `.relr.dyn` and fails fatally.
           NO_STRIP: 1
-          # There is no FUSE on a runner, and linuxdeploy and its plugin are both AppImages.
+          # No FUSE on a runner, and linuxdeploy is an AppImage.
           APPIMAGE_EXTRACT_AND_RUN: 1
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
-          # Each host matches one or more of these. The signatures come along: they are what a
-          # person verifying a download by hand needs, as well as what `latest.json` quotes. The
-          # `.app` the tarball was made from is left behind -- nothing downloads a directory.
           path: |
             target/packages/*.AppImage*
             target/packages/*setup.exe*
@@ -134,8 +104,6 @@ jobs:
             target/packages/*.dmg*
           if-no-files-found: error
 
-  # `android/build.sh` wants no Gradle and no Java source, so this is the SDK the runner image
-  # already carries plus the release key.
   apk:
     needs: plan
     runs-on: ubuntu-24.04
@@ -149,8 +117,7 @@ jobs:
         with:
           tool: just
 
-      # A file rather than an environment variable because `apksigner` reads a file, and outside
-      # the checkout so that nothing can pick it up as a resource.
+      # Outside the checkout so nothing packages it as a resource.
       - name: Decode the release key
         env:
           KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
@@ -161,9 +128,7 @@ jobs:
           YUMEZU_KEYSTORE: ${{ runner.temp }}/production.jks
           YUMEZU_KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
 
-      # `RUNNER_TEMP` is destroyed with a GitHub-hosted runner but not with a self-hosted one, and
-      # a key that outlives the job it was needed for is the whole of the risk. `always()` so a
-      # failed build leaves nothing behind either.
+      # `RUNNER_TEMP` outlives a self-hosted runner's job.
       - name: Remove the release key
         if: always()
         run: rm -f "$RUNNER_TEMP/production.jks"
@@ -178,7 +143,7 @@ jobs:
     needs: [plan, desktop, apk]
     runs-on: ubuntu-latest
     steps:
-      # Whole history: the notes are the commits since the tag before this one.
+      # Whole history: the notes are the commits since the previous tag.
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
@@ -197,14 +162,10 @@ jobs:
           appimage=$(basename packages/*.AppImage)
           nsis=$(basename packages/*setup.exe)
           dmg=$(basename packages/*.dmg)
-          # Not the dmg: the updater replaces a `.app` in place and cannot mount an image, so the
-          # macOS entry below points at the tarball signing made of the bundle instead.
+          # The updater cannot mount a dmg.
           app=$(basename packages/*.app.tar.gz)
 
-          # An installed copy reads this off the newest release, which is what `latest/download`
-          # resolves to, so uploading it here is the whole server side. The keys are the `OS-ARCH`
-          # the updater asks for and each signature is the `.sig` the packager wrote beside its
-          # package -- quoted rather than linked, which is what the updater expects.
+          # Each signature is quoted, as the updater expects, from the `.sig` beside its package.
           python3 - "$appimage" "$nsis" "$app" > latest.json <<'PY'
           import datetime, json, os, pathlib, sys
 
@@ -227,13 +188,10 @@ jobs:
           }, indent=2))
           PY
 
-          # No tag before this one on the first release, where the whole history is the notes.
           previous=$(git describe --tags --abbrev=0 "$GITHUB_REF_NAME^" 2>/dev/null || true)
           changes=$(git log --no-merges --format='- %s' "${previous:+$previous..}$GITHUB_REF_NAME")
 
-          # The words are `.github/release-notes.md` and these four are what it leaves blank. A
-          # `$` of its own in that file has to be written `$$`, and `substitute` refuses a name it
-          # was not given rather than filling in nothing.
+          # A literal `$` in `.github/release-notes.md` is written `$$`.
           APPIMAGE="$appimage" NSIS="$nsis" DMG="$dmg" CHANGES="$changes" python3 - > notes.md <<'PY'
           import os, pathlib, string
 

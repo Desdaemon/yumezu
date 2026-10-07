@@ -54,7 +54,6 @@ fn file(key: &str) -> Option<std::path::PathBuf> {
     #[cfg(target_os = "android")]
     let directory = super::ANDROID.get()?.internal_data_path()?;
     #[cfg(not(target_os = "android"))]
-    // Read off the environment rather than through a crate: two variables and one fallback.
     let directory = std::path::PathBuf::from(match std::env::var_os("XDG_CONFIG_HOME") {
         Some(config) => config,
         None => {
@@ -96,8 +95,7 @@ fn android_cache_directory() -> Option<std::path::PathBuf> {
     use jni::{jni_sig, jni_str};
 
     let context = ndk_context::android_context();
-    // SAFETY: the glue publishes the VM and the context before it calls `android_main`, and both
-    // outlive the app.
+    // SAFETY: the glue publishes both before `android_main`, and both outlive the app.
     #[allow(unsafe_code)]
     let vm = unsafe { jni::JavaVM::from_raw(context.vm().cast()) };
     let found = vm.attach_current_thread(|env| -> Result<String, jni::errors::Error> {

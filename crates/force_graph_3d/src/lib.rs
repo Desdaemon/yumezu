@@ -394,8 +394,7 @@ struct Rest {
     /// Fraction of [`SimulationParameters::damping_factor`] in effect: withdrawn across the
     /// settling window while the layout is left alone, restored while it is being disturbed.
     liveliness: f32,
-    /// Whether anything disturbed the layout since the last step.
-    disturbed: bool,
+    disturbed_since_step: bool,
 }
 
 impl Default for Rest {
@@ -403,7 +402,7 @@ impl Default for Rest {
         Rest {
             settled: false,
             liveliness: 1.0,
-            disturbed: false,
+            disturbed_since_step: false,
         }
     }
 }
@@ -411,7 +410,7 @@ impl Default for Rest {
 impl Rest {
     fn wake(&mut self) {
         self.settled = false;
-        self.disturbed = true;
+        self.disturbed_since_step = true;
     }
 
     /// Hands the damping back at once and starts the settling window over.
@@ -426,14 +425,13 @@ impl Rest {
             self.liveliness = 1.0;
             return 1.0;
         };
-        let step = if std::mem::take(&mut self.disturbed) {
+        let step = if std::mem::take(&mut self.disturbed_since_step) {
             dt / WAKE_TIME
         } else {
             -dt / window.max(f32::MIN_POSITIVE)
         };
         self.liveliness = (self.liveliness + step).clamp(0.0, 1.0);
-        // Cubed, so the damping holds near full for most of the window and is withdrawn at the
-        // end of it: the layout spends its time laying out rather than braking.
+        // Cubed, so damping holds near full and withdraws only at the end.
         let withdrawn = 1.0 - self.liveliness;
         1.0 - withdrawn * withdrawn * withdrawn
     }
@@ -454,8 +452,7 @@ pub struct ForceGraph<UserNodeData = (), UserEdgeData = ()> {
     /// Target coordinate per node for the axis a constraint is closing on; kept to reuse its
     /// allocation.
     targets: Vec<f32>,
-    /// Time handed to [`ForceGraph::update`] that is not yet a whole [`FIXED_STEP`].
-    unspent: f32,
+    unspent_time: f32,
 }
 
 impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
@@ -474,7 +471,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
             interactions: Interactions::default(),
             limits: Vec::new(),
             targets: Vec::new(),
-            unspent: 0.0,
+            unspent_time: 0.0,
         }
     }
 
@@ -499,7 +496,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
     /// itself, rather than nudged it, says so here.
     pub fn revive(&mut self) {
         self.rest.revive();
-        self.unspent = 0.0;
+        self.unspent_time = 0.0;
     }
 
     /// Whether the layout has come to rest, leaving [`ForceGraph::update`] with nothing to do.
@@ -577,33 +574,29 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         if self.rest.settled || self.graph.node_count() == 0 {
             return false;
         }
-        self.unspent = (self.unspent + dt).min(FIXED_STEP * MAX_STEPS_PER_UPDATE as f32);
+        self.unspent_time = (self.unspent_time + dt).min(FIXED_STEP * MAX_STEPS_PER_UPDATE as f32);
         let mut stepped = false;
-        while self.unspent >= FIXED_STEP {
-            self.unspent -= FIXED_STEP;
-            self.step();
+        while self.unspent_time >= FIXED_STEP {
+            self.unspent_time -= FIXED_STEP;
+            self.fixed_step();
             stepped = true;
             if self.rest.settled {
-                // Holding it would hand the next thing to wake the layout a part-step it did not
-                // call for.
-                self.unspent = 0.0;
+                // Otherwise whatever next wakes the layout inherits a part-step.
+                self.unspent_time = 0.0;
                 break;
             }
         }
         stepped
     }
 
-    /// One [`FIXED_STEP`] of the simulation.
-    fn step(&mut self) {
+    fn fixed_step(&mut self) {
         let dt = FIXED_STEP;
         let damping =
             self.parameters.damping_factor * self.rest.advance(dt, self.parameters.settle_after);
         self.repel();
         self.attract();
-        // A constrained axis is driven by `constrain` alone: integrating it too would let the
-        // forces push the node off every step with the constraint pulling only most of it back, so
-        // two-dimensional mode would never be exactly planar. A slack layer is the exception --
-        // its constraint is a band, and the forces are what fill it.
+        // A constrained axis is driven by `constrain` alone, or 2D would never be exactly planar.
+        // A slack layer's constraint is a band, which the forces fill.
         let free = [
             true,
             self.parameters.dag_level_distance.is_none() || self.parameters.dag_level_slack > 0.0,
@@ -611,12 +604,10 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         ];
         self.integrate(dt, damping, free);
         let constrained = self.constrain(dt);
-        // Cleared at the end, not the start, so a force applied between two steps survives
-        // until the step that consumes it.
+        // Cleared at the end, so a force applied between steps reaches the next step.
         self.nodes.clear_forces();
 
-        // A constraint moves a node without giving it velocity, so the speed test cannot see that
-        // motion: a graph still collapsing has to stay awake however slowly it moves.
+        // A constraint moves a node without velocity, so a collapsing graph must stay awake.
         let settle_speed = self.parameters.settle_speed;
         self.rest.settled =
             constrained && self.nodes.fastest_speed_sqrd() <= settle_speed * settle_speed;
@@ -665,15 +656,15 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
             az,
             ..
         } = &mut self.nodes;
-        // Reslicing to one common length lets the bounds checks fold away.
+        // Reslicing to one length folds the bounds checks away.
         let (x, y, z, mass) = (&x[..n], &y[..n], &z[..n], &mass[..n]);
         let (ax, ay, az) = (&mut ax[..n], &mut ay[..n], &mut az[..n]);
-        // Every entry is a single node here, so every entry's clamp limit is one pair's `force_max`.
+        // Every entry is a single node here.
         self.limits.clear();
         self.limits.resize(n, force_max);
 
         for i in 0..n {
-            // A free slot has zero mass, so it contributes nothing in either direction.
+            // A free slot has zero mass.
             let [fx, fy, fz] = repulsion_on(
                 [x[i], y[i], z[i]],
                 -charge * mass[i],
@@ -776,8 +767,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
                 nodes.y[j] - nodes.y[i],
                 nodes.z[j] - nodes.z[i],
             );
-            // Only an edge past its own ceiling pays for the square root, and only the excess is
-            // stiffened.
+            // Only an edge past its ceiling pays for the square root.
             let ceiling = max * edge.weight().reach;
             let squared = dx * dx + dy * dy + dz * dz;
             let strength = if squared > ceiling * ceiling {
@@ -800,13 +790,11 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
     /// [`SimulationParameters::damping_factor`]: the forces push regardless, so what stops the
     /// layout is how much of the velocity they build it gets to keep.
     fn integrate(&mut self, dt: f32, damping: f32, free: [bool; 3]) {
-        // The accumulators hold force; one `dt` turns it into a velocity change and the other
-        // is the step it acts over.
+        // The accumulators hold force: one `dt` makes a velocity change, the other the step.
         let dv = dt * dt * self.parameters.node_speed;
         let n = self.nodes.len();
         let mobility = &self.nodes.mobility[..n];
-        // One axis at a time: fewer live streams per loop, so the vector registers hold the whole
-        // working set.
+        // One axis at a time, so the working set fits the vector registers.
         for (axis, (pos, vel, acc)) in [
             (&mut self.nodes.x, &mut self.nodes.vx, &self.nodes.ax),
             (&mut self.nodes.y, &mut self.nodes.vy, &self.nodes.ay),
@@ -838,7 +826,6 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
     fn constrain(&mut self, dt: f32) -> bool {
         let n = self.nodes.len();
         let mut reached = true;
-        // Fraction of the gap a constraint leaves behind this step.
         let retained = (-CONSTRAINT_RATE * dt).exp();
 
         if let Some(distance) = self.parameters.dag_level_distance {
@@ -871,7 +858,6 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         reached
     }
 
-    /// `None` for a node that has been removed.
     pub fn node(&self, idx: DefaultNodeIdx) -> Option<NodeRef<'_, UserNodeData>> {
         Some(NodeRef {
             index: idx,
@@ -1022,7 +1008,6 @@ impl<UserNodeData> NodeMut<'_, UserNodeData> {
         self.nodes.mass[self.slot] = mass;
     }
 
-    /// See [`ForceGraph::apply_force`].
     pub fn apply_force(&mut self, force: [f32; 3]) {
         self.rest.wake();
         self.nodes.add_force(self.slot, force);
@@ -1064,15 +1049,12 @@ fn repulsion_on(
         .min(limit.len());
     let (x, y, z, mass, limit) = (&x[..n], &y[..n], &z[..n], &mass[..n], &limit[..n]);
     let [tx, ty, tz] = target;
-    // One accumulator per lane. A single running total is a reduction LLVM may not reorder, and it
-    // refuses to vectorize rather than change the summation order.
+    // One accumulator per lane: LLVM will not reorder a single running sum to vectorize it.
     let mut fx = [0.0f32; LANES];
     let mut fy = [0.0f32; LANES];
     let mut fz = [0.0f32; LANES];
 
-    // Chunked rather than indexed by a running base: `&[[f32; LANES]]` carries the lane count in
-    // its type, so the loop needs no bounds check. LLVM does not prove that redundant for five
-    // slices indexed in step, and the check it leaves behind sits inside the vectorized loop.
+    // Chunked: LLVM leaves a bounds check in the loop for five slices indexed in step.
     let (xc, xr) = x.as_chunks::<LANES>();
     let (yc, yr) = y.as_chunks::<LANES>();
     let (zc, zr) = z.as_chunks::<LANES>();
@@ -1091,8 +1073,7 @@ fn repulsion_on(
             fz[l] += clamp_symmetric(dz * strength, ls[l]);
         }
     }
-    // At most `LANES - 1` of these, a bound the type carries, so this is peeled rather than
-    // looped.
+    // At most `LANES - 1`, a bound the type carries, so this is peeled.
     for ((((&px, &py), &pz), &m), &l) in xr.iter().zip(yr).zip(zr).zip(mr).zip(lr) {
         let (dx, dy, dz) = (px - tx, py - ty, pz - tz);
         let strength = charge_target * m * inv_cube(dx * dx + dy * dy + dz * dz);
@@ -1135,8 +1116,7 @@ fn clamp_symmetric(v: f32, limit: f32) -> f32 {
     }
 }
 
-// Both are compiled everywhere so that either can be tested from one host; only the architecture's
-// own is reachable from the kernel.
+// Both compile everywhere so either is testable from one host.
 #[allow(dead_code)]
 #[inline(always)]
 fn clamp_ieee(v: f32, limit: f32) -> f32 {
@@ -1175,15 +1155,12 @@ fn constrain_axis(
         .min(targets.len());
     let mut reached = true;
     for i in 0..n {
-        // An anchor - and a free slot - holds its coordinate against the constraint too.
         if mobility[i] == 0.0 {
             continue;
         }
-        // Without slack the band is the target itself, so a node is inside it only on arrival.
         let target = pos[i].clamp(targets[i] - slack, targets[i] + slack);
         if pos[i] == target {
-            // Inside the band the axis belongs to the forces: zeroing the velocity here would
-            // bleed off the motion that does the stacking.
+            // Inside the band the forces own the axis; zeroing velocity would stop the stacking.
             continue;
         }
         pos[i] += (target - pos[i]) * (1.0 - retained);
@@ -1280,7 +1257,6 @@ mod test {
 
     #[test]
     fn repulsion_separates_on_every_axis() {
-        // Every axis has to be free for the forces to be visible on it.
         let mut graph = <ForceGraph>::new(SimulationParameters {
             dag_level_distance: None,
             ..Default::default()
@@ -1525,7 +1501,6 @@ mod test {
     fn two_dimensions_collapse_onto_the_plane() {
         let mut graph = <ForceGraph>::new(SimulationParameters {
             dimensions: Dimensions::Two,
-            // Only the plane constraint is under test: layering would pin y as well.
             dag_level_distance: None,
             ..Default::default()
         });
@@ -1561,8 +1536,7 @@ mod test {
             });
             for i in 0..48 {
                 graph.add_node(NodeData {
-                    // Crowded well inside one layer's spacing, which is the state a rescatter
-                    // leaves and the one the forces answer hardest.
+                    // Crowded, as a rescatter leaves it.
                     x: ((i * 37) % 41) as f32,
                     y: ((i * 53) % 41) as f32,
                     z: ((i * 71) % 41) as f32,
@@ -1578,7 +1552,6 @@ mod test {
             }
             positions(&graph)
         };
-        // Three seconds either way: one step a frame, and the three a stalled frame is allowed.
         assert_eq!(
             run(FIXED_STEP, 180),
             run(FIXED_STEP * MAX_STEPS_PER_UPDATE as f32, 60)
@@ -1659,8 +1632,6 @@ mod test {
             });
         }
 
-        // Within the window rather than at the end of it: the layout stops as soon as what is
-        // left of the damping can no longer carry it, which is before the damping reaches zero.
         let steps = settle(&mut graph, 10_000);
         assert!(steps <= (budget / dt).ceil() as usize, "{steps}");
         let resting = positions(&graph);
@@ -1694,8 +1665,6 @@ mod test {
                 }
                 graph.update(dt);
             }
-            // The grabbed node excluded: what is measured is how much of the stored expansion the
-            // touch released.
             positions(&graph)
                 .iter()
                 .zip(&resting)
@@ -1728,14 +1697,11 @@ mod test {
             ..Default::default()
         });
 
-        // Held for twice the budget: a force every step means it never gets to settle.
         for _ in 0..steps * 2 {
             graph.apply_force(held, [50.0, 0.0, 0.0]);
             graph.update(dt);
             assert!(!graph.is_settled());
         }
-        // Let go, then disturb it once more so the window starts from zero here rather than
-        // from the step above.
         graph.apply_force(held, [50.0, 0.0, 0.0]);
         assert!(settle(&mut graph, 10_000) <= steps);
     }
@@ -1760,8 +1726,7 @@ mod test {
     fn a_collapsing_layout_is_not_settled() {
         let mut graph = <ForceGraph>::new(SimulationParameters {
             dimensions: Dimensions::Two,
-            // Nothing but the constraint moves this graph, so speed alone would settle it at
-            // the first step.
+            // Otherwise speed alone would settle it at the first step.
             force_charge: 0.0,
             ..converge()
         });
@@ -1808,8 +1773,7 @@ mod test {
         for i in 0..8 {
             graph.add_node(NodeData {
                 x: i as f32 * 10.0,
-                // A column of nodes sharing a y has no y force to spread it: the band is filled
-                // from a seed, not from nothing. The app scatters its layout for the same reason.
+                // Nodes sharing a y have no y force to spread them.
                 y: 1000.0 + (i % 4) as f32,
                 level: 1.0,
                 ..Default::default()
@@ -1820,8 +1784,7 @@ mod test {
             graph.update(FIXED_STEP);
         }
         let ys: Vec<f32> = positions(&graph).iter().map(|p| p[1]).collect();
-        // The band is a soft edge, not a wall: a node under load sits a little past it. See
-        // [`SimulationParameters::dag_level_slack`].
+        // Soft edge: see [`SimulationParameters::dag_level_slack`].
         assert!(ys.iter().all(|y| (y - 1000.0).abs() <= 220.0), "{ys:?}");
         let spread = ys.iter().fold(0.0f32, |a, y| a.max((y - 1000.0).abs()));
         assert!(spread > 1.0, "{ys:?}");
@@ -1842,8 +1805,7 @@ mod test {
             });
             let hub = graph.add_node(Default::default());
             for i in 0..16 {
-                // Seeded off the hub in different directions: a star started from one point has
-                // no offset for the repulsion to act along.
+                // A star from one point has no offset for repulsion to act along.
                 let leaf = graph.add_node(NodeData {
                     x: (i % 4) as f32,
                     y: (i / 4) as f32,
@@ -1871,16 +1833,12 @@ mod test {
 
         let held = star(Some(CEILING), 1.0);
         let free = star(None, 1.0);
-        // Soft, like the layer band: an edge under this much load settles somewhat past the
-        // ceiling. See [`OVERSTRETCH_STIFFNESS`].
+        // Soft: see [`OVERSTRETCH_STIFFNESS`].
         assert!(held < CEILING * 1.3, "{held}");
         assert!(free > held * 1.5, "{free} vs {held}");
-        // Reach is a multiple of the ceiling, so half again as much room seats the same star
-        // half again as far out.
         let roomier = star(Some(CEILING), 1.5);
         assert!(roomier > held * 1.3, "{roomier} vs {held}");
         assert!(roomier < CEILING * 1.5 * 1.3, "{roomier}");
-        // An exempt edge is laid out as though no ceiling had been set at all.
         assert_eq!(star(Some(CEILING), f32::INFINITY), free);
     }
 
@@ -1895,7 +1853,7 @@ mod test {
             .map(|i| {
                 graph.add_node(NodeData {
                     x: i as f32 * 10.0,
-                    // Deliberately not the y the layer names: the constraint has to place it.
+                    // Not the layer's y: the constraint has to place it.
                     y: 500.0,
                     level: i as f32,
                     ..Default::default()
@@ -1927,8 +1885,7 @@ mod test {
             }
             panic!("never settled");
         }
-        // Several nodes to a layer, so that lifting the layering leaves the forces something
-        // to do: they spread the layers apart along the axis the constraint was holding.
+        // Several nodes per layer, so lifting the layering leaves the forces work.
         fn layered() -> ForceGraph {
             let mut graph = <ForceGraph>::new(SimulationParameters {
                 dag_level_distance: Some(100.0),

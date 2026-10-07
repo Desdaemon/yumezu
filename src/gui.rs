@@ -36,7 +36,7 @@ impl Gui {
     ) -> Self {
         use std::ops::Deref as _;
 
-        // The arguments `three_d`'s own `GUI` passes: no shader prefix, sniffed version, dither.
+        // Same as `three_d`'s `GUI`: no shader prefix, sniffed version, dither.
         let painter = egui_glow::Painter::new(context.deref().clone(), "", None, true)
             .expect("egui's painter could not be built on the window's context");
         let ctx = egui::Context::default();
@@ -44,7 +44,7 @@ impl Gui {
             ctx.clone(),
             egui::ViewportId::ROOT,
             event_loop,
-            // Pixels-per-point, which `take_egui_input` reads off the window every frame anyway.
+            // Pixels-per-point, which `take_egui_input` reads every frame.
             None,
             event_loop.system_theme(),
             Some(painter.max_texture_side()),
@@ -67,7 +67,6 @@ impl Gui {
         &self.ctx
     }
 
-    /// See [`Gui::repaint_after`].
     pub(crate) fn repaint_after(&self) -> std::time::Duration {
         self.repaint_after
     }
@@ -83,7 +82,7 @@ impl Gui {
         self.agent.lend_focus(&mut self.state);
 
         let input = self.state.take_egui_input(window);
-        // Only the root viewport is read: this app opens one window and never opens another.
+        // This app opens only the root viewport.
         let output = self.ctx.run_ui(input, run_ui);
         self.repaint_after = output
             .viewport_output

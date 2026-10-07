@@ -108,8 +108,7 @@ pub fn dream_tree() -> Vec<Place> {
             ],
         ),
         ("Hollow Carnival", vec![free(12), free(14)]),
-        // The only way in to Ember Terrace, and its words name Ember Terrace: a condition only a
-        // player already there could meet, which is what `Gate::Revisit` is.
+        // Only a player already in Ember Terrace can meet it: `Gate::Revisit`.
         (
             "Glass Aviary",
             vec![cond(13, "having been to Ember Terrace")],

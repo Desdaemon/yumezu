@@ -11,8 +11,7 @@ use crate::LANES;
 const LEAF_CAPACITY: usize = LANES * 4;
 /// Coincident bodies would subdivide forever. At this depth the leaf keeps them all instead.
 const MAX_DEPTH: u32 = 20;
-/// Absent child.
-const NIL: u32 = u32::MAX;
+const NO_CHILD: u32 = u32::MAX;
 
 #[derive(Default)]
 pub(crate) struct Octree {
@@ -20,8 +19,7 @@ pub(crate) struct Octree {
     com_y: Vec<f32>,
     com_z: Vec<f32>,
     mass: Vec<f32>,
-    /// How many pair interactions the cell stands in for.
-    count: Vec<f32>,
+    pair_count: Vec<f32>,
     /// Full width of the cell, for the `width / distance < theta` acceptance test.
     width: Vec<f32>,
     children: Vec<[u32; 8]>,
@@ -32,8 +30,7 @@ pub(crate) struct Octree {
     is_leaf: Vec<bool>,
     /// Live body slots, ordered so that every leaf owns one contiguous run.
     order: Vec<u32>,
-    /// Reused by the octant partition.
-    partition: Vec<u32>,
+    partition_scratch: Vec<u32>,
 }
 
 impl Octree {
@@ -44,7 +41,7 @@ impl Octree {
         self.com_y.clear();
         self.com_z.clear();
         self.mass.clear();
-        self.count.clear();
+        self.pair_count.clear();
         self.width.clear();
         self.children.clear();
         self.bodies.clear();
@@ -73,17 +70,15 @@ impl Octree {
             (lo[1] + hi[1]) * 0.5,
             (lo[2] + hi[2]) * 0.5,
         ];
-        // A cube, so one width per cell describes it. Never zero: a degenerate cube would make
-        // the acceptance test accept every cell at any distance.
+        // Never zero: a degenerate cube would pass the acceptance test at any distance.
         let width = (hi[0] - lo[0])
             .max(hi[1] - lo[1])
             .max(hi[2] - lo[2])
             .max(f32::MIN_POSITIVE);
 
-        // Moved out so the recursion can hold a mutable sub-slice of `order` while it pushes
-        // cells into the arrays.
+        // Taken so the recursion can borrow `order` mutably while pushing cells.
         let mut order = std::mem::take(&mut self.order);
-        let mut partition = std::mem::take(&mut self.partition);
+        let mut partition = std::mem::take(&mut self.partition_scratch);
         self.build_cell(
             &mut order,
             &mut partition,
@@ -97,7 +92,7 @@ impl Octree {
             mass,
         );
         self.order = order;
-        self.partition = partition;
+        self.partition_scratch = partition;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -116,7 +111,7 @@ impl Octree {
     ) -> u32 {
         let cell = self.width.len();
         self.width.push(width);
-        self.children.push([NIL; 8]);
+        self.children.push([NO_CHILD; 8]);
         self.bodies.push((offset, order.len() as u32));
         self.is_leaf.push(false);
 
@@ -134,7 +129,7 @@ impl Octree {
         self.com_y.push(cy * inv_total);
         self.com_z.push(cz * inv_total);
         self.mass.push(total);
-        self.count.push(order.len() as f32);
+        self.pair_count.push(order.len() as f32);
 
         if order.len() <= LEAF_CAPACITY || depth >= MAX_DEPTH {
             self.is_leaf[cell] = true;
@@ -216,33 +211,27 @@ impl Octree {
         }
         let theta_sqrd = theta * theta;
         let (query_start, _) = self.bodies[query];
-        out.stack.push(0);
-        while let Some(cell) = out.stack.pop() {
+        out.traversal_stack.push(0);
+        while let Some(cell) = out.traversal_stack.pop() {
             let cell = cell as usize;
             let com = [self.com_x[cell], self.com_y[cell], self.com_z[cell]];
-            // Distance from the center of mass to the box: zero on any axis where it lies
-            // between the bounds.
             let mut distance_sqrd = 0.0;
             for axis in 0..3 {
                 let gap = (lo[axis] - com[axis]).max(com[axis] - hi[axis]).max(0.0);
                 distance_sqrd += gap * gap;
             }
             let width = self.width[cell];
-            // The acceptance test cannot recognize an enclosing cell on its own: it measures from
-            // the center of mass, which can lie outside the box while the cell encloses it, and a
-            // cell of coincident bodies has no width to fail the test with.
+            // The center of mass may lie outside an enclosing box; coincident bodies have no width.
             let (start, count) = self.bodies[cell];
             let encloses_query = start <= query_start && query_start < start + count;
             if !encloses_query && width * width < theta_sqrd * distance_sqrd {
-                // The aggregate replaces `count` pairs the exact pass would each have clamped to
-                // `force_max`, so its own limit is `count` times that. Clamping it as one pair is
-                // what makes an aggregate under-report a crowded cell.
+                // Stands for `count` pairs, each clamped to `force_max`.
                 out.push(
                     com[0],
                     com[1],
                     com[2],
                     self.mass[cell],
-                    force_max * self.count[cell],
+                    force_max * self.pair_count[cell],
                 );
                 continue;
             }
@@ -255,8 +244,8 @@ impl Octree {
                 }
                 None => {
                     for &child in &self.children[cell] {
-                        if child != NIL {
-                            out.stack.push(child);
+                        if child != NO_CHILD {
+                            out.traversal_stack.push(child);
                         }
                     }
                 }
@@ -311,8 +300,7 @@ pub(crate) struct Interactions {
     pub mass: Vec<f32>,
     /// Largest force, per component, that the entry may contribute.
     pub limit: Vec<f32>,
-    /// Traversal stack, kept here so a walk allocates nothing.
-    stack: Vec<u32>,
+    traversal_stack: Vec<u32>,
 }
 
 impl Interactions {
@@ -322,7 +310,7 @@ impl Interactions {
         self.z.clear();
         self.mass.clear();
         self.limit.clear();
-        self.stack.clear();
+        self.traversal_stack.clear();
     }
 
     fn push(&mut self, x: f32, y: f32, z: f32, mass: f32, limit: f32) {

@@ -19,8 +19,6 @@ pub use links::*;
 pub use net::*;
 
 use serde::Deserialize;
-// The connection and the walk are the routing crate's, so the program that publishes the dump
-// reads them exactly as this one does.
 use yumezu_routing::walkable_steps;
 pub use yumezu_routing::{
     Conditions, Connection, Demand, Gate, Routes, Step, Way, connections, hub_world, origin_world,
@@ -288,8 +286,7 @@ impl Code {
     pub fn typed(&mut self, key: char) {
         self.at = match MYSTERY_TEXT.chars().nth(self.at) == Some(key) {
             true => self.at + 1,
-            // Begun again from this key rather than from the next: a false start is usually the
-            // code's own first key struck twice.
+            // A false start is usually the code's first key struck twice.
             false => usize::from(MYSTERY_TEXT.starts_with(key)),
         };
         if self.at == MYSTERY_TEXT.len() {
@@ -350,8 +347,7 @@ fn retain(worlds: &mut Vec<World>, keep: &[bool]) {
     });
     for world in worlds.iter_mut() {
         world.connections.retain_mut(|connection| {
-            // `flatten` covers a connection into a dropped world and one out of the dump
-            // altogether, which would be a dump disagreeing with itself.
+            // `flatten` covers a dropped target and one missing from the dump.
             match at.get(connection.target_id).copied().flatten() {
                 Some(target) => {
                     connection.target_id = target;
@@ -396,7 +392,6 @@ impl Dump {
             .iter()
             .map(|world| visited.contains(&world.title))
             .collect();
-        // Outward only: a connection the player could only come back through is not a way onward.
         let mut shown = been.clone();
         for (from, onward) in walkable_steps(&self.worlds).into_iter().enumerate() {
             if !been[from] {
@@ -423,8 +418,7 @@ impl Dump {
                 continue;
             }
             world.unknown = true;
-            // Everything that would name the place by another road: the wiki's captions say which
-            // world each map is of, and the full-size picture is the world itself.
+            // The captions and the full picture would name the world.
             world.image = String::new();
             world.map_url = None;
             world.map_label = None;
@@ -460,7 +454,7 @@ impl Dump {
             let key = same_release(added);
             let version = *at.entry(key.clone()).or_insert_with(|| {
                 let (name, released) = match rank.get(&key) {
-                    // The day alone: the dump times every release to midnight.
+                    // The dump times every release to midnight.
                     Some((_, release)) => (
                         release.name.clone(),
                         release
@@ -482,8 +476,7 @@ impl Dump {
             });
             versions[version].worlds.push(world);
         }
-        // Stable, so the releases the history does not carry -- all sorting last together -- keep
-        // the order the worlds named them in.
+        // Stable: releases missing from the history keep the worlds' order.
         versions.sort_by_key(|version| {
             rank.get(&same_release(&version.name))
                 .map_or(usize::MAX, |(at, _)| *at)
@@ -496,8 +489,7 @@ impl Dump {
     /// Busiest first, because only the first few are shown with nothing typed. Ties break by name,
     /// so the order is fixed rather than however the worlds happened to be listed.
     pub fn authors(&self) -> (Vec<Author>, Vec<usize>) {
-        // Only where the two differ: the dump repeats the English name for most people, which is
-        // nothing to show or search twice.
+        // The dump repeats the English name for most people.
         let jp: std::collections::HashMap<&str, &str> = self
             .credits
             .iter()
@@ -514,7 +506,6 @@ impl Dump {
                     name: Title {
                         en: by.author.clone(),
                         jp: jp.get(by.author.as_str()).map(|&name| name.to_owned()),
-                        // Only worlds are ever held back, never who made one.
                         unknown: false,
                     },
                     worlds: Vec::new(),
@@ -530,8 +521,7 @@ impl Dump {
                 .then_with(|| a.name.en.to_lowercase().cmp(&b.name.en.to_lowercase()))
         });
 
-        // After the sort, so a world names where its author ended up rather than where they were
-        // first met.
+        // After the sort, which renumbers authors.
         let mut author_of = vec![0; self.worlds.len()];
         for (author, by) in authors.iter().enumerate() {
             for &world in &by.worlds {

@@ -61,8 +61,7 @@ impl egui::Widget for Tile<'_> {
             trailing,
             hover,
         } = self;
-        // The title is what gives way when the row is too narrow for everything in it: what leads
-        // and trails a row is a glyph or two, and a truncated one says nothing at all.
+        // The title shrinks first: a truncated leading or trailing glyph says nothing.
         leading.push_right(egui::Atom::from(title).atom_shrink(true));
         leading.push_right(egui::Atom::grow());
         leading.extend_right(trailing);
@@ -81,18 +80,16 @@ impl egui::Widget for Tile<'_> {
         if !touch {
             return row.on_hover_text(hover);
         }
-        // A press that also pressed the row ends its own peek, what the text named being about to
-        // be gone. Only a hold long enough to stop being a click leaves the text standing.
+        // A click ends its own peek; only a hold past a click keeps the text.
         if row.clicked() {
             release_hover(ui.ctx());
             return row;
         }
         let pressing = row.is_pointer_button_down_on();
         if pressing {
-            // The wait ends on a frame no event would call for: a finger resting still sends none.
+            // A resting finger sends no events.
             ui.ctx().request_repaint();
         }
-        // Called up by the finger that is on the row now, or by one that was and has gone.
         let called_up = pressing && held_long_enough(&row);
         if called_up {
             let at = ui
@@ -110,14 +107,12 @@ impl egui::Widget for Tile<'_> {
         let Some(held) = held_hover(ui.ctx()).filter(|held| held.tile == row.id) else {
             return row;
         };
-        // Over the finger rather than the middle of the row, which runs the width of the panel.
-        // The row's own height still, so the text clears the row and not merely the touch.
+        // Over the finger, since the row spans the panel, and as tall as the row.
         let finger = egui::Rect::from_min_max(
             egui::pos2(held.at, row.rect.top()),
             egui::pos2(held.at, row.rect.bottom()),
         );
-        // `for_widget` rather than `for_enabled`, which would close the moment the finger lifted:
-        // what keeps this open is the hold, not egui's own reading of the pointer.
+        // `for_widget`: `for_enabled` closes as the finger lifts, and the hold keeps this open.
         let mut tooltip = egui::Tooltip::for_widget(&row).gap(HOVER_FINGER_GAP);
         tooltip.popup = tooltip
             .popup

@@ -17,10 +17,8 @@ const MANIFEST: &str = "https://github.com/Desdaemon/yumezu/releases/latest/down
 const PUBKEY: Option<&str> = option_env!("YUMEZU_UPDATE_PUBKEY");
 
 enum State {
-    /// Nobody has checked this run.
     Never,
     Checking,
-    /// Checked, and this build is the newest there is.
     Current,
     Ready(Box<Update>),
     Installing,
@@ -51,8 +49,6 @@ pub(super) fn controls(ui: &mut egui::Ui) {
                 *state = State::Checking;
                 check(pubkey);
             }
-            // Under the button rather than in it, like `fetch::clear`'s: the button says what it
-            // does, and this says what came of the last press.
             match &*state {
                 State::Current => {
                     ui.label(t!("update-current"));

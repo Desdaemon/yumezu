@@ -77,7 +77,6 @@ static PARTS: LazyLock<AtomicBool> = LazyLock::new(|| AtomicBool::new(named("par
 /// runs rebuilt every frame. It does not put back the pair of matrix products a dash used to cost
 /// -- see [`super::DashRun`] -- so it reads as a floor on the old cost.
 static EAGER: LazyLock<AtomicBool> = LazyLock::new(|| AtomicBool::new(named("eager")));
-/// See [`pan_aside`].
 static DOLLY: LazyLock<AtomicBool> = LazyLock::new(|| AtomicBool::new(named("dolly")));
 
 /// Vsync is settled when the surface is made, so unlike the switches above this has to outlive
@@ -128,7 +127,7 @@ pub(super) fn controls(ui: &mut egui::Ui) {
          and back once a report, so two windows differ by what they were drawing and nothing \
          else.",
     );
-    // Nothing to offer on a page: the browser paces the frames and keeps the pacing.
+    // The browser paces a page's frames.
     #[cfg(not(target_family = "wasm"))]
     {
         let mut unlock = super::store::read(UNLOCKED).as_deref() == Some("on");
@@ -182,7 +181,7 @@ mod answers {
     type Uiv = unsafe extern "C" fn(u32, u32, *mut u32);
     type Ui64v = unsafe extern "C" fn(u32, u32, *mut u64);
 
-    // SAFETY: the declaration is `dlsym`'s own, from `<dlfcn.h>`.
+    // SAFETY: the declaration is `dlsym`'s, from `<dlfcn.h>`.
     #[allow(unsafe_code)]
     unsafe extern "C" {
         fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
@@ -199,10 +198,9 @@ mod answers {
     #[allow(unsafe_code)]
     unsafe fn find<F: Copy>(name: &str) -> Option<F> {
         const { assert!(size_of::<F>() == size_of::<*mut c_void>()) };
-        // SAFETY: the handle is the documented constant, the name is nul terminated, and a
-        // symbol that is not there comes back null rather than as a fault.
+        // SAFETY: documented handle, nul-terminated name; a missing symbol is null.
         let found = unsafe { dlsym(LOADED, name.as_ptr().cast()) };
-        // SAFETY: the caller named the signature, and a function pointer is pointer sized.
+        // SAFETY: the caller gives the signature, and a function pointer is pointer sized.
         (!found.is_null()).then(|| unsafe { std::mem::transmute_copy(&found) })
     }
 
@@ -295,7 +293,7 @@ impl GpuClock {
     /// An empty set of queries is a driver that would not give them out, which costs the report a
     /// column and nothing else.
     fn new(context: &Context) -> Self {
-        // SAFETY: names no object and reads no memory. A refusal comes back as an error.
+        // SAFETY: names no object and reads no memory.
         #[allow(unsafe_code)]
         let queries = if readable(context) {
             (0..GPU_CLOCK_DEPTH)
@@ -320,8 +318,7 @@ impl GpuClock {
         if !self.ready() {
             return;
         }
-        // SAFETY: the query is this context's own and no other is open -- `end` closes each one
-        // before `begin` opens the next, and nothing else in the app opens one at all.
+        // SAFETY: the query is this context's, and `end` closes each before `begin` opens the next.
         #[allow(unsafe_code)]
         unsafe {
             self.context.begin_query(
@@ -338,20 +335,17 @@ impl GpuClock {
         if !self.ready() {
             return None;
         }
-        // SAFETY: `begin` opened this context's query, and every object named below is its own.
+        // SAFETY: `begin` opened this context's query, and every object below is its own.
         #[allow(unsafe_code)]
         unsafe {
             self.context.end_query(TIME_ELAPSED)
         };
         self.begun += 1;
-        // Nothing has gone all the way round yet, so the slot below holds a query never begun and
-        // an answer that would read as an instant frame.
+        // Before the ring fills, the slot holds a never-begun query.
         if self.begun < GPU_CLOCK_DEPTH {
             return None;
         }
-        // The slot about to be written next is the oldest written, the frame `GPU_CLOCK_DEPTH`
-        // back. Asked whether it is ready, never for the answer, which would stall on the GPU
-        // being timed.
+        // The next slot is the oldest; only its readiness is queried, as the answer stalls the GPU.
         let oldest = self.queries[self.begun % GPU_CLOCK_DEPTH];
         #[allow(unsafe_code)]
         unsafe {
@@ -528,8 +522,7 @@ impl FrameStats {
                 format!("{:.2}", 1e3 * ninety_ninth),
                 format!("{:.2}", 1e3 * worst),
                 format!("{:.2}", 1e3 * layout / frames as f64),
-                // A dash where the GPU was not timed: queries refused, or the passes have the
-                // clock.
+                // A dash where the GPU was not timed.
                 match answered {
                     0 => "-".to_string(),
                     answered => format!("{:.2}", 1e3 * gpu / answered as f64),
@@ -568,8 +561,7 @@ pub(super) fn pan_aside(statics: &mut AppStatics, data: &AppEntities) -> bool {
     if !DOLLY.load(Ordering::Relaxed) {
         return false;
     }
-    // Held off while the layout is still blowing out from its seed, which is not a view anybody
-    // looks at and not one worth timing -- nor one worth framing, the sphere still growing.
+    // Skips the seed blow-out, which nobody views.
     static SINCE: std::sync::OnceLock<web_time::Instant> = std::sync::OnceLock::new();
     let waited = SINCE
         .get_or_init(web_time::Instant::now)
@@ -579,15 +571,13 @@ pub(super) fn pan_aside(statics: &mut AppStatics, data: &AppEntities) -> bool {
     if waited < 0.0 {
         return true;
     }
-    // Set on the first frame past the settle, and only once there is a graph to frame: a dump that
-    // has not landed yet has no sphere, and latching that would leave the run pointed at nothing.
+    // Latched only once a graph exists, or the run would point at nothing.
     static FRAMED: std::sync::OnceLock<(Vec3, Vec3, f32)> = std::sync::OnceLock::new();
     let (eye, at, radius) = match FRAMED.get() {
         Some(framed) => *framed,
         None => {
             let framed = match named_pose() {
-                // A pose named by hand is the whole instruction, so the reach comes from how far
-                // the camera stands off its target and stays in proportion to the view.
+                // A pose by hand sets the reach from the camera's distance to its target.
                 Some((eye, at)) => (eye, at, (eye - at).magnitude()),
                 None => {
                     let Some(bounds) = data.whole_bounds() else {
@@ -606,8 +596,7 @@ pub(super) fn pan_aside(statics: &mut AppStatics, data: &AppEntities) -> bool {
         }
     };
     let step = (waited / FRAME_STATS_SECONDS) as u32;
-    // A triangle over the reach: 0 out to one side over a quarter of the reports, back through the
-    // middle to the other side over a half, and home over the last quarter.
+    // A triangle wave over the reach.
     let span = PAN_ASIDE_REPORTS / 4.0;
     let phase = step as f32 % PAN_ASIDE_REPORTS;
     let units = match phase {
@@ -616,8 +605,7 @@ pub(super) fn pan_aside(statics: &mut AppStatics, data: &AppEntities) -> bool {
         phase => phase - PAN_ASIDE_REPORTS,
     };
     let aside = radius * PAN_ASIDE_REACH * units / span;
-    // Once a step rather than once a frame: a browser charges for a console line, so a line per
-    // frame would have made every window read slower than the frame it was timing.
+    // Once a step: a browser console line per frame would slow the frames it times.
     static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     if SAID.swap(step + 1, Ordering::Relaxed) != step + 1 {
         log::info!("{aside:.0} units aside of {radius:.0}");

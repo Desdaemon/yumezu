@@ -170,7 +170,7 @@ fn client() -> reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            // `rustls-no-provider` leaves this to the process, and reqwest panics without it.
+            // reqwest panics without a process-wide provider.
             let _ = rustls::crypto::ring::default_provider().install_default();
             reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
@@ -191,8 +191,7 @@ mod tests {
         .expect("the session is passed on");
         assert_eq!(
             resettled.to_str().unwrap(),
-            // The root, because the page fetches under paths of its own; no domain, so it belongs
-            // to whoever served it.
+            // No domain, so it belongs to whoever served it.
             "auth=s3cr3t; Path=/; Max-Age=2592000; HttpOnly; Secure; SameSite=None"
         );
     }

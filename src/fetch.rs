@@ -22,7 +22,7 @@ impl<T> Pending<T> {
 pub fn spawn<T: Send + 'static>(
     work: impl std::future::Future<Output = T> + Send + 'static,
 ) -> Pending<T> {
-    // One runtime serves every load, built on the first because most runs fetch nothing at all.
+    // Built lazily: most runs fetch nothing.
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     let slot = Pending(Arc::default());
     let into = slot.0.clone();
@@ -47,20 +47,16 @@ pub fn spawn<T: 'static>(work: impl std::future::Future<Output = T> + 'static) -
 /// from `reqwest`'s own so `?` still reaches it.
 #[cfg(not(target_family = "wasm"))]
 pub type Client = reqwest_middleware::ClientWithMiddleware;
-/// See [`Client`].
 #[cfg(target_family = "wasm")]
 pub type Client = reqwest::Client;
 /// Named so a caller can hand a half-built request on before sending it -- see `yno`'s
 /// `session::sign`. Aliased for the reason in [`Client`].
 #[cfg(not(target_family = "wasm"))]
 pub type RequestBuilder = reqwest_middleware::RequestBuilder;
-/// See [`RequestBuilder`].
 #[cfg(target_family = "wasm")]
 pub type RequestBuilder = reqwest::RequestBuilder;
-/// See [`Client`].
 #[cfg(not(target_family = "wasm"))]
 pub type Error = reqwest_middleware::Error;
-/// See [`Client`].
 #[cfg(target_family = "wasm")]
 pub type Error = reqwest::Error;
 
@@ -80,7 +76,6 @@ pub fn client() -> Client {
     CLIENT.get_or_init(build).clone()
 }
 
-/// A whole response body, for a caller wanting bytes rather than a document.
 pub async fn bytes(url: &str) -> Result<Vec<u8>, Error> {
     Ok(client()
         .get(url)
@@ -97,7 +92,7 @@ pub async fn bytes(url: &str) -> Result<Vec<u8>, Error> {
 #[cfg(not(target_family = "wasm"))]
 fn build() -> Client {
     let mut middleware = reqwest_middleware::ClientBuilder::new(transport()).with(judged);
-    // Skipped rather than fatal: a run with no cache fetches everything it needs anyway.
+    // A run with no cache fetches everything anyway.
     match cache() {
         Some(cache) => middleware = middleware.with(cache),
         None => log::warn!("downloads will not be cached between runs"),
@@ -144,14 +139,11 @@ fn judged<'a>(
 
 #[cfg(not(target_family = "wasm"))]
 fn transport() -> reqwest::Client {
-    // `rustls-no-provider` leaves this to the process, and reqwest panics without it.
+    // reqwest panics without a process-wide provider.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let builder = reqwest::Client::builder();
-    // reqwest 0.13 made `rustls-platform-verifier` its one way to check a certificate, and that
-    // verifier reaches the system trust store through a Java class which must be in the apk and
-    // initialised over JNI. This apk has no Java in it -- see `android/build.sh` -- so the call
-    // would panic on the first picture fetched. Compiled-in roots instead, at the cost of only
-    // changing when a build does. <https://github.com/seanmonstar/reqwest/pull/2891>
+    // The platform verifier needs a Java class this apk lacks.
+    // <https://github.com/seanmonstar/reqwest/pull/2891>
     #[cfg(target_os = "android")]
     let builder =
         builder.tls_certs_only(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().map(|root| {
@@ -208,7 +200,6 @@ fn store() -> Option<&'static http_cache_reqwest::RedbManager> {
 #[cfg(not(target_family = "wasm"))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Cleared {
-    /// Nobody has cleared it this run.
     Never,
     Clearing,
     Done,
@@ -241,8 +232,7 @@ pub fn clear() {
     spawn(async {
         let outcome = match store() {
             Some(store) => store.clear().await.map_err(|error| error.to_string()),
-            // Really a failure of [`cache`], which said so when it could not be opened, but
-            // reported the same way: there is still nothing kept.
+            // [`cache`] already logged that it could not open.
             None => Err("there is no cache to clear".to_owned()),
         };
         *CLEARED.lock().unwrap() = match outcome {

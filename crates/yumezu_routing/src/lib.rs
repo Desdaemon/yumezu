@@ -40,7 +40,6 @@ bitflags::bitflags! {
         const ISOLATED = 1 << 5;
         /// Open only to a player wearing particular effects.
         const EFFECT = 1 << 6;
-        /// Open at random.
         const CHANCE = 1 << 7;
         /// Open only once something else has happened, which the wiki writes out as a sentence.
         const LOCKED_CONDITION = 1 << 8;
@@ -267,9 +266,7 @@ impl Gate {
 /// there is no way to walk, which is what makes a connection one-way.
 pub struct Step {
     pub world: usize,
-    /// `None` where there is no way there.
     pub out: Option<Conditions>,
-    /// `None` where there is no way back.
     pub back: Option<Conditions>,
 }
 
@@ -304,13 +301,12 @@ pub fn connections(worlds: &[impl World]) -> Vec<Vec<Step>> {
     for (from, world) in worlds.iter().enumerate() {
         for connection in world.connections() {
             let to = connection.target_id;
-            // A world connected to itself is no way anywhere.
             if to != from && to < worlds.len() && !joined[from].contains(&to) {
                 joined[from].push(to);
             }
         }
     }
-    // The same connections again from the far side, for the world that did not list them itself.
+    // The same connections from the far side, for worlds that did not list them.
     for (from, world) in worlds.iter().enumerate() {
         for connection in world.connections() {
             let to = connection.target_id;
@@ -368,7 +364,7 @@ pub fn walkable_steps(worlds: &[impl World]) -> Vec<Vec<(usize, Conditions)>> {
                 steps[from].push((to, connection.conditions().first_visit(worlds[to].title())));
             }
             if !listed.contains(&(to, from)) && !flags.contains(ConnType::ONE_WAY) {
-                // No words: the wiki wrote none for a direction it did not list at all.
+                // The wiki wrote no words for an unlisted direction.
                 let back = Conditions::just(match flags.contains(ConnType::UNLOCK) {
                     true => Gate::Locked,
                     false => Gate::Free,
@@ -420,8 +416,6 @@ mod tests {
             .collect()
     }
 
-    // Every demand is listed, so a reader is told all of them, and the harshest leads, so what
-    // orders a route does not understate what the player has to have done.
     #[test]
     fn a_connection_lists_every_demand_harshest_first() {
         let all_of = |flags| Gate::all_of(flags).collect::<Vec<_>>();
@@ -442,9 +436,7 @@ mod tests {
         );
     }
 
-    // The dump writes a word list per flag, so a connection that is locked *and* wants an effect
-    // has words only for the effect. Losing them to the harsher demand would leave the reader with
-    // a lock and no idea what else the way wants.
+    // The dump writes words per flag, so a locked effect gate has words only for the effect.
     #[test]
     fn a_connection_keeps_the_words_of_every_demand() {
         let connection = Connection {
@@ -491,8 +483,7 @@ mod tests {
         assert!(order.is_sorted());
     }
 
-    // A condition a player can only meet by already standing where it leads is no way in, and the
-    // wiki writes no flag for it -- only the sentence.
+    // The wiki writes no flag for this, only the sentence.
     #[test]
     fn a_condition_naming_where_it_leads_is_not_a_way_in() {
         let one = |gate, detail: &str| {
@@ -542,7 +533,6 @@ mod tests {
             ),
             place("Lantern Causeway", vec![conn(2, ConnType::empty())]),
             place("Mural Vestibule", vec![conn(3, ConnType::EFFECT)]),
-            // Walking out of here is what opens the way back in, so the shorter way is locked.
             place("Ember Terrace", vec![conn(4, ConnType::UNLOCK)]),
             place("Chalk Observatory", vec![]),
         ];
@@ -586,7 +576,6 @@ mod tests {
             &["Nexus", "Sofa Room", "Far Room"],
             ConnType::NO_ENTRY,
         ));
-        // Every listed step is one-way *into* the world listing it: nothing leads onward.
         assert_eq!(routes_toward(&joined, 2).depth[0], None);
     }
 }

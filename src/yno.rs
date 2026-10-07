@@ -34,13 +34,11 @@ const API_PATH: &str = "/yno";
 #[cfg(target_family = "wasm")]
 const AUTH_PATH: &str = "/ynoauth";
 
-// What [`session`] leaves between runs, which is not the same thing on both platforms.
 const SESSION: &str = "yno-session";
 /// Named only where this app is the one carrying it: on the page it is the browser's, and nothing
 /// here ever writes it out.
 #[cfg(not(target_family = "wasm"))]
 const COOKIE: &str = "auth";
-// Present for on, absent for off.
 const FRONTIER: &str = "frontier";
 
 /// As the wiki writes them: names rather than either side's numbering, that being the only thing
@@ -103,9 +101,7 @@ impl Account {
             return;
         };
         self.pending = None;
-        // A refresh that turned nothing up is not a change: rebuilding would throw away a layout
-        // and a selection for the same picture. An answer landing on top of a pretence always is,
-        // putting back a world the pretence had taken the graph past.
+        // An unchanged refresh keeps the layout; an answer always replaces a pretence.
         let mut changed = !self.pretended.is_empty();
         self.pretended.clear();
         match answer {
@@ -119,16 +115,14 @@ impl Account {
             }
             Err(error) => {
                 log::warn!("cannot read what this account has seen: {error}");
-                // In ordinary use this is a session that has run out; keeping it would only fail
-                // again on the next run.
+                // Usually an expired session, which would fail again next run.
                 store::write(SESSION, None);
                 self.session = None;
                 self.visited = None;
                 self.failed = Some(error);
             }
         }
-        // A failure may be what took a frontier away. Only while the switch is on: with it off the
-        // graph is the whole game.
+        // A failure may have taken a frontier away; with the switch off there is none.
         self.restated |= self.frontier && changed;
     }
 
@@ -148,7 +142,7 @@ impl Account {
         self.pending = None;
         self.failed = None;
         self.pretended.clear();
-        // See [`Account::poll`] for why the switch is what settles this.
+        // See [`Account::poll`].
         self.restated |= self.frontier;
     }
 
@@ -183,7 +177,6 @@ impl Account {
         }
         self.frontier = frontier;
         store::write(FRONTIER, frontier.then_some(""));
-        // Turning the switch on before an account has been read changes nothing yet.
         self.restated |= self.visited.is_some();
     }
 
@@ -192,7 +185,6 @@ impl Account {
     /// Nothing is sent and nothing written down, so the pretence goes with the run, the sign-out or
     /// the next answer. Kept out of [`Account::visited`], which the reported completion reads.
     pub fn pretend(&mut self, title: String) {
-        // The graph is already drawn as though this had happened.
         let known = self
             .visited
             .as_ref()
@@ -201,7 +193,6 @@ impl Account {
             return;
         }
         log::info!("pretending {title} has been visited");
-        // Without an account there is no frontier for a pretence to be part of.
         self.restated |= self.frontier && self.visited.is_some();
     }
 
@@ -260,7 +251,6 @@ fn api() -> &'static str {
     }
 }
 
-/// See [`api`].
 fn auth() -> &'static str {
     #[cfg(not(target_family = "wasm"))]
     return AUTH;
@@ -317,8 +307,7 @@ async fn login(user: &str, password: &str) -> Result<String, String> {
     let issued = session::issued(&response);
     let status = response.status();
     if !status.is_success() {
-        // The service writes a short reason for the ordinary failures. Anything longer is a page
-        // rather than a reason, and the status is all of it worth showing.
+        // The service writes a short reason for ordinary failures; a longer body is a page.
         let said = response.text().await.unwrap_or_default();
         return Err(match said.trim() {
             reason if !reason.is_empty() && reason.len() < 120 => reason.to_owned(),
@@ -382,7 +371,6 @@ mod session {
 
     #[cfg(test)]
     mod tests {
-        // The sign-in sets more than one cookie, and only one of them is the session.
         #[test]
         #[cfg(not(target_family = "wasm"))]
         fn the_session_is_read_out_of_the_cookie_that_carries_it() {
@@ -402,9 +390,7 @@ async fn visited(session: &str) -> Result<Visited, String> {
         .iter()
         .filter_map(|id| named.get(id).cloned())
         .collect();
-    // The two lists are kept by different people out of the same wiki, so a place YNOproject knows
-    // and the dump does not is ordinary. A run where nearly none line up is drawing the wrong
-    // thing, and nothing else would show it.
+    // The two lists are maintained apart, so few mismatches are ordinary and near-total ones a bug.
     if visited.len() < seen.len() {
         log::info!(
             "{} of the {} places visited are not worlds this draws",
@@ -444,7 +430,7 @@ async fn seen(session: &str) -> Result<Vec<u64>, String> {
     serde_json::from_str::<Info>(&said)
         .map_err(|error| format!("{url} is not an account: {error}"))?
         .location_ids
-        // Answered, but with nothing about an account: an expired session.
+        // An expired session.
         .ok_or_else(|| t!("yno-signed-out"))
 }
 

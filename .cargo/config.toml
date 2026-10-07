@@ -1,13 +1,10 @@
-# The force-graph hot loops are written to auto-vectorize. wasm SIMD is not on by default, and
-# without it the browser build runs them one lane at a time.
+# Without SIMD the auto-vectorized force-graph loops run one lane at a time.
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "target-feature=+simd128"]
-# The tests run in a real browser, which is the only place the shipping target can run at all.
-# `wasm-bindgen-test-runner` ships with the CLI and must be the same version as the crate.
+# Must match the `wasm-bindgen` crate version.
 runner = "wasm-bindgen-test-runner"
 
-# `just test-wasm`. The shipping target cannot run a test binary without a JS host, and this one is
-# the same backend, feature and lane width.
+# `just test-wasm`: same backend and lane width as the page, without needing a JS host.
 [target.wasm32-wasip2]
 rustflags = ["-C", "target-feature=+simd128"]
 runner = "wasmtime"

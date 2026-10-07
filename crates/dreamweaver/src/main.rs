@@ -44,11 +44,9 @@ mod store;
 mod sync;
 mod versions;
 
-/// Where the dump is kept, and so what a run with no `--data` reads and writes.
-const DATA: &str = "data.json";
+const DEFAULT_DATA: &str = "data.json";
 
-/// Where the server listens with no `--listen`.
-const LISTEN: &str = "127.0.0.1:5000";
+const DEFAULT_LISTEN: &str = "127.0.0.1:5000";
 
 /// A pass that finds the wiki unmoved costs one small request, so this is set by how soon an edit
 /// should show. It is also the window each pass queries over, so a shorter one means more passes
@@ -64,7 +62,6 @@ const FULL_EVERY: time::Duration = time::Duration::weeks(1);
 pub struct Server {
     store: Arc<store::Store>,
     http: reqwest::Client,
-    /// Where the running sync has got to. See [`progress`].
     progress: Arc<progress::Progress>,
 }
 
@@ -85,7 +82,7 @@ async fn main() -> std::process::ExitCode {
 
     let server = Server {
         store: Arc::new(store::Store::open(&options.data)),
-        http: http(),
+        http: wiki_http(),
         progress: Arc::default(),
     };
     tokio::spawn(refresh(server.clone(), options.sync_every));
@@ -93,17 +90,14 @@ async fn main() -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-/// The client the wiki is queried over.
-fn http() -> reqwest::Client {
-    // `rustls-no-provider` leaves the provider to the process, and reqwest panics building a
-    // client without one.
+fn wiki_http() -> reqwest::Client {
+    // reqwest panics without a process-wide provider.
     let _ = rustls::crypto::ring::default_provider().install_default();
     reqwest::Client::new()
 }
 
 const USAGE: &str = "dreamweaver [--listen ADDR|PATH] [--data PATH] [--sync-every HOURS]";
 
-/// The switches, and their defaults.
 struct Options {
     /// A `host:port` or a socket path; [`Listen`] is which.
     listen: String,
@@ -114,8 +108,8 @@ struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            listen: LISTEN.to_owned(),
-            data: DATA.to_owned(),
+            listen: DEFAULT_LISTEN.to_owned(),
+            data: DEFAULT_DATA.to_owned(),
             sync_every: SYNC_EVERY,
         }
     }
@@ -132,8 +126,7 @@ impl Options {
                 "--listen" => self.listen = value()?,
                 "--data" => self.data = value()?,
                 "--sync-every" => {
-                    // Zero hours is a sync due again the moment it ends, and a server whose dump
-                    // is always due never serves it at all.
+                    // Zero hours would sync forever and never serve.
                     self.sync_every = match value()?.parse() {
                         Ok(hours) if hours > 0 => hours,
                         _ => {
@@ -164,8 +157,7 @@ async fn refresh(server: Server, hours: u64) {
         match build(&server, &mut fetched).await {
             Ok(Some(worlds)) => tracing::info!("published {worlds} worlds"),
             Ok(None) => tracing::info!("the wiki has not changed; the dump stands"),
-            // Debug rather than Display: only Debug says which field of the answer it could not
-            // read, which on a failed sync is the whole of what there is to go on.
+            // Debug names the field it could not read; Display does not.
             Err(error) => tracing::error!("sync failed: {error:?}"),
         }
         server.progress.done();
@@ -176,12 +168,11 @@ async fn refresh(server: Server, hours: u64) {
 /// How long a run waits before its first sync: whatever is left of the interval the dump it came up
 /// with was built in, and nothing at all for a run that came up with no dump.
 fn first_sync(previous: &model::Dump, every: std::time::Duration) -> std::time::Duration {
-    let Some(built) = previous.last_update.as_deref().and_then(sync::moment) else {
+    let Some(built) = previous.last_update.as_deref().and_then(sync::parse_iso) else {
         return std::time::Duration::ZERO;
     };
     let age = time::OffsetDateTime::now_utc() - built;
-    // A stamp in the future has no age. Waiting the interval out is the reading that cannot become
-    // a sync per restart.
+    // A stamp in the future waits the full interval, so restarts cannot each trigger a sync.
     every.saturating_sub(age.try_into().unwrap_or(every))
 }
 
@@ -209,35 +200,33 @@ async fn build(server: &Server, fetched: &mut sync::Fetched) -> smw::Result<Opti
 /// Only a sync with a dump to compare against, and a week not yet up, has a choice to make: it is
 /// stood down where nothing has changed, and widened to the whole wiki where the dump is older
 /// than the wiki remembers or the wiki answers nothing.
-async fn plan(server: &Server, previous: &model::Dump) -> Option<sync::Refresh> {
+async fn plan(server: &Server, previous: &model::Dump) -> Option<sync::RefreshScope> {
     server.progress.at(progress::CHANGES);
-    // Nothing to compare against is a first sync, and a first sync reads all of it.
     let Some(built) = previous
         .last_update
         .as_deref()
         .filter(|_| !previous.worlds.is_empty())
     else {
-        return Some(sync::Refresh::Everything);
+        return Some(sync::RefreshScope::Everything);
     };
     if full_due(previous) {
         tracing::info!("the week is up; reading the whole wiki rather than querying what changed");
-        return Some(sync::Refresh::Everything);
+        return Some(sync::RefreshScope::Everything);
     }
     let Some(since) = sync::looking_from(built, time::OffsetDateTime::now_utc()) else {
         tracing::info!("the dump is older than the wiki's memory of what it changed; reading all");
-        return Some(sync::Refresh::Everything);
+        return Some(sync::RefreshScope::Everything);
     };
     match smw::changed_since(&server.http, &since).await {
         Ok(pages) if pages.is_empty() => None,
         Ok(pages) => {
             tracing::info!("{} pages edited since {since}", pages.len());
-            Some(sync::Refresh::Pages(pages))
+            Some(sync::RefreshScope::Pages(pages))
         }
-        // Rebuilding a dump that did not need it costs a minute of querying; the other mistake is a
-        // dump that quietly stops following the wiki.
+        // A needless rebuild costs a minute; a missed one stops following the wiki.
         Err(error) => {
             tracing::warn!("cannot tell what the wiki has changed: {error}");
-            Some(sync::Refresh::Everything)
+            Some(sync::RefreshScope::Everything)
         }
     }
 }
@@ -245,7 +234,11 @@ async fn plan(server: &Server, previous: &model::Dump) -> Option<sync::Refresh> 
 /// `lastFullUpdate` is the dump's own record of when the whole wiki was last read, so the week
 /// survives a restart.
 fn full_due(previous: &model::Dump) -> bool {
-    match previous.last_full_update.as_deref().and_then(sync::moment) {
+    match previous
+        .last_full_update
+        .as_deref()
+        .and_then(sync::parse_iso)
+    {
         Some(last) => time::OffsetDateTime::now_utc() - last >= FULL_EVERY,
         None => true,
     }
@@ -274,16 +267,13 @@ impl<'a> Listen<'a> {
 /// Runs until told to stop.
 async fn serve(server: Server, options: Options) {
     let app = axum::Router::new()
-        // `/data` is what the reference implementation serves it as; `/data.json` is what a build
-        // script would rather save.
+        // `/data` is the reference implementation's route.
         .route("/data", get(data))
         .route("/data.json", get(data))
         .route("/pollUpdate", get(poll_update))
-        // The one route that answers a question rather than handing over the dump, and the one
-        // YNOproject's game client calls. See `next`.
+        // YNOproject's game client calls this.
         .route("/getNextLocations", get(next::get_next_locations))
-        // Kept here rather than left to whatever serves the page: the sign-in's cookie has to be
-        // handed back for this origin to be keepable at all.
+        // The sign-in cookie must be rehosted for this origin.
         .merge(relay::routes())
         .with_state(server);
 
@@ -309,8 +299,7 @@ async fn serve(server: Server, options: Options) {
             };
             tracing::info!("listening on unix:{}", path.display());
             run(listener, app).await;
-            // A socket outlives the process that bound it, leaving a door that answers nothing.
-            // This covers the graceful stop; `bind` covers every other ending.
+            // A socket outlives its process; `bind` cleans up after every other exit.
             if let Err(error) = std::fs::remove_file(path) {
                 tracing::warn!("cannot remove {}: {error}", path.display());
             }
@@ -324,9 +313,7 @@ async fn serve(server: Server, options: Options) {
 /// and nginx's user cannot be guessed. Who may connect is decided by the directory the socket sits
 /// in, which the host chooses along with the path.
 fn bind(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
-    // Only a socket, and only one nothing is listening on: `bind` fails with "address in use"
-    // against a live one, and refusing anything else keeps a mistyped `--listen` from eating a
-    // real file.
+    // Only a dead socket, so a mistyped `--listen` cannot delete a real file.
     if std::os::unix::net::UnixStream::connect(path).is_err()
         && std::fs::symlink_metadata(path).is_ok_and(|file| file.file_type().is_socket())
     {
@@ -391,6 +378,6 @@ mod tests {
     /// [`super::http`], where the builder panics at run time rather than failing to compile.
     #[test]
     fn the_client_has_a_crypto_provider() {
-        super::http();
+        super::wiki_http();
     }
 }

@@ -76,7 +76,6 @@ const DAG_LEVEL_SLACK_MICROSTEPS_2D: f32 = 3.0;
 /// worlds a single door apart could settle most of a layer away from each other. Written against
 /// the layer spacing, which is the distance the eye already measures against.
 const LINK_REACH_DEFAULT: f32 = 2.0;
-// The layout choices. See [`Layout`].
 const DIMENSIONS: &str = "dimensions";
 const LAYERED: &str = "layered";
 const HUB_REPULSION: &str = "hub-push";
@@ -106,7 +105,6 @@ pub(super) struct Solve {
 /// [`Layout::remembered`].
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct Layout {
-    /// Which of the two the layout is solved in.
     pub(super) dimensions: Dimensions,
     /// Whether the worlds are pinned to layers by how deep they sit.
     pub(super) layered: bool,
@@ -187,7 +185,6 @@ impl Layout {
         }
     }
 }
-/// Naive pseudo-RNG.
 pub(super) struct Rng(pub(super) u32);
 
 impl Rng {

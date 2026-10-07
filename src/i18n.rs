@@ -16,8 +16,7 @@ use fluent_bundle::concurrent::FluentBundle;
 use fluent_bundle::{FluentArgs, FluentResource};
 use unic_langid::LanguageIdentifier;
 
-// A tag rather than a number, so a store written by a version offering a different set of
-// languages still says which one it meant.
+// A tag, so it survives a version with a different set of languages.
 const LANGUAGE: &str = "language";
 
 /// A closed set rather than a table of tags, so anything reading differently per language can say
@@ -87,8 +86,7 @@ impl Catalog {
                 let resource = FluentResource::try_new(language.ftl().to_owned())
                     .expect("a language's messages are not valid Fluent");
                 let mut bundle = FluentBundle::new_concurrent(vec![tag]);
-                // Fluent otherwise wraps every substituted value in right-to-left isolation marks,
-                // which egui draws as empty boxes.
+                // Fluent's isolation marks draw as empty boxes in egui.
                 bundle.set_use_isolating(false);
                 bundle
                     .add_resource(resource)
@@ -115,14 +113,12 @@ impl Catalog {
 pub(super) fn speaking() -> Language {
     match SPEAKING.load(Relaxed) {
         UNSETTLED => {
-            // Racers work out the same answer, read off the store and the device, so neither has
-            // to win.
+            // Racers compute the same answer.
             let language = chosen();
             SPEAKING.store(language as usize, Relaxed);
             language
         }
-        // Indexed rather than matched, and no panic out of range: nothing but this module writes
-        // the integer, and this is read too often to carry the branch.
+        // Only this module writes the integer.
         at => Language::ALL.get(at).copied().unwrap_or(Language::English),
     }
 }
@@ -179,12 +175,11 @@ pub(super) fn speak_english() {
 }
 
 fn chosen() -> Language {
-    // The link first: it is the one of the three that was written for this run in particular.
+    // The link first: it was written for this run.
     super::link::language()
         .and_then(|tag| matching(&tag))
         .or_else(|| super::store::read(LANGUAGE).and_then(|tag| matching(&tag)))
-        // In the order the device prefers them, so a device naming two this app has is answered in
-        // the one it would rather read.
+        // In the device's order of preference.
         .or_else(|| sys_locale::get_locales().find_map(|tag| matching(&tag)))
         .unwrap_or(Language::English)
 }
@@ -216,18 +211,14 @@ mod tests {
 
     use super::Language;
 
-    // Read off the file: a bundle answers whether it has a message but will not list the ones it
-    // has.
+    // A bundle cannot list its messages.
     fn named(ftl: &str) -> Vec<&str> {
         ftl.lines()
-            // A message starts a line; comments are prefixed and both variants and continued
-            // values are indented.
             .filter(|line| line.starts_with(|first: char| first.is_ascii_alphabetic()))
             .filter_map(|line| line.split_once('=').map(|(id, _)| id.trim()))
             .collect()
     }
 
-    // A message English has not got falls back to nothing and is read out as its own name.
     #[test]
     fn every_language_is_named_and_says_nothing_english_does_not() {
         let english = named(Language::English.ftl());
@@ -249,8 +240,7 @@ mod tests {
         }
     }
 
-    // A message taking a value nothing passes compiles, parses, and is read out on screen as its
-    // own id, so every message is formatted against every value the app ever passes.
+    // Every message is formatted against every value the app passes.
     #[test]
     fn every_english_message_says_something() {
         let mut args = fluent_bundle::FluentArgs::new();
@@ -297,8 +287,7 @@ mod tests {
             args.set(worded, "x");
         }
         for id in named(Language::English.ftl()) {
-            // Read from the bundle rather than through `format`, which answers with the name of a
-            // message it cannot say -- and a couple are worded the same as their own name.
+            // `format` answers a missing message with its name, which some messages equal.
             assert!(
                 super::CATALOG
                     .say(Language::English, id, Some(&args))
@@ -308,7 +297,6 @@ mod tests {
         }
     }
 
-    // Names the app builds rather than writes out, and the compiler therefore cannot check.
     #[test]
     fn the_messages_named_at_runtime_are_all_there() {
         let rows = [
@@ -337,8 +325,6 @@ mod tests {
         }
     }
 
-    // Every language rather than English alone: an effect falling back is an English name in the
-    // middle of a Japanese sentence, which reads as a translation nobody wrote.
     #[test]
     fn every_language_names_every_effect() {
         for language in Language::ALL {

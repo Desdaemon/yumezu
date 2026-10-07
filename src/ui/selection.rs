@@ -9,15 +9,13 @@ use super::*;
 /// Drawn over the rows rather than between them, the height of a row not being known until it has
 /// been laid out. `stops` is in the order they are drawn, top first.
 fn rail(ui: &egui::Ui, stops: &[egui::Rect]) {
-    // What a label is written in, the line being of a piece with the rows it runs beside.
     let color = ui.visuals().text_color();
     let stroke = egui::Stroke::new(RAIL_LINE, color);
     let painter = ui.painter();
     let at = |row: &egui::Rect| egui::pos2(row.left() + RAIL_WIDTH / 2.0, row.center().y);
     for (nth, pair) in stops.windows(2).enumerate() {
         let (mut from, to) = (at(&pair[0]), at(&pair[1]));
-        // Away from the edge of the ring the walk starts at rather than out of the middle of it.
-        // Every other stop is solid and drawn after the line, so it covers its own end.
+        // Every other stop is solid and drawn after the line, covering its end.
         if nth == 0 {
             from.y += RAIL_END;
         }
@@ -66,8 +64,7 @@ impl Panel {
         ui.label(t!("forward-connections", count = ways.len()));
         for step in ways {
             let lit = Highlight::Connection(world, step.world);
-            // For a two-way connection the way out: a reader looking at the ways on from a world
-            // is looking at leaving it.
+            // For a two-way connection, the way out.
             let conditions = step
                 .out
                 .as_ref()
@@ -98,8 +95,7 @@ impl Panel {
         let mut lit = None;
         ui.horizontal(|ui| {
             ui.strong(data.titles[world].show());
-            // A world the player has not been to is not named here, and a page opened on it would
-            // say what this is holding back.
+            // An unvisited world's page would name what this withholds.
             if data.titles[world].known()
                 && ui
                     .button(ICON_OPEN_IN_NEW)
@@ -108,7 +104,6 @@ impl Panel {
             {
                 open_in_browser(&data.titles[world].wiki_url());
             }
-            // A few hundred worlds have never been drawn.
             if !data.maps[world].is_empty()
                 && ui
                     .button(ICON_MAP)
@@ -151,13 +146,16 @@ impl Panel {
         });
         ui.horizontal(|ui| {
             ui.label(t!("world-connections", count = data.degrees[world]));
-            if data.descendants[world] > 0
+            if data.descendant_counts[world] > 0
                 && ui
-                    .link(t!("world-descendants", count = data.descendants[world]))
+                    .link(t!(
+                        "world-descendants",
+                        count = data.descendant_counts[world]
+                    ))
                     .clicked()
             {
                 lit = Some(Highlight::Descendants(world));
-            } else if data.descendants[world] == 0 {
+            } else if data.descendant_counts[world] == 0 {
                 ui.label(t!("dead-end"));
             }
         });
@@ -190,9 +188,7 @@ impl Panel {
         if other_end(read, world).is_none() {
             return;
         }
-        // The app's own style rather than egui's menu style, which strips an item's fill and
-        // stroke until it is hovered -- leaving a phone nothing to say these are controls. They
-        // are the same two buttons `Panel::menu` already draws framed.
+        // egui's menu style hides fill and stroke until hover, so a phone shows no buttons.
         egui::Popup::context_menu(row)
             .style(egui::style::StyleModifier::default())
             .show(|ui| {
@@ -247,17 +243,14 @@ impl Panel {
             let conditions = from
                 .and_then(|from| world::step_conditions(&data.connections, data.hub, from, world))
                 .filter(|step| step.gate != Gate::Free);
-            // The connection itself, so a row here reads as a row of the ways on from a world
-            // does: both directions named, even where they demand nothing. The escape home is the
-            // one step that is no listed connection.
+            // Both directions named, as among the ways on; the escape home is no listed connection.
             let walked = from.and_then(|from| {
                 data.connections[from]
                     .iter()
                     .find(|step| step.world == world)
             });
             let row = ui.horizontal(|ui| {
-                // Left clear for the line, which is drawn once the rows have settled where they
-                // are. What the step demands belongs against the world it is met on the way to.
+                // Left clear for the line, drawn once rows settle.
                 ui.add_space(RAIL_WIDTH);
                 let leading = conditions.as_ref().map(world::glyphs).unwrap_or_default();
                 let title = data.titles[world].show();
@@ -274,7 +267,6 @@ impl Panel {
                         self.with_directions(&row, read, world);
                     }
                     Rows::Pointed => {
-                        // visually hoverable only
                         if ui.add(tile).contains_pointer() {
                             self.pointed = Some(world);
                         }
@@ -296,7 +288,7 @@ impl Panel {
         let Some(Highlight::Path(from, to)) = read.selected.filter(|_| data.ways.len() > 1) else {
             return;
         };
-        // Copied out and back: `Window::open` holds its flag for as long as the closure runs.
+        // Copied: `Window::open` borrows the flag while the closure runs.
         let mut showing = true;
         egui::Window::new(t!(
             "directions-title",
@@ -311,9 +303,7 @@ impl Panel {
             let (mut named, mut above): (Vec<usize>, &[usize]) = (Vec::new(), &[]);
             for (at, way) in data.ways.iter().enumerate() {
                 let connections = way.walk.len() - 1;
-                // Where this way parts from the one above it, and from there the first world that
-                // has not already named another: ways of a class share a tail, so what is peculiar
-                // to one is looked for from where it parts.
+                // Ways of a class share a tail, so what is peculiar to one starts where it parts.
                 let parts = way
                     .walk
                     .iter()
@@ -360,7 +350,6 @@ impl Panel {
         match read.selected {
             None => {
                 ui.label(t!("nothing-selected"));
-                // Only a run drawing a frontier with an unwalked way left in it has any to offer.
                 if !data.untaken.is_empty()
                     && ui
                         .link(t!("untaken-worlds"))
@@ -397,12 +386,10 @@ impl Panel {
                     count = read.route.len() - 1,
                     origin = data.titles[from].show()
                 ));
-                // Pressed, a world here would be selected and the ways between the two worlds
-                // gone with the selection that called for them. Nothing else is read at that cost.
+                // Pressing would select the world and drop the ways between the two.
                 self.walked(ui, read, &read.route, Rows::Pointed);
             }
-            // The connection is the subject, but the ways on are listed for the world it is walked
-            // from: picking another is a second way out of that world, not a step onward.
+            // Lists the ways on from the world it leaves.
             Some(Highlight::Connection(at, far)) => {
                 self.world_info(ui, data, at);
                 let step = data.connections[at]
@@ -453,8 +440,6 @@ impl Panel {
                 ui.separator();
                 self.forward_connections(ui, read, world);
             }
-            // The author is the subject here, not the world that named them, so that world's own
-            // information gives way to their whole body of work.
             Some(Highlight::Author(author)) => {
                 let by = &data.authors[author];
                 ui.horizontal(|ui| {
@@ -468,7 +453,6 @@ impl Panel {
                     self.world_row(ui, world, Tile::new(false, data.titles[world].show()));
                 }
             }
-            // A release is a list like an author's work, and read the same way.
             Some(Highlight::Version(version)) => {
                 let release = &data.versions[version];
                 ui.horizontal(|ui| {
@@ -489,8 +473,7 @@ impl Panel {
                     self.world_row(ui, world, Tile::new(false, data.titles[world].show()));
                 }
             }
-            // The order is the whole of what this list says, so its rows are bare titles like
-            // every other list of worlds: what ranked them is said once, above them.
+            // Bare titles: the ranking is said once, above.
             Some(Highlight::Untaken) => {
                 ui.strong(t!("untaken-worlds"));
                 ui.label(t!("untaken-worlds-hint"));
@@ -499,8 +482,6 @@ impl Panel {
                     self.world_row(ui, world, Tile::new(false, data.titles[world].show()));
                 }
             }
-            // A layer is a shell rather than a list, so the panel only says which is lit and how
-            // much of the game sits on it.
             Some(Highlight::Layer(depth)) => {
                 ui.strong(t!("layer-depth", depth = depth));
                 ui.label(worlds(read.listed.len()));
@@ -542,8 +523,6 @@ fn walk_of(step: &world::Step) -> String {
             }),
             _,
         ) => t!("walk-isolated"),
-        // Only where the other direction demands nothing: a way out that wants an effect and back
-        // that is locked has to say both, which `walk-both` does.
         (
             Some(Conditions {
                 gate: Gate::Locked, ..

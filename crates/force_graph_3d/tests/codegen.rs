@@ -8,8 +8,7 @@
 //! Every failure here is about speed, not correctness, and the fix may well be to delete the
 //! workaround the check is guarding once the compiler no longer needs it.
 
-// Drives a compiler and reads what it wrote, so it is a host-only test; `just test-wasm` runs
-// the behaviour tests under a wasm runtime, not this one.
+// Drives a compiler, so host-only; `just test-wasm` runs the behaviour tests.
 #![cfg(not(target_family = "wasm"))]
 
 use std::path::{Path, PathBuf};
@@ -62,8 +61,7 @@ pub extern "C" fn drive(graph: &mut ForceGraph, dt: f32) -> bool { graph.update(
     )
     .unwrap();
 
-    // Cargo would otherwise call the crate fresh and re-emit nothing, leaving whatever IR the
-    // last run of this test happened to produce.
+    // Otherwise cargo calls the crate fresh and re-emits nothing.
     let mut clean = Command::new(env!("CARGO"));
     clean
         .current_dir(&crate_dir)
@@ -79,7 +77,7 @@ pub extern "C" fn drive(graph: &mut ForceGraph, dt: f32) -> bool { graph.update(
         .current_dir(&crate_dir)
         .args(["rustc", "--release", "--quiet"])
         .env("CARGO_TARGET_DIR", dir.join("target"))
-        // Reaches every crate in the graph, so the dependency emits IR too.
+        // Reaches every crate, so the dependency emits IR too.
         .env("RUSTFLAGS", format!("{rustflags} --emit=llvm-ir"));
     if let Some(target) = target {
         cargo.args(["--target", target]);
@@ -87,8 +85,7 @@ pub extern "C" fn drive(graph: &mut ForceGraph, dt: f32) -> bool { graph.update(
     let output = cargo.output().expect("cargo");
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // A target the developer has not installed is not a failure of this crate. On CI it is:
-        // skipping there would mean this check quietly stops checking anything.
+        // A missing target skips locally but fails on CI, where skipping would check nothing.
         let missing = target
             .is_some_and(|t| stderr.contains(&format!("the `{t}` target may not be installed")));
         if missing && std::env::var_os("CI").is_none() {
@@ -98,9 +95,7 @@ pub extern "C" fn drive(graph: &mut ForceGraph, dt: f32) -> bool { graph.update(
         panic!("{stderr}");
     }
 
-    // Newest first: the scratch target directory outlives one run and cargo never cleans it, so
-    // IR from an earlier build of a different revision can still be lying there. A build that
-    // changed nothing rewrites nothing, which leaves the newest file the current one either way.
+    // Newest first: the scratch target directory keeps stale IR from earlier revisions.
     let mut emitted: Vec<PathBuf> = walk(&dir.join("target"))
         .filter(|p| p.extension().is_some_and(|e| e == "ll"))
         .collect();
@@ -164,8 +159,7 @@ fn assert_vectorized(ir: &str, width: usize) {
 /// silent and costs about a tenth of the loop.
 #[track_caller]
 fn assert_clamp_is_ieee(ir: &str, expected: bool) {
-    // `maximumnum`/`minimumnum` are what `f32::max`/`f32::min` lower to; the older `maxnum` and
-    // `minnum` mean the same thing and are just as wrong on the targets that do not want them.
+    // `f32::max`/`f32::min` lower to `maximumnum`/`minimumnum`; `maxnum`/`minnum` are equivalent.
     let ieee = ["maximumnum", "minimumnum", "maxnum", "minnum"]
         .iter()
         .any(|name| ir.contains(name));
@@ -189,7 +183,7 @@ fn the_lane_loop_vectorizes_on_wasm() {
     let Some(ir) = kernel_ir(Some("wasm32-unknown-unknown"), "-C target-feature=+simd128") else {
         return;
     };
-    // wasm `v128` is four lanes wide whatever `LANES` is; the loop is unrolled to fill it.
+    // wasm `v128` is four lanes wide whatever `LANES` is.
     assert_vectorized(&ir, 4);
     assert_clamp_is_ieee(&ir, false);
 }
@@ -209,16 +203,12 @@ fn the_lane_loop_vectorizes_on_arm() {
 #[test]
 fn the_lane_loop_vectorizes_on_the_host() {
     let ir = kernel_ir(None, "").expect("the host target is always installed");
-    // Four lanes is what the baseline of every target the application ships on provides: SSE2 on
-    // x86-64, NEON on aarch64. A machine with AVX2 gets eight, and `<4 x float>` would then be
-    // missing, so this takes whichever the build chose.
+    // SSE2 and NEON give four lanes; AVX2 gives eight.
     assert!(
         ir.contains("<4 x float>") || ir.contains("<8 x float>"),
         "the lane loop is scalar: no vector type in the emitted IR"
     );
     assert_vectorized(&ir, if ir.contains("<8 x float>") { 8 } else { 4 });
-    // Whichever variant this host's own architecture selects, which is the aarch64 one when the
-    // machine running the tests is itself aarch64.
     assert_clamp_is_ieee(&ir, cfg!(target_arch = "aarch64"));
 }
 

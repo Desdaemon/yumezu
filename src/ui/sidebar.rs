@@ -36,7 +36,6 @@ impl Panel {
             ui.selectable_value(&mut sidebar.tab, Tab::Authors, t!("tab-authors"));
             ui.selectable_value(&mut sidebar.tab, Tab::Versions, t!("tab-versions"));
             ui.selectable_value(&mut sidebar.tab, Tab::Settings, ICON_SETTINGS);
-            // Against the far edge of the row, so it is nowhere near the tabs it is not one of.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button(ICON_CHEVRON_LEFT)
@@ -48,8 +47,7 @@ impl Panel {
             });
         });
         ui.separator();
-        // One scroll for the whole tab rather than one per list: a list scrolling inside a column
-        // that also scrolled would fight the drag that reached it.
+        // One scroll for the tab: nested scrolls would fight over the drag.
         egui::ScrollArea::vertical().show(ui, |ui| match sidebar.tab {
             Tab::Worlds => self.graph(ui, read, &mut sidebar.worlds),
             Tab::Authors => self.authors(ui, read, &mut sidebar.authors),
@@ -126,8 +124,7 @@ impl Panel {
     fn version(&mut self, ui: &mut egui::Ui, read: &PanelData, version: usize) {
         let data = read.data;
         let release = &data.versions[version];
-        // Every row draws the same widgets and egui names a widget by what is in it, so the
-        // release's own place in the list is what keeps two rows apart.
+        // egui derives a widget's id from its content, so the release keeps identical rows apart.
         ui.push_id(version, |ui| {
             let lit = read.selected == Some(Highlight::Version(version));
             let tile = Tile::new(
@@ -151,8 +148,6 @@ impl Panel {
                 self.lit = Some(Some(Highlight::Version(version)));
             }
             wiki_menu(&row, release);
-            // Nothing until the atlas arrives, and nothing ever if it cannot be had: the rest of
-            // the row already says what the release is.
             let Some(sheet) = &data.sheet else { return };
             ui.horizontal(|ui| {
                 for &world in release.worlds.iter().take(CATALOG_THUMBNAILS) {
@@ -188,8 +183,7 @@ pub(super) fn matching<'a>(
     let mut hits: Vec<_> = names
         .enumerate()
         .filter_map(|(at, name)| {
-            // Whichever of an entry's names fits best, so someone reading in one language still
-            // finds what they typed in the other.
+            // Best-fitting of an entry's names, so a search in either language finds it.
             let (found, length) = name
                 .filter_map(|name| Some((name.to_lowercase().find(&needle)?, name.len())))
                 .min()?;

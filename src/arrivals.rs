@@ -63,8 +63,7 @@ enum Coming {
 pub(super) struct Arrivals {
     /// Per world, what it is doing. `None` where nothing is doing anything.
     coming: Option<Vec<Coming>>,
-    /// How long the graph has been standing.
-    clock: f32,
+    standing_seconds: f32,
     /// When the last arrival finishes, which is when there stops being anything to wait for.
     last: f32,
 }
@@ -91,8 +90,6 @@ impl Arrivals {
         for (world, &name) in names.iter().enumerate() {
             match before.standing.contains_key(name) {
                 false => arriving.push(world),
-                // Both halves have to have changed: a world still a placeholder has not become
-                // anything, and one that never was has nothing to turn over.
                 true if before.unvisited.contains(name) && !unknown[world] => turning.push(world),
                 true => {}
             }
@@ -103,8 +100,7 @@ impl Arrivals {
         for &world in &turning {
             coming[world] = Coming::Known(0.0);
         }
-        // Behind the turning over, so a new world comes out from under a placeholder that has
-        // already gone rather than through one still standing.
+        // After the turning over, so a new world emerges from a placeholder already gone.
         let after = if turning.is_empty() {
             0.0
         } else {
@@ -116,15 +112,13 @@ impl Arrivals {
             coming[world] = Coming::New(after + nth as f32 * stagger);
         }
         Self {
-            // When the last arrival begins its final `ARRIVAL_SECONDS`. A turning over is two of
-            // those, one each way, so it begins its second at `after` -- where the first new world
-            // starts too.
+            // A turning over is two of these; the first new world starts with its second.
             last: match arriving.is_empty() {
                 true => ARRIVAL_SECONDS,
                 false => after + (arriving.len() - 1) as f32 * stagger,
             },
             coming: Some(coming),
-            clock: 0.0,
+            standing_seconds: 0.0,
         }
     }
 
@@ -136,11 +130,10 @@ impl Arrivals {
         };
         match coming[world] {
             Coming::Already => 1.0,
-            Coming::New(due) => eased((self.clock - due) / ARRIVAL_SECONDS),
+            Coming::New(due) => eased((self.standing_seconds - due) / ARRIVAL_SECONDS),
             Coming::Known(due) => {
-                let through = (self.clock - due) / ARRIVAL_SECONDS;
+                let through = (self.standing_seconds - due) / ARRIVAL_SECONDS;
                 match through < 1.0 {
-                    // Away as what it was, and back as what it is.
                     true => 1.0 - eased(through),
                     false => eased(through - 1.0),
                 }
@@ -158,7 +151,7 @@ impl Arrivals {
             .flatten()
             .enumerate()
             .filter_map(|(world, coming)| {
-                matches!(coming, Coming::Known(due) if self.clock < due + ARRIVAL_SECONDS)
+                matches!(coming, Coming::Known(due) if self.standing_seconds < due + ARRIVAL_SECONDS)
                     .then_some(world)
             })
     }
@@ -196,15 +189,13 @@ impl Arrivals {
         if self.coming.is_none() {
             return false;
         }
-        self.clock += dt;
+        self.standing_seconds += dt;
         let grown = self.last + ARRIVAL_SECONDS;
-        if self.clock > grown + ARRIVAL_TRACKED_SECONDS {
-            // Dropped rather than left at rest: from here on this graph is one like any other,
-            // and reading it for arrivals costs nothing again.
+        if self.standing_seconds > grown + ARRIVAL_TRACKED_SECONDS {
             *self = Self::default();
             return false;
         }
-        self.clock <= grown
+        self.standing_seconds <= grown
     }
 }
 
@@ -230,9 +221,7 @@ pub(super) fn resume_from(data: &mut AppEntities, before: &Standing) {
         .iter()
         .map(|title| before.get(&title.en).copied())
         .collect();
-    // New worlds are placed among the ones already there, so each comes in out of what it connects
-    // to rather than from the far edge of the spawn volume. Read off the old positions, so no world
-    // is seeded from another seed.
+    // Seeded from the old positions, so each enters beside what it connects to.
     let seeded: Vec<Option<[f32; 3]>> = (0..standing.len())
         .map(|world| {
             if standing[world].is_some() {
@@ -254,7 +243,7 @@ pub(super) fn resume_from(data: &mut AppEntities, before: &Standing) {
             Some(at)
         })
         .collect();
-    // In slot order, which is world order: one node was added per world and none is ever removed.
+    // Slot order is world order: one node per world, never removed.
     let mut world = 0;
     data.graph.visit_nodes_mut(|mut node| {
         if let Some(at) = seeded[world] {
@@ -291,14 +280,11 @@ mod tests {
             &[Some(0), Some(1), Some(2)],
             Some(&before),
         );
-        // Already standing there, so it is drawn at its own size from the first frame.
         assert_eq!(arrivals.grown(0), 1.0);
         assert_eq!(arrivals.grown(1), 0.0);
-        // Far enough in for the first new one to be part way and the second not yet due.
         assert!(arrivals.tick(super::ARRIVAL_STAGGER * 0.5));
         assert!(arrivals.grown(1) > 0.0 && arrivals.grown(1) < 1.0);
         assert_eq!(arrivals.grown(2), 0.0);
-        // Past the last of them, which is where they stop being redrawn every frame.
         assert!(!arrivals.tick(super::ARRIVAL_SECONDS + super::ARRIVAL_WINDOW));
         assert_eq!(arrivals.grown(2), 1.0);
     }
@@ -308,23 +294,18 @@ mod tests {
         let before = before(&["Nexus", "Sugar Hole"], &["Sugar Hole"]);
         let mut arrivals = super::Arrivals::new(
             &["Nexus", "Sugar Hole"],
-            // No longer a placeholder, which is the whole of what has changed about it.
             &[false, false],
             &[Some(0), Some(1)],
             Some(&before),
         );
-        // Sugar Hole starts at its full size, having already been standing there.
         assert_eq!(arrivals.grown(1), 1.0);
         assert_eq!(arrivals.veiled().collect::<Vec<_>>(), vec![1]);
-        // Half way out: smaller, and still wearing the placeholder it is leaving.
         arrivals.tick(super::ARRIVAL_SECONDS * 0.5);
         assert!(arrivals.grown(1) > 0.0 && arrivals.grown(1) < 1.0);
         assert_eq!(arrivals.veiled().collect::<Vec<_>>(), vec![1]);
-        // Half way back: the placeholder is gone, and what is growing is the world itself.
         arrivals.tick(super::ARRIVAL_SECONDS);
         assert!(arrivals.grown(1) > 0.0 && arrivals.grown(1) < 1.0);
         assert!(arrivals.veiled().next().is_none());
-        // And it ends at the size it started, having become something else on the way.
         assert!(!arrivals.tick(super::ARRIVAL_SECONDS));
         assert_eq!(arrivals.grown(1), 1.0);
     }
@@ -342,7 +323,6 @@ mod tests {
         assert!(arrivals.arriving().is_none());
     }
 
-    // The layout is still settling around what arrived after the last of it stops growing.
     #[test]
     fn what_arrived_is_still_framed_after_it_has_finished_growing() {
         let before = before(&["Nexus"], &[]);
@@ -352,12 +332,9 @@ mod tests {
             &[Some(0), Some(1)],
             Some(&before),
         );
-        // Past the growing, which is what stops the geometry being rebuilt every frame.
         assert!(!arrivals.tick(super::ARRIVAL_SECONDS + 0.1));
         assert_eq!(arrivals.grown(1), 1.0);
-        // Still something to frame, though, and still the world that arrived.
         assert_eq!(arrivals.arriving().unwrap().collect::<Vec<_>>(), vec![1]);
-        // And past the following, which is where an arrival stops costing anything at all.
         assert!(!arrivals.tick(super::ARRIVAL_TRACKED_SECONDS));
         assert!(arrivals.arriving().is_none());
     }

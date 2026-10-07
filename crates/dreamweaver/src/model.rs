@@ -33,8 +33,7 @@ pub fn conn_type(attribute: &str, connection: &smw::Connection) -> Option<(ConnT
             )),
             "Needs Effect" => Some((
                 ConnType::EFFECT,
-                // Comma separated and joined no further: the wiki does not say whether one effect
-                // is enough or all are needed, so an "and" would settle it here.
+                // The wiki does not say whether one effect is enough or all are needed.
                 Wording::Words(connection.effects_needed.join(",")),
             )),
             "Chance" => Some((
@@ -42,8 +41,7 @@ pub fn conn_type(attribute: &str, connection: &smw::Connection) -> Option<(ConnT
                 Wording::Words(connection.chance_percentage.clone()?),
             )),
             "Seasonal" => {
-                // The reader has one word to put a route and four it knows how to translate; the
-                // reference wrapper narrowed these the same way.
+                // The reader translates only four seasons; the reference wrapper keeps the first.
                 let season = connection.seasons_available.first()?;
                 Some((ConnType::SEASONAL, Wording::Translated(season.to_owned())))
             }
@@ -237,8 +235,7 @@ pub fn dream_tree() -> Dump {
             id,
             cell: Some(id),
             title: place.title.to_owned(),
-            // Every optional field carries a value somewhere in the tree, or
-            // `the_dump_is_written_back_exactly_as_it_was_read` has nothing to lose track of.
+            // Every optional field is set somewhere, so the round trip covers it.
             title_jp: (id % 2 == 0).then(|| format!("\u{68a6}{id}")),
             author: "Yumemiru".to_owned(),
             depth: 0,
@@ -293,9 +290,6 @@ pub fn dream_tree() -> Dump {
 
 #[cfg(test)]
 mod tests {
-    // The connection is declared once and read from both ends, so a change both sides still
-    // compile against can still move the bytes in between. Read it back and write it again, and it
-    // has to come out the same.
     #[test]
     fn the_dump_is_written_back_exactly_as_it_was_read() {
         let json = serde_json::to_string(&super::dream_tree()).expect("a dump is serializable");
@@ -306,9 +300,7 @@ mod tests {
         );
     }
 
-    // The last dump is where the secret marks and the atlas cells are read from, and a sync that
-    // cannot parse it silently starts from nothing. So every field this has ever published has to
-    // stay readable, whether it is still published or not.
+    // A sync that cannot parse the last dump silently loses secret marks and atlas cells.
     #[test]
     fn a_dump_written_before_the_fields_moved_is_still_read() {
         // As published before `cell` existed and while `mapIds` still did.
@@ -321,9 +313,7 @@ mod tests {
             "isAdmin":false}"#;
         let dump: super::Dump = serde_json::from_str(json).expect("a dump this once wrote");
         let world = dump.worlds.first().expect("the one world");
-        // The mark survives, which is what a sync carries forward.
         assert!(world.secret);
-        // No cell to carry: this world takes a fresh one.
         assert_eq!(world.cell, None);
     }
 }

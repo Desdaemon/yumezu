@@ -113,10 +113,8 @@ impl Detail {
             && let Some(loaded) = loading.take()
         {
             self.unvisited.loading = None;
-            // Failures are logged where they are found, and leave these worlds their bare nodes.
             if let Some(picture) = loaded {
-                // One upload behind both meshes: a [`Texture2DRef`] is a handle over a shared
-                // texture, so the clone is a Mat3 and an atomic.
+                // One upload: a [`Texture2DRef`] clone is a Mat3 and an atomic.
                 let material = quad_material(context, &picture);
                 self.unvisited.lit = Some(Gm::new(
                     InstancedMesh::new(context, lit, &CpuMesh::square()),
@@ -131,8 +129,7 @@ impl Detail {
         if let Some(drawn) = &mut self.unvisited.quads {
             drawn.set_instances(quads);
         }
-        // `set_instances` builds four fresh GPU buffers however many instances it is handed, so
-        // an empty overlay is worth not writing -- once to clear it, then not again.
+        // `set_instances` builds four GPU buffers per call, so an empty overlay is written once.
         if let Some(drawn) = &mut self.unvisited.lit
             && (!lit.transformations.is_empty() || drawn.instance_count() > 0)
         {
@@ -143,31 +140,24 @@ impl Detail {
     /// `magnified` is every world drawn wider than [`LEAVE_PIXELS`], nearest first. Anything past
     /// [`HELD`] is left on the atlas, and anything held but no longer wanted is dropped.
     pub fn track(&mut self, context: &Context, magnified: &[Magnified]) {
-        // Filtered before the budget is counted: a slot spent on a world with no picture to be
-        // had would push out a world that has one.
+        // Filtered before the budget, so a world with no picture takes no slot.
         let magnified: Vec<&Magnified> = magnified
             .iter()
             .filter(|it| !self.images[it.world].is_empty() && !self.missing.contains(&it.world))
-            // The upper edge of the band the caller admitted: a world wide enough starts, one
-            // already held carries on down to [`LEAVE_PIXELS`]. Loading counts, dropping it
-            // stranding the fetch.
+            // Held worlds stay down to [`LEAVE_PIXELS`]; dropping a loading one strands its fetch.
             .filter(|it| it.width >= SWITCH_PIXELS || self.held.contains_key(&it.world))
             .take(HELD)
             .collect();
         let wanted: Vec<usize> = magnified.iter().map(|it| it.world).collect();
-        // Before the new ones start, so a picture on its way out frees its slot in the same frame.
+        // Frees slots in the same frame.
         self.held.retain(|world, _| wanted.contains(world));
         self.wanted = wanted;
 
         for it in magnified {
-            // Removed rather than borrowed, so whatever it turns into goes back without a second
-            // borrow.
             let mut held = match self.held.remove(&it.world) {
                 None => Held::Loading(load(self.images[it.world].clone())),
                 Some(Held::Loading(pending)) => match pending.take() {
                     Some(Some(picture)) => Held::Ready(Box::new(quad(context, &picture))),
-                    // Out of the running above rather than occupying a slot it can never draw
-                    // from.
                     Some(None) => {
                         self.missing.insert(it.world);
                         continue;
@@ -176,8 +166,7 @@ impl Detail {
                 },
                 Some(held) => held,
             };
-            // Every frame, not just on arrival: the quad has to keep up with the atlas quad it
-            // stands over as the layout and the camera move.
+            // Every frame: the quad follows the atlas quad as the layout and camera move.
             if let Held::Ready(quad) = &mut held {
                 quad.set_transformation(it.transformation);
                 quad.material.color = it.color;
@@ -187,9 +176,7 @@ impl Detail {
     }
 
     pub fn drawn(&self) -> impl Iterator<Item = &dyn Object> {
-        // A world turning over wears both for a moment, and the placeholder wins on depth:
-        // [`LIFT`] lifts it against the node's whole radius, the picture against the shrinking
-        // radius it is drawn at.
+        // The placeholder wins on depth: [`LIFT`] uses the full radius, the picture a shrunk one.
         self.unvisited
             .quads
             .iter()
@@ -206,8 +193,7 @@ impl Detail {
         self.unvisited
             .lit
             .iter()
-            // An empty mesh would still answer [`Detail::drawn_lit`], and the caller reads that as
-            // an overlay worth clearing the depth for.
+            // An empty mesh would still answer [`Detail::drawn_lit`], costing a depth clear.
             .filter(|quads| quads.instance_count() > 0)
             .map(|quads| quads as &dyn Object)
             .chain(
@@ -239,8 +225,7 @@ fn quad(context: &Context, picture: &CpuTexture) -> Gm<Mesh, ColorMaterial> {
 /// Apart from [`quad`] because the placeholder wears the same paint on an instanced mesh.
 fn quad_material(context: &Context, picture: &CpuTexture) -> ColorMaterial {
     let (width, height) = (picture.width as f32, picture.height as f32);
-    // The long side gives, centred, and the other is kept whole. Symmetric, so it does not matter
-    // which end the uv coordinates count from -- not the same end as in the atlas.
+    // Symmetric, so the uv origin, unlike the atlas', does not matter.
     let visible = if width > height * thumbnails::ASPECT {
         vec2(height * thumbnails::ASPECT / width, 1.0)
     } else {
@@ -249,14 +234,11 @@ fn quad_material(context: &Context, picture: &CpuTexture) -> ColorMaterial {
     let mut texture = Texture2DRef::from_cpu_texture(
         context,
         &CpuTexture {
-            // The switch happens where the atlas runs out rather than where this picture reaches
-            // its own size, so it is minified onto the node at every size below that.
+            // Minified until the switch, which happens where the atlas runs out.
             mipmap: Some(Mipmap::default()),
             wrap_s: Wrapping::ClampToEdge,
             wrap_t: Wrapping::ClampToEdge,
-            // The wiki serves these as 320x240 pixel art, and interpolating one up blurs the grid
-            // that is the whole look. Minification keeps its mips: nearest there crawls as the
-            // layout moves.
+            // 320x240 pixel art; nearest minification would crawl as the layout moves.
             mag_filter: Interpolation::Nearest,
             ..picture.clone()
         },
@@ -280,8 +262,7 @@ pub fn load(url: String) -> fetch::Pending<Option<CpuTexture>> {
                 return None;
             }
         };
-        // Not through `three_d_asset`, which hands back texels already arranged and leaves
-        // nowhere to decimate them. Same crate underneath, same guess at the format.
+        // Not `three_d_asset`, whose texels are already arranged and cannot be decimated.
         match image::load_from_memory(&bytes) {
             Ok(picture) => Some(texture(picture)),
             Err(error) => {
@@ -343,7 +324,6 @@ fn sieve<T: Copy>(texels: &[T], width: u32, by: u32) -> Vec<T> {
 async fn download(url: &str) -> Result<Vec<u8>, fetch::Error> {
     Ok(fetch::client()
         .get(url)
-        // Dropped by the browser, which sets its own.
         .header("origin", ORIGIN)
         .send()
         .await?

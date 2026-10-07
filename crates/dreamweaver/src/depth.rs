@@ -50,35 +50,28 @@ pub fn of(worlds: &[Node]) -> Vec<(i32, i32)> {
 /// nothing more can be reached.
 fn distances(worlds: &[Node], refused: ConnType) -> Vec<i32> {
     let mut depth: Vec<Option<i32>> = vec![None; worlds.len()];
-    // How a world was reached decides what can be reached from it: a route inside the removed
-    // part of the graph may not walk back out.
+    // A route inside the removed part of the graph may not walk back out.
     let mut through_removed: Vec<bool> = vec![false; worlds.len()];
 
     let Some(start) = worlds.iter().position(|world| world.title == START) else {
-        // Nothing to measure from; every world ends up at the fallback distance below.
         tracing::warn!("no world called {START}: every distance will be a guess");
         return vec![1; worlds.len()];
     };
     depth[start] = Some(0);
 
-    // Everything reached here is measured under the conditions given.
     relax(worlds, refused, &mut depth, &mut through_removed, false);
 
     let mut refused = refused;
     while !depth.iter().all(Option::is_some) {
         let Some(weaker) = give_up(refused) else {
-            // Every condition given up and worlds still unreached: they are genuinely not joined
-            // to the rest of the graph.
             break;
         };
         refused = weaker;
-        // A world already measured keeps the distance the stricter pass gave it: giving up a
-        // condition reaches what could not be reached at all, and does not discount the rest.
+        // Measured worlds keep the stricter pass's distance.
         relax(worlds, refused, &mut depth, &mut through_removed, true);
     }
 
-    // A world nothing leads to is put one step in rather than at the start: it exists, so it is
-    // not where the player begins, and any further guess would be invented.
+    // Unreached worlds go one step in: they exist, so they are not the start.
     depth.into_iter().map(|d| d.unwrap_or(1)).collect()
 }
 
@@ -126,8 +119,7 @@ fn relax(
         .collect();
 
     while let Some(std::cmp::Reverse((here, from))) = queue.pop() {
-        // A world reached again by a shorter route is in the heap twice; the longer entry is
-        // stale by the time it comes up.
+        // Stale heap entry.
         if depth[from] != Some(here) {
             continue;
         }
@@ -137,8 +129,7 @@ fn relax(
                 continue;
             }
             let into_removed = worlds[to].removed;
-            // Once a route is in the removed part of the graph it stays there, and one that is
-            // not may not cross a removed connection to reach a world that still exists.
+            // Once removed, a route stays removed; otherwise it may not cross a removed connection.
             if removed_route && !into_removed {
                 continue;
             }

@@ -2,13 +2,9 @@
 /dist
 /data.json
 /tools/atlas/target
-# Downloaded wiki images, and the atlas packed out of them: both derived, both rebuilt by
-# `just thumbnails`, and the wiki's to distribute rather than this repository's.
+# The wiki's and YNOproject's to distribute; `just thumbnails` rebuilds them.
 /tools/atlas/cache
 /static/thumbnails.jpg
-# The placeholder an unvisited world is drawn as, downloaded by the same command. YNOproject's to
-# distribute rather than this repository's, for the same reason as the images above.
 /static/unknown_location.png
-# The key `android/build.sh` signs release apks with. Never committed: whoever holds it can ship
-# an update that Android will accept as this app. Back it up somewhere other than this directory.
+# The release signing key: whoever holds it can ship updates. Back it up elsewhere.
 /android/production.jks

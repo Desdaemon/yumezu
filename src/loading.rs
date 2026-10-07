@@ -66,14 +66,12 @@ impl Building {
             if let Some(said) = pending.take() {
                 let moved_on = said.is_some() && said != self.task;
                 self.task = said;
-                // The only account a run leaves of a wait that can last a minute. Logged as the
-                // line on screen rather than the message name behind it, so the two read alike.
+                // Logged as the on-screen line, so the log and the screen read alike.
                 if moved_on {
                     log::info!("the server is building the dump: {}", self.says());
                 }
                 self.pending = None;
             }
-            // One at a time: a request still in flight is the answer to how long to wait for it.
             return;
         }
         self.until -= seconds;
@@ -104,13 +102,12 @@ impl App {
         };
         self.dump = match loaded {
             Ok(Some(dump)) => Dump::Ready(dump),
-            // Not an error and not a dump: the server is building one.
+            // The server is building a dump.
             Ok(None) => Dump::Waiting {
                 why: None,
                 until: DUMP_POLLED_EVERY_SECONDS,
             },
-            // Not the end of the run: everything that stops a dump arriving is something that
-            // passes, so the loading frame goes on saying so and trying again.
+            // Every failure here is transient, so the frame keeps retrying.
             Err(error) => {
                 log::warn!("{error}");
                 Dump::Waiting {
@@ -127,22 +124,18 @@ impl App {
     /// Everything the overlay usually reads is built out of the dump, so only the one message is
     /// laid out, over the background the graph is drawn on so the window does not change colour.
     pub(super) fn draw_loading(&mut self) {
-        // Whole for as long as this is the frame: what fades is what is left once the graph draws.
         self.veil = 1.0;
         let ctx = self.ctx.wctx.as_ref().unwrap();
         let frame_input = self.ctx.fig.as_mut().unwrap().generate(ctx);
         let window = self.ctx.window.as_ref().unwrap();
         let seconds = (frame_input.elapsed_time as f32 * 1e-3).min(0.05);
-        // Only worth polling a server that is answering: an unreachable host is building nothing,
-        // and one whose dump arrived has nothing left to say.
+        // An unreachable host is building nothing, and a delivered dump has nothing left to say.
         if matches!(
             self.dump,
             Dump::Loading(_) | Dump::Waiting { why: None, .. }
         ) {
             self.building.tick(seconds);
         }
-        // The clock every wait ends on: however the last try turned out, the next one is what this
-        // run does about it.
         if let Dump::Waiting { until, .. } = &mut self.dump {
             *until -= seconds;
             if *until <= 0.0 {
@@ -150,25 +143,21 @@ impl App {
             }
         }
         let says = match &self.dump {
-            // The dump is here and the graph is not, which leaves one thing being waited for.
+            // The dump is here; only the account is pending.
             Dump::Ready(_) => t!("yno-loading"),
             Dump::Waiting { why: Some(_), .. } => t!("dump-failed"),
             _ => self.building.says(),
         };
-        // What went wrong, for the reader who goes looking. The frame keeps spinning either way,
-        // because either way it will try again.
+        // The frame keeps spinning, because it will retry either way.
         let failed = match &self.dump {
             Dump::Waiting { why, .. } => why.as_deref(),
             _ => None,
         };
-        // Kept for the fade that follows this frame, which carries out whichever line was on it.
+        // The fade after this frame carries this line out.
         self.said = says.clone();
         let overlay = self.overlay.as_mut().unwrap();
-        // The same scale the panel is laid out at, so the message is the size the rest of the
-        // interface will be.
         overlay.gui.context().set_zoom_factor(overlay.ui_scale);
-        // As in `Overlay::run`: the face Japanese needs is not compiled in, and this frame is the
-        // first that may want it.
+        // As in `Overlay::run`: the Japanese face is not compiled in.
         let context = overlay.gui.context().clone();
         overlay.japanese.serve(&context);
         overlay

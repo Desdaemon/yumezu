@@ -27,8 +27,7 @@ pub(super) const PANEL_MARGIN: i8 = 12;
 /// someone's account is worth no more than the code that keeps it.
 const YNO_SOURCE: &str = "https://github.com/Desdaemon/yumezu/blob/main/src/yno.rs";
 
-/// Width of the sidebar before anyone drags its edge.
-const SIDEBAR_WIDTH: f32 = 280.0;
+const SIDEBAR_DEFAULT_WIDTH: f32 = 280.0;
 /// The graph runs underneath the sidebar rather than stopping at its edge, so an opaque one would
 /// hide what was just selected. Still opaque enough to keep text legible over a bright graph.
 const SIDEBAR_OPACITY: u8 = 200;
@@ -46,8 +45,7 @@ const UI_SCALE_DEFAULT: f32 = 1.0;
 /// names the world under the pointer rather than covering it.
 const TOOLTIP_OFFSET: f32 = 16.0;
 
-// The gutter a walk's line is drawn down, and the line and its stops within it. Drawn as a transit
-// map draws a route: the reader is following one line through named stops, in order.
+// The gutter a walk's line runs down, drawn as a transit map draws a route.
 const RAIL_WIDTH: f32 = 18.0;
 const RAIL_LINE: f32 = 2.0;
 const RAIL_STOP: f32 = 3.0;
@@ -74,13 +72,10 @@ const HOVER_FINGER_GAP: f32 = 16.0;
 /// Above the row and below it only where there is no room above: a phone is held from below, so
 /// what is under the row is under the hand.
 const HOVER_ALIGNS: [egui::RectAlign; 1] = [egui::RectAlign::BOTTOM];
-/// Where [`HeldHover`] is kept.
 const HELD_HOVER_ID: &str = "held hover";
 
-// Fixed rather than taken from the title, which names whichever world is being walked to: egui
-// files a window's position under its id.
+// Fixed: egui keys window position by id, and the title changes per destination.
 const DIRECTIONS_ID: &str = "directions";
-// Enough of a route to read without covering the graph it is walked over.
 const DIRECTIONS_SIZE: [f32; 2] = [260.0, 300.0];
 
 /// The rocker is the one control with no words on it and the one a thumb goes for. A multiplier
@@ -203,7 +198,6 @@ struct Panel {
     /// What the menu, a link, or the rocker chose to light, if any of them chose at all. The inner
     /// `None` is the rocker's off position, which lights nothing.
     lit: Option<Option<Highlight>>,
-    /// Whether the menu was acted on and should close.
     menu_taken: bool,
     /// Whether egui is working a widget and the frame's pointer events are the panel's.
     wants_pointer: bool,
@@ -216,7 +210,6 @@ struct Panel {
     /// The world whose maps were called for. A second press on the same world closes them again:
     /// see [`map::Maps::toggle`].
     mapped: Option<usize>,
-    /// See [`yno::Account::pretend`].
     revealed: Option<usize>,
     /// Applied after the frame, so a frame is drawn in one language throughout.
     language: Option<i18n::Language>,
@@ -225,7 +218,6 @@ struct Panel {
 /// Everything the panel reads, walked out of [`AppEntities`] before it is built.
 struct PanelData<'a> {
     data: &'a AppEntities,
-    /// See [`Counted::rate`].
     fps: f32,
     /// The route home from what is lit, origin last.
     route: Vec<usize>,
@@ -300,12 +292,9 @@ impl Overlay {
         dump: Option<&world::Dump>,
         fading: Option<(String, f32)>,
     ) -> Panel {
-        // egui's zoom factor multiplies whatever the window says a point is worth, so the panel is
-        // laid out and read at the product and the graph at the window's ratio alone.
+        // egui multiplies the window's points per pixel by this; the graph uses the window's alone.
         self.gui.context().set_zoom_factor(self.ui_scale);
-        // Every hover text in the app that is not a row's -- those time their own hold, see
-        // [`held_long_enough`]. On a touch screen the wait is shortened and the demand that the
-        // pointer be still is dropped, a hand being unable to meet it.
+        // Rows time their own hold, see [`held_long_enough`]; a hand cannot hold still.
         if self.gui.context().input(|input| input.has_touch_screen()) {
             self.gui.context().all_styles_mut(|style| {
                 style.interaction.tooltip_delay = HOVER_HOLD_SECONDS as f32;
@@ -316,8 +305,7 @@ impl Overlay {
         let ratio = frame_input.device_pixel_ratio * self.ui_scale;
         let read = PanelData::new(data, self.counted.rate(), &self.sidebar, frame_input, ratio);
         let parameters = data.graph.parameters();
-        // Read here and written back after the panel: `parameters_mut` wakes the layout, so
-        // touching it every frame would keep the graph from ever settling.
+        // `parameters_mut` wakes the layout, so it is written back only on change.
         let mut panel = Panel {
             dimensions: parameters.dimensions,
             hub_repulsion: data.hub_repulsion,
@@ -339,8 +327,7 @@ impl Overlay {
             revealed: None,
             language: None,
         };
-        // Bound out of `self` so the closure borrows these fields alone, leaving `self.gui` free
-        // for the call it is passed to.
+        // Bound out so the closure leaves `self.gui` free.
         let sidebar = &mut self.sidebar;
         let guide = &mut self.guide;
         let download = &mut self.download;
@@ -348,8 +335,7 @@ impl Overlay {
         let insets = safe_insets(frame_input.viewport, ratio);
         self.gui.run(window, |ui| {
             let style = ui.style();
-            // Full height, with the safe area kept by standing the contents off the panel's own
-            // edges: stopping short of the status bar would leave a stripe above it.
+            // Full height, insetting contents: stopping short of the status bar leaves a stripe.
             let frame = egui::Frame::side_top_panel(style)
                 .inner_margin(egui::Margin {
                     left: insets.left + PANEL_MARGIN,
@@ -357,13 +343,12 @@ impl Overlay {
                     top: insets.top + PANEL_MARGIN,
                     bottom: insets.bottom + PANEL_MARGIN,
                 })
-                // The style's own panel colour, only thinned. See [`SIDEBAR_OPACITY`].
                 .fill(fade(style.visuals.panel_fill, SIDEBAR_OPACITY));
             match sidebar.closed {
                 false => {
                     egui::Panel::left("yumezu")
                         .frame(frame)
-                        .default_size(SIDEBAR_WIDTH)
+                        .default_size(SIDEBAR_DEFAULT_WIDTH)
                         .show(ui, |ui| panel.window(ui, &read, sidebar, account, dump));
                 }
                 true => sidebar_opener(ui, sidebar, insets),
@@ -372,31 +357,25 @@ impl Overlay {
             panel.directions(ui, &read);
             panel.menu(ui, &read);
             panel.tooltip(ui, &read);
-            // Read within the frame that set it, so the window is on screen the moment the button
-            // is let go of rather than the frame after.
+            // Within the frame that set it, so the window opens on release.
             if let Some(world) = panel.mapped {
                 maps.toggle(world, data.titles[world].show(), &data.maps[world]);
             }
             maps.show(ui.ctx(), insets);
             download.show(ui.ctx(), insets);
-            // Last, so it is drawn over everything it explains. A frame late when the settings tab
-            // has just called for it, which is a frame nobody sees.
+            // Last, so it is drawn over everything it explains.
             if panel.guide {
                 guide.reopen();
             }
             guide.show(ui.ctx());
-            // Last of all, and over the panel as much as the graph: what is fading stood in for
-            // the whole interface, so the whole interface comes out from under it.
+            // Over the panel too: the veil stood in for the whole interface.
             if let Some((says, opacity)) = &fading {
                 loading_frame(ui.ctx(), says, None, *opacity);
             }
         });
-        // Read from egui after the frame, the only point at which it knows what was laid out under
-        // the pointer.
+        // Only after the frame does egui know what lies under the pointer.
         panel.wants_pointer = self.gui.context().egui_wants_pointer_input()
             || self.gui.context().egui_wants_keyboard_input();
-        // Also after the frame: only now does egui know whether anything it drew took the focus
-        // typing would go to.
         track_keyboard(
             self.gui.context().egui_wants_keyboard_input(),
             &mut self.keyboard,
@@ -415,18 +394,16 @@ impl Overlay {
         dump: Option<&world::Dump>,
         fading: Option<(String, f32)>,
     ) -> bool {
-        // The frame before this one, the panel being drawn inside the frame it reports.
+        // The previous frame's time.
         self.timed(frame_input.elapsed_time as f32);
 
         let panel = self.panel(window, frame_input, data, account, dump, fading);
         if let Some(language) = panel.language {
             i18n::speak(language);
         }
-        // Cloned because the face is installed on the context while the field installing it is
-        // borrowed.
+        // Cloned: installing the face borrows the field.
         let context = self.gui.context().clone();
         self.japanese.serve(&context);
-        // Set by the panel too, and by the selections applied out here.
         let mut menu_taken = panel.menu_taken;
         if let Some(selection) = panel.lit {
             data.select(selection);
@@ -435,20 +412,16 @@ impl Overlay {
         if menu_taken {
             data.menu = None;
         }
-        // Always the route: a world named in a list is picked to be gone to rather than opened out.
         if let Some(world) = panel.chosen {
             data.select(Some(Highlight::Route(world)));
         }
-        // Every frame, cleared included: a row stops pointing by no longer being hovered, which is
-        // a frame that says nothing rather than one that says to stop.
+        // Every frame: unhovering clears it.
         data.pointed = panel.pointed;
-        // Out here because the account is what a pretence is laid on and the panel is handed only
-        // what it draws. The English name, that being what the two sides of the join agree on.
+        // The English name is the join key with the account.
         if let Some(world) = panel.revealed {
             account.pretend(data.titles[world].en.clone());
         }
-        // Framing again rather than only from here on: the button is pressed to be taken there
-        // now, whether or not the camera had already arrived.
+        // Toggled, so pressing reframes even after the camera has arrived.
         if panel.refit {
             data.frame_route = !data.frame_route;
             data.framing = true;
@@ -456,9 +429,7 @@ impl Overlay {
         if let Some(way) = panel.way {
             data.take_way(way);
         }
-        // three-d's own `GUI` surrenders the pointer only while egui is actively working a widget,
-        // so a scroll over the panel would reach the camera as a zoom. Whatever egui wants the
-        // pointer for is the panel's.
+        // three-d's `GUI` yields the pointer only mid-widget, so panel scrolls would zoom.
         if panel.wants_pointer {
             for event in frame_input.events.iter_mut() {
                 match event {
@@ -480,25 +451,21 @@ impl Overlay {
             self.leaning = panel.leaning;
             leaning_remember(self.leaning);
         }
-        // Followed live, so the panel resizes under the hand, but written through only once the
-        // hand is off it: a store is not something to write every frame of a drag.
+        // Stored only once the drag ends.
         self.ui_scale = panel.ui_scale;
         if self.ui_scale != self.ui_scale_stored && !self.gui.context().egui_is_using_pointer() {
             self.ui_scale_stored = self.ui_scale;
             store::write(UI_SCALE, Some(&self.ui_scale.to_string()));
         }
 
-        // Ahead of the early return below: two of the four change no simulation parameter and
-        // would never be written down otherwise. Held off while a slider is under the hand, for
-        // the reason the UI scale is.
+        // Ahead of the early return: two of the four change no simulation parameter.
         let layout = Layout {
             dimensions: panel.dimensions,
             layered: panel.layered,
             hub_repulsion: panel.hub_repulsion,
             link_reach: panel.link_reach,
         };
-        // The two knobs reach the simulation ahead of that same return: neither rearranges the
-        // layout the way a mode switch does, and both are dragged, so each is followed live.
+        // Both are dragged, so each is followed live without a reseed.
         if panel.hub_repulsion != data.hub_repulsion {
             data.hub_repulsion = panel.hub_repulsion;
             data.apply_hub_push();
@@ -524,8 +491,7 @@ impl Overlay {
         parameters.dag_level_slack = solve.dag_level_slack;
         parameters.force_charge = solve.force_charge;
         parameters.link_distance_max = solve.link_distance_max;
-        // A switch rearranges the whole layout rather than nudging it, so it gets a full settling
-        // window instead of what a settled graph has left.
+        // A full settling window, since a switch rearranges the whole layout.
         data.graph.revive();
         reseed
     }
@@ -553,8 +519,7 @@ impl<'a> PanelData<'a> {
                 _ => Vec::new(),
             },
             candidates: data.search(&sidebar.worlds),
-            // Only the open tab: matching a few hundred names for a list nobody is looking at is
-            // work every frame would pay for.
+            // Only the open tab.
             authors: match sidebar.tab {
                 Tab::Authors => matching(
                     data.authors.iter().map(|by| by.name.names()),
@@ -576,8 +541,7 @@ impl<'a> PanelData<'a> {
                 .menu
                 .as_ref()
                 .map(|menu| (menu.world, into_points(menu.at, frame_input, ratio))),
-            // Settled after the panel ran last frame, the pointer only being resolved once the
-            // panel has taken its share of the events. A frame behind, which nobody sees.
+            // A frame behind: the pointer resolves only after the panel takes its events.
             hovered: data
                 .hover
                 .zip(data.cursor)
@@ -614,9 +578,7 @@ pub(super) fn drawn_width(
     position: Vec3,
     center: PhysicalPoint,
 ) -> f32 {
-    // Half the quad, doubled, rather than both edges projected: `across` is square to the view
-    // direction, so the projection is linear between the edges. With `center` already in hand,
-    // that is one projection per node instead of three.
+    // `across` is square to the view, so the projection is linear: one projection, not two.
     let edge = camera.pixel_at_position(position + across * (radius * thumbnails::ASPECT));
     2.0 * (edge.x - center.x).hypot(edge.y - center.y)
 }
@@ -655,8 +617,7 @@ pub(super) fn loading_frame(ctx: &egui::Context, says: &str, failed: Option<&str
         egui::Id::new("loading-veil"),
     ))
     .rect_filled(
-        // The whole window, notches and status bar included: the graph is drawn under those too,
-        // and a veil stopping at the safe area would uncover a stripe of it early.
+        // The whole window: the graph is drawn under the notch and status bar too.
         ctx.viewport_rect(),
         egui::CornerRadius::ZERO,
         egui::Color32::from_rgba_unmultiplied(
@@ -672,12 +633,10 @@ pub(super) fn loading_frame(ctx: &egui::Context, says: &str, failed: Option<&str
         .show(ctx, |ui| {
             ui.set_opacity(opacity);
             ui.horizontal(|ui| {
-                // Whatever the frame says, it says it about something still going on: a run that
-                // could not reach the server is about to try again.
+                // It is always about to retry.
                 ui.add(egui::Spinner::new());
                 let line = ui.label(says);
-                // Logged in full; on screen it is offered only to whoever goes looking, there
-                // being nothing a reader can do with a URL and a status code.
+                // Logged in full; on screen only on hover.
                 if let Some(error) = failed {
                     line.on_hover_text(error);
                 }
@@ -685,7 +644,6 @@ pub(super) fn loading_frame(ctx: &egui::Context, says: &str, failed: Option<&str
         });
 }
 
-/// A colour at a fraction of its own opacity.
 fn fade(color: egui::Color32, opacity: u8) -> egui::Color32 {
     let [r, g, b, a] = color.to_srgba_unmultiplied();
     egui::Color32::from_rgba_unmultiplied(r, g, b, (a as u16 * opacity as u16 / 255) as u8)
@@ -697,8 +655,7 @@ fn safe_insets(viewport: Viewport, device_pixel_ratio: f32) -> egui::Margin {
     let safe = safe_rect(viewport, device_pixel_ratio);
     let width = viewport.width as f32 / device_pixel_ratio;
     let height = viewport.height as f32 / device_pixel_ratio;
-    // A margin is measured in whole points and stored in a byte, and no system furniture is
-    // anywhere near that deep.
+    // A margin is an `i8`; no system inset is that deep.
     let inset = |value: f32| value.clamp(0.0, 127.0) as i8;
     egui::Margin {
         left: inset(safe.min.x),
@@ -718,8 +675,7 @@ fn safe_rect(viewport: Viewport, device_pixel_ratio: f32) -> egui::Rect {
     #[cfg(target_os = "android")]
     if let Some(app) = ANDROID.get() {
         let rect = app.content_rect();
-        // Empty until the framework has laid the window out and said where its content goes,
-        // which is a frame or two into the first run.
+        // Empty for the first frame or two.
         if rect.right > rect.left && rect.bottom > rect.top {
             return egui::Rect::from_min_max(
                 egui::pos2(
@@ -767,7 +723,6 @@ fn track_keyboard(wanted: bool, shown: &mut bool) {
 pub(super) fn open_in_browser(url: &str) {
     #[cfg(target_family = "wasm")]
     {
-        // A new tab, so the graph the person was reading is still there when they come back.
         if let Some(window) = web_sys::window() {
             let _ = window.open_with_url_and_target(url, "_blank");
         }
@@ -777,17 +732,12 @@ pub(super) fn open_in_browser(url: &str) {
         use jni::objects::{JObject, JValue};
         use jni::{jni_sig, jni_str};
 
-        // There is no opener to run here: a program says it wants a URL viewed and the system
-        // decides who views it, which is a Java call and so JNI.
-        //
-        // The context the activity glue published is the Application's, and an application context
-        // may not start an activity into the task it is called from. Hence the flag, which gives
-        // the browser a task of its own, so leaving it comes back here.
+        // Viewing a URL is a Java intent, so JNI. An application context needs
+        // `FLAG_ACTIVITY_NEW_TASK` to start an activity.
         const FLAG_ACTIVITY_NEW_TASK: i32 = 0x1000_0000;
 
         let context = ndk_context::android_context();
-        // SAFETY: the glue publishes the VM and the context before it ever calls `android_main`,
-        // and both outlive the app.
+        // SAFETY: the glue publishes both before `android_main`, and both outlive the app.
         #[allow(unsafe_code)]
         let vm = unsafe { jni::JavaVM::from_raw(context.vm().cast()) };
         let opened = vm.attach_current_thread(|env| -> Result<(), jni::errors::Error> {
@@ -828,7 +778,6 @@ pub(super) fn open_in_browser(url: &str) {
     }
     #[cfg(all(not(target_family = "wasm"), not(target_os = "android")))]
     {
-        // The desktop's own opener, whichever this desktop is.
         let (opener, args): (_, &[&str]) = match true {
             _ if cfg!(target_os = "windows") => ("cmd", &["/C", "start", ""]),
             _ if cfg!(target_os = "macos") => ("open", &[]),

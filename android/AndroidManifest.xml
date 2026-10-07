@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The whole of the app that is not Rust. `android.app.NativeActivity` is the framework's own
-     class, so the apk carries no code of its own and needs no dex: see `android:hasCode`.
-     What runs is the library named below, entered at its `android_main`: see `src/lib.rs`. -->
+<!-- `NativeActivity` is the framework's own class, so the apk needs no dex. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="dev.yumezu">
 
@@ -14,10 +12,7 @@
         android:icon="@mipmap/ic_launcher"
         android:hasCode="false"
         android:extractNativeLibs="false">
-        <!-- No action bar, because there is nothing to put in one: the activity's whole view is
-             the native drawing surface. Left in, it is never drawn but is still measured, and the
-             content rect `safe_rect` reads comes back 56dp shorter than the window really is,
-             which parks the panel that far below the status bar it was only meant to clear. -->
+        <!-- An undrawn action bar still shortens the content rect `safe_rect` reads by 56dp. -->
         <activity
             android:name="android.app.NativeActivity"
             android:exported="true"

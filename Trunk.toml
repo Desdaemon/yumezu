@@ -1,40 +1,25 @@
 [serve]
 port = 5001
  
-# Trunk's own settings for `just serve`. The page may only fetch from its own host -- see
-# `world::server` -- and these put those requests through to `dreamweaver`, which has to be running
-# alongside (`just dreamweaver`). A page served by anything else needs the same routes proxied the
-# same way.
+# The page fetches only from its own host; `just dreamweaver` must run alongside.
 [[proxy]]
 rewrite = "/data"
 backend = "http://127.0.0.1:5000/data"
 
-# What the loading frame says while a server with no dump yet builds one. See `world::building`.
 [[proxy]]
 rewrite = "/pollUpdate"
 backend = "http://127.0.0.1:5000/pollUpdate"
 
-# The page may not reach YNOproject directly: that host allows exactly one origin, and the
-# credential it answers to is a cookie a browser only keeps for the origin that served it.
-# `dreamweaver` answers both of these and hands that cookie back for this origin on the way past --
-# see its `relay`.
+# YNOproject allows one origin; `dreamweaver` relays it and rehosts its session cookie here.
 [[proxy]]
 rewrite = "/yno/"
 backend = "http://127.0.0.1:5000/yno/"
 
-# Signing in, which is its own service upstream and its own path here.
 [[proxy]]
 rewrite = "/ynoauth/"
 backend = "http://127.0.0.1:5000/ynoauth/"
 
-# The hi-LOD pictures, which `world.rs` rewrites off `https://yume.wiki/images/` and onto this
-# route -- see its `proxied_images`. Straight at the wiki rather than through `dreamweaver`, which
-# has no route for them.
-#
-# The header is the whole point of the route. The wiki's edge answers 403 to a request carrying any
-# other `Origin` and to one carrying none, so a browser -- which sets that header itself and will
-# not be talked out of it -- cannot fetch these at all. Hence a proxy, which is not a browser and
-# says what `detail::ORIGIN` says on native.
+# The wiki answers 403 unless `Origin` is its own, a header no browser lets the page set.
 [[proxy]]
 rewrite = "/img/"
 backend = "https://yume.wiki/images/"

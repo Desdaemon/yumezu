@@ -92,7 +92,7 @@ pub(super) fn demand_sentence(demand: &Demand) -> String {
         Gate::Effect => t!("gate-effect-detail", effects = effects(detail)),
         Gate::Chance => t!("gate-chance-detail", chance = detail),
         Gate::Seasonal => t!("gate-seasonal-detail", season = detail),
-        // The wiki's own sentence, which it writes in English and publishes no Japanese for.
+        // The wiki publishes this sentence in English only.
         Gate::LockedCondition | Gate::Revisit => detail.to_owned(),
         _ => gate_sentence(demand.gate),
     }
@@ -127,7 +127,7 @@ pub(super) fn named_effects(detail: &str) -> String {
     let mut at = 0;
     while at < detail.len() {
         let rest = &detail[at..];
-        // A name only where a word starts and ends, so `Springfield` is not the Spring effect.
+        // Whole words only, so `Springfield` is not the Spring effect.
         let starting = detail[..at]
             .chars()
             .next_back()

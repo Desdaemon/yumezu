@@ -61,20 +61,16 @@ impl App {
             return Wanted::Now;
         }
         [
-            // Moving, or not long enough ago to start pacing the view by anything but the
-            // display. See [`IDLE_AFTER_SECONDS`].
-            (self.still < IDLE_AFTER_SECONDS).then_some(Wanted::Now),
-            // A fade in the panel, a blinking caret, a tooltip about to show itself.
+            (self.still_seconds < IDLE_AFTER_SECONDS).then_some(Wanted::Now),
+            // A fade, a blinking caret, a tooltip about to show.
             Some(Wanted::after(
                 self.overlay.as_ref().unwrap().gui.repaint_after(),
             )),
-            // The one thing that goes on moving over a settled layout, and so the only reason
-            // a graph nothing else is happening to is drawn at all. See [`AppStatics::focused`].
+            // The dashes keep moving over a settled layout. See [`AppStatics::focused`].
             (!data.dash_instances.transformations.is_empty()
                 && (self.statics.focused || cfg!(target_family = "wasm")))
             .then(|| Wanted::after_hz(IDLE_REDRAW_HZ)),
-            // Nothing is moving; a frame is drawn only because reading what has resolved is
-            // something only a frame does. See [`App::draw`].
+            // Only a frame collects resolved work. See [`App::draw`].
             (self.yno.working()
                 || matches!(data.atlas, Atlas::Loading(_))
                 || data.detail.pending())
@@ -89,8 +85,7 @@ impl App {
     pub(super) fn pace(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
         use winit::event_loop::ControlFlow;
         let flow = match self.wanted {
-            // The redraw request below is what wakes the loop; the wait is what it falls back to
-            // once the frame has been drawn.
+            // The redraw request below wakes the loop.
             Wanted::Now | Wanted::Never => ControlFlow::Wait,
             Wanted::After(delay) => ControlFlow::wait_duration(delay),
         };
@@ -106,11 +101,11 @@ impl App {
     /// first, so requesting on every event of a drag cancels the frame that was about to be drawn
     /// over and over.
     pub(super) fn request_a_frame(&mut self) {
-        if self.requested {
+        if self.frame_requested {
             return;
         }
         if let Some(window) = self.ctx.window.as_ref() {
-            self.requested = true;
+            self.frame_requested = true;
             window.request_redraw();
         }
     }

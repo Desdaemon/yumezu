@@ -91,7 +91,7 @@ impl Store {
     /// memory, and the next sync tries the file again.
     pub fn publish(&self, dump: Dump) -> Arc<Snapshot> {
         let snapshot = Arc::new(snapshot(dump));
-        if let Err(error) = write(&self.path, &snapshot.json) {
+        if let Err(error) = write_atomically(&self.path, &snapshot.json) {
             tracing::error!("cannot write {}: {error}", self.path.display());
         }
         *self.current.write().unwrap() = snapshot.clone();
@@ -109,8 +109,7 @@ fn snapshot(dump: Dump) -> Snapshot {
     }
 }
 
-/// Atomically as far as the filesystem allows.
-fn write(path: &Path, json: &str) -> std::io::Result<()> {
+fn write_atomically(path: &Path, json: &str) -> std::io::Result<()> {
     if let Some(directory) = path
         .parent()
         .filter(|directory| !directory.as_os_str().is_empty())

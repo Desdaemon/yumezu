@@ -1,16 +1,11 @@
 #!/usr/bin/env bash
-# Builds and signs an apk using only the Android SDK's command line tools: no Gradle, no Android
-# Studio, no Java source. The app is entirely native -- see `AndroidManifest.xml` -- so the apk is a
-# zip of one shared library, the assets it reads, and a compiled manifest.
-#
-# Wants ANDROID_HOME (or ANDROID_SDK_ROOT) pointing at an SDK that has platforms, build-tools and an
-# ndk installed. Everything it writes goes under `target/android`.
+# Builds and signs an apk with only the SDK's command line tools: the app is native.
+# Wants ANDROID_HOME (or ANDROID_SDK_ROOT) with platforms, build-tools and an ndk installed.
 set -euo pipefail
 
 readonly ABI=arm64-v8a
 readonly TRIPLE=aarch64-linux-android
-# The oldest Android this runs on, and so the platform library the code is linked against. Also what
-# the manifest declares, so the two cannot drift apart.
+# Also the manifest's minSdkVersion.
 readonly MIN_SDK=24
 
 cd "$(dirname "$0")/.."
@@ -20,7 +15,6 @@ readonly OUT=$ROOT/target/android
 sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}
 [[ -d $sdk ]] || { echo "no Android SDK at $sdk; set ANDROID_HOME" >&2; exit 1; }
 
-# Newest of whatever is installed, rather than a version pinned here that an SDK may not have.
 newest() { ls "$1" 2>/dev/null | sort -V | tail -1; }
 readonly TOOLS=$sdk/build-tools/$(newest "$sdk/build-tools")
 readonly NDK=$sdk/ndk/$(newest "$sdk/ndk")
@@ -30,24 +24,19 @@ for dir in "$TOOLS" "$NDK" "$PLATFORM"; do
 done
 readonly BIN=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
 
-# The ndk's clang is both the compiler for rustls' crypto and the linker for the whole library, and
-# it has to be told the api level in its own name rather than a flag.
+# The api level goes in clang's name, not a flag.
 export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$BIN/$TRIPLE$MIN_SDK-clang
 export CC_aarch64_linux_android=$BIN/$TRIPLE$MIN_SDK-clang
 export AR_aarch64_linux_android=$BIN/llvm-ar
 cargo build --release --lib --target "$TRIPLE"
 
-# The staging tree's layout *is* the apk's: `lib/<abi>` is where the framework looks for the library
-# named in the manifest. Nothing else goes in -- the thumbnails are fetched at runtime like the dump,
-# see `src/thumbnails.rs`.
+# The staging tree's layout is the apk's: `lib/<abi>` holds the library the manifest names.
 rm -rf "$OUT/staging"
 mkdir -p "$OUT/staging/lib/$ABI"
-# Stripped on the way in: the debug symbols are two thirds of the library and nothing on a phone
-# reads them. `target/` keeps the unstripped copy for symbolising a crash out of logcat.
+# `target/` keeps the unstripped copy for symbolising logcat crashes.
 "$BIN/llvm-strip" -o "$OUT/staging/lib/$ABI/libyumezu.so" \
     "$ROOT/target/$TRIPLE/release/libyumezu.so"
-# The launcher icon, and all that `android/res` holds. `link` takes compiled resources only, so
-# the zip below is that directory in the one form it reads.
+# `link` takes compiled resources only.
 "$TOOLS/aapt2" compile --dir "$ROOT/android/res" -o "$OUT/res.zip"
 
 "$TOOLS/aapt2" link \
@@ -58,24 +47,14 @@ mkdir -p "$OUT/staging/lib/$ABI"
     --target-sdk-version 34 \
     "$OUT/res.zip"
 
-# Stored rather than deflated, because the manifest says `extractNativeLibs="false"`: the loader
-# maps the library straight out of the apk, which needs it uncompressed and aligned.
+# Stored: `extractNativeLibs="false"` maps the library straight out of the apk.
 (cd "$OUT/staging" && zip -q -X -Z store "$OUT/unaligned.apk" "lib/$ABI/libyumezu.so")
 "$TOOLS/zipalign" -f -p 4 "$OUT/unaligned.apk" "$OUT/yumezu.apk"
 
-# Signing. The release key is `android/production.jks`, which is gitignored and is not in a fresh
-# clone -- mint it with
-#
+# The gitignored release key; mint it once and back it up, as only it can upgrade an installed apk:
 #   keytool -genkeypair -v -keystore android/production.jks -alias yumezu \
 #       -keyalg RSA -keysize 4096 -validity 10000
-#
-# which asks for a password and for the name to put in the certificate. Keep both, and back the file
-# up outside this directory: an apk signed with a different key is a different app to Android and to
-# the Play Store, and cannot upgrade one already installed. The password comes from
-# YUMEZU_KEYSTORE_PASS, and otherwise apksigner asks for it at the terminal.
-#
-# Until that file exists the build falls back to the throwaway key the SDK signs debug builds with:
-# enough to install on your own device, not enough to publish.
+# Without it, the build signs with the SDK debug key.
 readonly RELEASE_KEY=${YUMEZU_KEYSTORE:-$ROOT/android/production.jks}
 if [[ -f $RELEASE_KEY ]]; then
     pass=()

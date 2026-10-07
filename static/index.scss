@@ -2,7 +2,7 @@ html,
 body {
   margin: 0;
   height: 100%;
-  // Matches the renderer clear color, so the page does not flash white before the first frame.
+  // Matches the renderer clear color.
   background: #08080d;
 }
 
@@ -11,8 +11,7 @@ body {
   height: 100% !important;
 }
 
-// Stands in for the app's loading frame until there is an app: see `index.html`. Coloured to match
-// what replaces it, so the first frame is a handover rather than a change of screen.
+// Stands in for the app's loading frame until the app runs.
 #loading {
   position: fixed;
   inset: 0;
@@ -22,11 +21,10 @@ body {
   gap: 0.55em;
   pointer-events: none;
   font: 16px system-ui, sans-serif;
-  // egui's dark theme, which is what the frame this stands in for is drawn in.
+  // egui's dark theme.
   color: #8c8c8c;
 }
 
-// egui draws a turning arc beside the words, and so does this.
 #loading::before {
   content: "";
   width: 1em;

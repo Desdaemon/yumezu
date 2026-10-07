@@ -64,13 +64,8 @@ fn main() {
         .next()
         .flatten()
         .expect("cannot fetch the placeholder for an unvisited world");
-    // Beside the atlas as well as inside it: the app draws an unvisited world from the whole
-    // picture, there being no sharper version to switch to and a cell of it being this line art run
-    // through the atlas's jpeg. The cell is still packed, for the sidebar's catalog.
-    //
-    // Decoded and written out again rather than copied: the wiki serves this one as an indexed png,
-    // which the app's own decoder reads as one channel, drawing the black background red. Every
-    // other picture goes through the same conversion into the atlas.
+    // Also outside the atlas: unvisited worlds draw the whole picture; the cell is for the catalog.
+    // Re-encoded: the app decodes the wiki's indexed png as one channel, drawing black as red.
     let unknown_out = repo.join("static/unknown_location.png");
     let unknown_full = image::load_from_memory(&unknown_bytes)
         .expect("the placeholder is not an image")
@@ -85,8 +80,7 @@ fn main() {
     let mut packed = 0;
     for (world, bytes) in images.iter().enumerate() {
         let Some(thumbnail) = bytes.as_ref().and_then(|bytes| thumbnail(bytes)) else {
-            // Left black: a world whose image the wiki no longer serves is a node without a
-            // picture rather than a hole in the atlas.
+            // Left black: a node without a picture.
             continue;
         };
         let cell = (cells[world] as u32 % columns, cells[world] as u32 / columns);
@@ -98,7 +92,7 @@ fn main() {
         );
         packed += 1;
     }
-    // Last, in the corner the app reads it out of.
+    // Last, where the app reads it.
     let last = columns * rows - 1;
     image::imageops::replace(
         &mut atlas,
@@ -107,9 +101,7 @@ fn main() {
         ((last / columns) * CELL[1]) as i64,
     );
 
-    // JPEG, at a fifth of what the same atlas costs as a PNG, and a thumbnail this small has no
-    // detail to lose at a few tens of pixels wide. Its 8x8 blocks divide both sides of a cell, so
-    // the artefacts it does introduce stay inside the world they belong to.
+    // JPEG is a fifth of PNG's size; its 8x8 blocks divide a cell, so artefacts stay in one world.
     let out = repo.join("static/thumbnails.jpg");
     let mut file =
         std::io::BufWriter::new(std::fs::File::create(&out).expect("cannot write the atlas"));
@@ -156,7 +148,6 @@ fn thumbnail(bytes: &[u8]) -> Option<image::RgbImage> {
     if width == 0 || height == 0 {
         return None;
     }
-    // The largest cell-shaped rectangle the image contains.
     let scale = (width * CELL[1]).min(height * CELL[0]);
     let (crop_w, crop_h) = (scale / CELL[1], scale / CELL[0]);
     let cropped = image::imageops::crop_imm(
@@ -181,8 +172,7 @@ fn fetch_all(urls: &[String], cache: &Path) -> Vec<Option<Vec<u8>>> {
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .expect("cannot build an HTTP client");
-    // Handed out one at a time rather than split into per-worker ranges: the images vary enough in
-    // size that a fixed split leaves workers idle at the end of a run.
+    // Handed out one at a time: image sizes vary too much for a fixed split.
     let next = std::sync::atomic::AtomicUsize::new(0);
     let (fetched, collect) = std::sync::mpsc::channel();
 
@@ -199,12 +189,10 @@ fn fetch_all(urls: &[String], cache: &Path) -> Vec<Option<Vec<u8>>> {
                     if bytes.is_none() {
                         eprintln!("\rno image for world {world}: {}", urls[world]);
                     }
-                    // The receiver outlives every sender, so this cannot fail.
                     fetched.send((world, bytes)).unwrap();
                 }
             });
         }
-        // The workers hold the only senders left, so the collection below ends when they do.
         drop(fetched);
 
         let mut images = vec![None; urls.len()];
@@ -223,8 +211,7 @@ fn fetch_all(urls: &[String], cache: &Path) -> Vec<Option<Vec<u8>>> {
 
 /// A download is cached before it is returned, so an interrupted run resumes where it stopped.
 fn fetch(client: &reqwest::blocking::Client, url: &str, cache: &Path) -> Option<Vec<u8>> {
-    // The wiki's own name for the file. Its directory is a hash of that name, so the name alone
-    // identifies the image.
+    // The wiki hashes the name into the directory, so the name alone identifies the image.
     let name = url.rsplit('/').next().filter(|name| !name.is_empty())?;
     let cached = cache.join(name);
     if let Ok(bytes) = std::fs::read(&cached) {
@@ -239,15 +226,12 @@ fn fetch(client: &reqwest::blocking::Client, url: &str, cache: &Path) -> Option<
         return None;
     }
     let bytes = response.bytes().ok()?.to_vec();
-    // Not fatal: a cache that cannot be written only costs the next run its downloads.
     let _ = std::fs::write(&cached, &bytes);
     Some(bytes)
 }
 
 #[cfg(test)]
 mod tests {
-    // The app reads the placeholder out of the last cell of whatever grid the atlas divides into,
-    // so a grid one cell too small hands a world's picture out as the placeholder and loses it.
     #[test]
     fn the_last_cell_is_the_placeholder_and_no_world_reaches_it() {
         for highest in [0, 1, 2, 3, 8, 15, 16, 1578] {
@@ -255,7 +239,6 @@ mod tests {
             let last = (columns * rows) as usize - 1;
             assert!(last > highest, "{highest} of {columns}x{rows}");
         }
-        // No world at all is still an atlas: one cell, holding the placeholder.
         assert_eq!(super::grid(None), (1, 1));
     }
 }

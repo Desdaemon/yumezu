@@ -26,8 +26,7 @@ impl Panel {
         self.antialiasing(ui);
         self.leaning(ui);
         profile::controls(ui);
-        // The way back to a panel that was dismissed for good, so ticking that box is not a door
-        // that locks behind the person who ticked it.
+        // Restores a guide dismissed for good.
         self.guide |= ui.button(t!("show-controls")).clicked();
         Self::clear_cache(ui);
         update::controls(ui);
@@ -112,14 +111,12 @@ impl Panel {
             yno::State::SignedIn => {
                 ui.label(t!("yno-signed-in"));
             }
-            // The server's own words, which say whether it was the password or the network. Read
-            // before the label, the color being borrowed out of the same `ui`.
+            // Read before the label, which borrows the same `ui`.
             yno::State::Failed(why) => {
                 let color = ui.visuals().error_fg_color;
                 ui.colored_label(color, why);
             }
         }
-        // The refresh below would drop a second request on the floor while one is already out.
         let working = matches!(account.state(), yno::State::Working);
         if account.signed_in() {
             Self::completion(ui, account, dump);
@@ -132,8 +129,6 @@ impl Panel {
                 account.set_frontier(frontier);
             }
             ui.horizontal(|ui| {
-                // The account is read once at startup and not again, while the person is off
-                // playing the game and walking into places.
                 if ui
                     .add_enabled(!working, egui::Button::new(t!("yno-refresh")))
                     .on_hover_text(t!("yno-refresh-hint"))
@@ -141,8 +136,7 @@ impl Panel {
                 {
                     account.refresh();
                 }
-                // Forgotten here and left standing on YNOproject: ending it there would also sign
-                // out whatever browser the person plays the game in.
+                // Kept on YNOproject: ending it there signs out the game's browser too.
                 if ui.button(t!("yno-sign-out")).clicked() {
                     account.sign_out();
                 }
@@ -162,8 +156,6 @@ impl Panel {
             .add_enabled(ready, egui::Button::new(t!("yno-sign-in")))
             .clicked()
         {
-            // Taken rather than copied: the password has no second use, and the field it was typed
-            // into is the only place it was ever held.
             account.sign_in(
                 std::mem::take(&mut sidebar.yno_user),
                 std::mem::take(&mut sidebar.yno_password),
@@ -219,8 +211,6 @@ impl Panel {
         {
             fetch::clear();
         }
-        // Under the button rather than in it: the button says what it does, and this says what
-        // came of the last press.
         match cleared {
             fetch::Cleared::Never => {}
             fetch::Cleared::Clearing => {
@@ -282,8 +272,6 @@ mod tests {
 
     use super::*;
 
-    // Padded to a fixed width by the message rather than by the caller, which is the part a
-    // language is free to disagree about. The digits themselves are the machine's zone.
     #[test]
     fn a_stamp_is_said_in_the_reader_s_zone() {
         i18n::speak_english();

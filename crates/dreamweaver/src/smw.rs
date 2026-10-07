@@ -36,8 +36,7 @@ const WIKI: &str = "https://yume.wiki/api.php";
 /// challenge page: the explorer this program stands in for.
 const ORIGIN: &str = "https://explorer.yume.wiki";
 
-/// Yume 2kki's namespace on a wiki housing a dozen games under one installation.
-const NAMESPACE: &str = "3002";
+const YUME2KKI_NAMESPACE: &str = "3002";
 
 /// Everything that can go wrong here is an HTTP request or the JSON it came back as.
 pub type Error = reqwest::Error;
@@ -197,9 +196,8 @@ pub async fn changed_since(http: &reqwest::Client, when: &str) -> Result<Vec<Str
             .query(&[
                 ("action", "query"),
                 ("list", "recentchanges"),
-                ("rcnamespace", NAMESPACE),
+                ("rcnamespace", YUME2KKI_NAMESPACE),
                 ("rctype", "edit|new|log"),
-                // Oldest first, from the newest change already accounted for.
                 ("rcdir", "newer"),
                 ("rcstart", when),
                 ("rclimit", "500"),
@@ -252,13 +250,11 @@ pub struct Location {
     pub version_added: String,
     /// Every release that changed it, each optionally suffixed with what kind of change it was.
     pub versions_updated: Vec<String>,
-    /// The release it was taken out in, for a world that is no longer in the game.
     pub version_removed: Option<String>,
     /// Spans it was absent for and came back from, each written `<removed>-<readded>`.
     pub version_gaps: Vec<String>,
 }
 
-/// One track heard in a world.
 pub struct Bgm {
     /// Where the wiki serves the file from. Empty for a track it holds no file of.
     pub path: String,
@@ -268,7 +264,6 @@ pub struct Bgm {
     pub label: Option<String>,
 }
 
-/// One map the wiki draws of a world.
 pub struct LocationMap {
     pub path: String,
     /// The wiki's caption, which says which part of the world the map covers.
@@ -286,17 +281,13 @@ pub struct Connection {
     pub attributes: Vec<String>,
     /// The sentence a `Conditional` connection is gated behind.
     pub unlock_condition: Option<String>,
-    /// The effects a `Needs Effect` connection wants the player to be wearing.
     pub effects_needed: Vec<String>,
     /// The wiki writes one value per season, so a connection open in three has three.
     pub seasons_available: Vec<String>,
-    /// The odds a `Chance` connection opens at, as the wiki writes them.
     pub chance_percentage: Option<String>,
-    /// A connection that used to exist and no longer does.
     pub is_removed: bool,
 }
 
-/// Someone the wiki credits.
 pub struct Author {
     /// As the English wiki writes the name.
     pub name: String,
@@ -370,7 +361,7 @@ async fn askargs<R: DeserializeOwned>(
                 .map(|(name, found)| (name, found.printouts))
         }));
         match answer.next {
-            // Only forwards: an offset that has stopped growing is the store having wrapped.
+            // An offset that stops growing means the store wrapped.
             Some(next) if next > offset && next <= MAX_OFFSET => offset = next,
             Some(next) if next > MAX_OFFSET => {
                 tracing::warn!("{conditions} is too large to read past row {next}");
@@ -536,8 +527,7 @@ impl LocationRow {
             title,
             location_image: self.image.unwrap_or_default(),
             original_name: self.japanese,
-            // The dump publishes one author per world and a reader groups worlds by that string.
-            // Also what the wrapper hands back for the five worlds credited to two people.
+            // Readers group worlds by this string; five worlds are credited to two people.
             primary_author: (!self.authors.is_empty()).then(|| self.authors.join(", ")),
             bgms: self.bgms.into_iter().map(BgmRow::bgm).collect(),
             location_maps: self.maps.into_iter().map(MapRow::map).collect(),
@@ -563,7 +553,7 @@ struct BgmRow {
 impl BgmRow {
     fn bgm(self) -> Bgm {
         Bgm {
-            // The dump publishes an address as a string, and the reader would refuse a null.
+            // The reader refuses a null.
             path: self.path.unwrap_or_default(),
             title: self.title,
             label: self.label,
@@ -642,7 +632,7 @@ impl ConnectionRow {
             effects_needed: self.effects_needed,
             seasons_available: self.seasons_available,
             chance_percentage: self.chance_percentage,
-            // The store's own truth value rather than JSON's.
+            // The store's truth value, not JSON's.
             is_removed: self.is_removed.is_some_and(|flag| flag == "t"),
         })
     }
@@ -679,8 +669,7 @@ mod tests {
         assert_eq!(connection.origin, "Snow Village");
         assert_eq!(connection.destination, "Ice Cave");
         assert_eq!(connection.attributes, ["Seasonal", "Chance"]);
-        // Every season the wiki wrote is kept: which one the dump publishes is `crate::model`'s
-        // decision, not this reader's to make by dropping values.
+        // `crate::model` picks which season to publish.
         assert_eq!(connection.seasons_available, ["Fall", "Summer", "Winter"]);
         assert_eq!(connection.chance_percentage.as_deref(), Some("10%"));
         assert!(
@@ -749,7 +738,6 @@ mod tests {
         let bgm = world.bgms.first().expect("the one track");
         assert_eq!(bgm.title.as_deref(), Some("46202"));
         assert_eq!(bgm.label.as_deref(), Some("Aooh's Trap"));
-        // The dump publishes the address as a string: a track with no file is an empty one.
         assert_eq!(bgm.path, "");
         let map = world.location_maps.first().expect("the one map");
         assert_eq!(map.caption, "Map of 3D Structures Path");
@@ -778,7 +766,6 @@ mod tests {
                 .as_deref(),
             Some("FUMO, Peperoncino III from Yamada Pref.")
         );
-        // No author rather than an empty one, which keeps it out of a reader's author list.
         assert_eq!(
             row(&[]).location("FC Caverns".to_owned()).primary_author,
             None
@@ -858,8 +845,6 @@ mod tests {
             .iter()
             .map(|change| super::without_namespace(&change.title))
             .collect();
-        // Without the namespace: how the rest of the program spells a world, and how a sync
-        // recognises the two pages that are not worlds at all.
         assert_eq!(titles, ["Snow Village", "Authors"]);
         assert!(busy.carry.and_then(|carry| carry.rccontinue).is_some());
     }

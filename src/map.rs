@@ -9,16 +9,12 @@ use three_d::renderer::CpuTexture;
 
 use super::{detail, fetch, i18n::t, thumbnails, world};
 
-// Fixed rather than taken from the title: egui files a window's position under its id, so a
-// title-derived one would recentre the window every time a different world opened it.
+// Fixed: egui keys window position by id, so a title-derived id would recentre per world.
 const ID: &str = "world map";
-// Enough map to get one's bearings without covering the graph it was opened beside.
 const SIZE: [f32; 2] = [380.0, 320.0];
-// Far enough out that the largest map fits a small window whole, and well past 1:1 the other way
-// -- a corner worth looking at is often only a few tiles across.
+// Past 1:1, since a corner worth seeing is often a few tiles across.
 const ZOOM: std::ops::RangeInclusive<f32> = 0.02..=8.0;
-// The wiki's captions are sentences, not names, and all start with one of these. Cut off a tab,
-// where the window already names the world.
+// Cut off a tab, where the window already names the world.
 const CAPTION_PREFIXES: [&str; 2] = ["Map of the ", "Map of "];
 
 pub(super) struct Maps {
@@ -101,19 +97,16 @@ impl Maps {
         for sheet in &mut open.sheets {
             sheet.resolve(ctx);
         }
-        // Copied out and back: `Window::open` holds its flag for as long as the closure reading
-        // the rest runs.
+        // Copied: `Window::open` borrows the flag while the closure runs.
         let mut showing = true;
         let window = egui::Window::new(&open.title)
             .id(egui::Id::new(ID))
             .open(&mut showing)
             .constrain(true);
         let window = match self.sizing {
-            // Not scrolling: the map does its own panning, so the window's edge only says how much
-            // of the screen to give it.
+            // The map pans itself, so the window does not scroll.
             Sizing::Free => window.default_size(SIZE).resizable(true),
-            // three-d tells egui nothing about the system's furniture, so egui's content rect is
-            // the whole window and the app's own insets keep it out from under a status bar.
+            // three-d reports no system insets, so the app's own keep this clear of a status bar.
             Sizing::Full(_) => window.fixed_rect(ctx.content_rect() - insets),
             Sizing::Restoring(rect) => window.fixed_rect(rect),
         };
@@ -123,13 +116,12 @@ impl Maps {
             self.open = None;
             return;
         }
-        // `inner` is `None` on a frame the window is rolled up into its title bar.
+        // `None` while the window is rolled up.
         let Some(shown) = shown else {
             return;
         };
         self.sizing = match (shown.inner, self.sizing) {
             (Some(true), Sizing::Full(rect)) => Sizing::Restoring(rect),
-            // The rect it is being taken out of, read off the frame that drew it there.
             (Some(true), _) => Sizing::Full(shown.response.rect),
             (_, Sizing::Restoring(_)) => Sizing::Free,
             (_, sizing) => sizing,
@@ -150,12 +142,10 @@ impl Open {
             ui.label(t!("map-none"));
             return false;
         }
-        // Bound out of `self` so the row can borrow the sheets and the choice separately.
         let (sheets, at) = (&self.sheets, &mut self.at);
         let (mut refit, mut resize) = (false, false);
         ui.horizontal_wrapped(|ui| {
             match sheets.len() {
-                // Nothing to choose between, so the caption is a label, not a dead tab.
                 1 => {
                     ui.label(&sheets[0].label);
                 }
@@ -191,8 +181,7 @@ impl Sheet {
             return;
         };
         self.picture = match loaded.as_ref().and_then(thumbnails::color_image) {
-            // No mipmaps: the reader picks the scale moment to moment, so there is no one size to
-            // have filtered for.
+            // No mipmaps: the zoom changes freely.
             Some(image) => {
                 let texture =
                     ctx.load_texture(self.label.clone(), image, egui::TextureOptions::LINEAR);
@@ -213,13 +202,9 @@ impl Sheet {
             }
             Picture::Ready(texture) => {
                 let size = texture.size_vec2();
-                let scene = egui::Scene::new()
-                    .zoom_range(ZOOM)
-                    // The picture is the whole of the contents; nothing is wanted past its edge.
-                    .max_inner_size(size);
+                let scene = egui::Scene::new().zoom_range(ZOOM).max_inner_size(size);
                 let shown = scene.show(ui, &mut self.at, |ui| {
-                    // At its own size, in the scene's own coordinates: the scene's transform does
-                    // the fitting, and fitting here too would zoom an already-shrunk picture.
+                    // The scene's transform fits it; fitting here too would shrink it twice.
                     ui.add(egui::Image::new((texture.id(), size)).fit_to_original_size(1.0));
                 });
                 if refit || shown.response.double_clicked() {

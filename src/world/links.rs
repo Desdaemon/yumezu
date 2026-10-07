@@ -90,7 +90,7 @@ pub(super) fn parse_pages(json: &str) -> Pages {
         log::warn!("{YNOLOCATIONS} is not JSON");
         return pages;
     };
-    // Whole-name overrides first, so a per-map one wins where the list gives both.
+    // Whole-name overrides first, so a per-map one wins.
     if let Some(titles) = list["locationUrlTitles"].as_object() {
         for (title, page) in titles {
             if let Some(page) = page.as_str() {
@@ -163,8 +163,7 @@ pub fn author_url(author: &str) -> String {
 /// page, so what there is to open is the search for the tag.
 pub fn yume2kki_t_author_url(author: &str) -> String {
     let mut url = format!("{YUME2KKI_T}::cmd/taglist?tag=");
-    // The wiki tags with the name and the honorific together. A query rather than a path, so a
-    // space stays a space rather than the underscore a page name would want.
+    // A query, so a space stays a space rather than a page name's underscore.
     append_query_encoded(author, &mut url);
     append_query_encoded("氏", &mut url);
     url
@@ -208,8 +207,7 @@ pub fn version_url(name: &str) -> String {
     let Some(release) = read_release(name) else {
         return VERSION_HISTORY.to_owned();
     };
-    // The first hundred releases are two pages of their own, and the page that starts the regular
-    // run holds six rather than five.
+    // The first ninety releases share two pages, and the regular run starts with a page of six.
     let (high, low) = match release.number {
         0..=89 => (89, 0),
         90..=99 => (99, 90),

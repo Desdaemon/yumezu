@@ -7,8 +7,7 @@ pub(crate) use entry::i18n;
 #[cfg(all(target_arch = "wasm32", not(test)))]
 use wasm_bindgen::prelude::*;
 
-// Not under test: this runs on module load, and the harness loads the module into a page that has
-// no canvas for the event loop to attach to.
+// Not under test: the harness page has no canvas for the event loop.
 #[cfg(all(target_arch = "wasm32", not(test)))]
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
@@ -31,7 +30,6 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
         android_logger::Config::default().with_max_level(log::LevelFilter::Info),
     );
 
-    // The only route to anything the framework owns, and needed after startup too.
     entry::app::use_android_app(app.clone());
     entry::run(
         winit::event_loop::EventLoop::builder()
@@ -41,7 +39,6 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     );
 }
 
-// Every test in this crate is a browser test: the harness would otherwise run them under Node,
-// which has no DOM and is not what ships.
+// Node has no DOM.
 #[cfg(all(test, target_family = "wasm"))]
 wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);

@@ -25,8 +25,7 @@ impl Panel {
             )
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    // Scaled rather than sized: the arrows and the padding around them grow
-                    // together, so the buttons keep their shape and still follow the UI scale.
+                    // Scaled, so arrows and padding grow together with the UI scale.
                     let style = ui.style_mut();
                     for font in style.text_styles.values_mut() {
                         font.size *= ROCKER_SCALE;
@@ -73,7 +72,9 @@ impl Panel {
                     ui.set_max_width(POPUP_WIDTH);
                     ui.strong(data.titles[world].show());
                     ui.label(data.authors[data.author_of[world]].name.show());
-                    if data.descendants[world] > 0 && ui.button(t!("menu-descendants")).clicked() {
+                    if data.descendant_counts[world] > 0
+                        && ui.button(t!("menu-descendants")).clicked()
+                    {
                         self.lit = Some(Some(Highlight::Descendants(world)));
                     }
                     self.directions_menu(ui, read, world);
@@ -91,8 +92,7 @@ impl Panel {
                         self.mapped = Some(world);
                         self.menu_taken = true;
                     }
-                    // Such a world only exists while the graph is a frontier, so the entry is not
-                    // there to be wondered at in an ordinary run.
+                    // Such a world exists only while the graph is a frontier.
                     if !named
                         && ui
                             .button(t!("menu-reveal"))
@@ -113,7 +113,6 @@ impl Panel {
         };
         egui::Area::new(egui::Id::new("world tooltip"))
             .order(egui::Order::Tooltip)
-            // Kept inside the window, so a world hovered near the right edge is still readable.
             .constrain(true)
             .fixed_pos(at + egui::vec2(TOOLTIP_OFFSET, TOOLTIP_OFFSET))
             .show(ui.ctx(), |ui| {

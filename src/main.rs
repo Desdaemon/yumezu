@@ -10,13 +10,12 @@ use winit::platform::web::EventLoopExtWebSys;
 #[path = "app.rs"]
 pub(crate) mod app;
 
-// `t!` expands to `$crate::i18n`, and this crate has two roots -- this file for the binary,
-// `lib.rs` for the library -- so each names the module for the macro to find.
+// `t!` expands to `$crate::i18n`, and this crate has two roots, so each names the module.
 pub(crate) use app::i18n;
 
 #[allow(unused)]
 pub fn main() {
-    // The page and the phone install their own logger instead; see `lib.rs`.
+    // The page and the phone install their own logger in `lib.rs`.
     #[cfg(all(not(target_family = "wasm"), not(target_os = "android")))]
     env_logger::init();
     run(winit::event_loop::EventLoop::new().unwrap());

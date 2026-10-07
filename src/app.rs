@@ -109,7 +109,6 @@ fn leaning_remember(on: bool) {
 fn reduced_motion() -> bool {
     #[cfg(target_family = "wasm")]
     {
-        // A browser that will not answer is one that was never told to hold back.
         web_sys::window()
             .and_then(|window| {
                 window
@@ -164,10 +163,8 @@ pub(super) struct App {
     /// When the frame just drawn wants the next one. Read by the event loop, which is where the
     /// request is turned into a wait. See [`Wanted`].
     wanted: Wanted,
-    /// Whether a frame has been requested and not yet drawn. See [`App::request_a_frame`].
-    requested: bool,
-    /// Seconds since anything on screen last moved. See [`pacing::IDLE_AFTER_SECONDS`].
-    still: f32,
+    frame_requested: bool,
+    still_seconds: f32,
     stats: FrameStats,
 }
 
@@ -187,7 +184,6 @@ struct AppEntities {
     /// Busiest first, which is also what [`Highlight::Author`] indexes. See
     /// [`world::Dump::authors`].
     authors: Vec<world::Author>,
-    /// Per world, which of those authors made it.
     author_of: Vec<usize>,
     /// Newest first, each carrying what it added. What [`Highlight::Version`] indexes, and what
     /// the catalog lists.
@@ -252,8 +248,7 @@ struct AppEntities {
     /// simulation knows it only as the distance the layer spacing turns it into. See
     /// `LINK_REACH_DEFAULT`.
     link_reach: f32,
-    /// See [`world::Routes::descendant_counts`].
-    descendants: Vec<u32>,
+    descendant_counts: Vec<u32>,
     /// Drawn as a screen-filling quad before the graph. Not a [`Gm`] like the rest: it has no
     /// geometry of its own, only the material [`apply_screen_material`] stretches over the window.
     backdrop: ColorMaterial,
@@ -355,7 +350,6 @@ impl ApplicationHandler for App {
             .with_min_inner_size(winit::dpi::LogicalSize::new(1280, 720))
             .with_maximized(true);
 
-        // A phone gives an app the whole screen and nothing to say about it.
         #[cfg(target_os = "android")]
         let window_builder = Window::default_attributes();
 
@@ -401,17 +395,14 @@ impl ApplicationHandler for App {
         _: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        // Between a suspend and the next resume there is nothing to draw on and nothing that
-        // could act on an event, but the loop keeps delivering them.
+        // The loop keeps delivering events between a suspend and the next resume.
         let Some(fig) = self.ctx.fig.as_mut() else {
             return;
         };
-        // Anything that is not the frame itself may have changed what the frame would draw, and
-        // nothing is drawn here that was not requested. See [`App::request_a_frame`].
+        // See [`App::request_a_frame`].
         let wants_a_frame = !matches!(event, WindowEvent::RedrawRequested);
         fig.handle_winit_window_event(&event);
-        // Offered to the overlay as well, and to the scene either way: what the panel took is
-        // settled after it has been laid out, not here. See `Overlay::run`.
+        // What the panel took is settled in `Overlay::run`.
         if let Some(overlay) = self.overlay.as_mut() {
             overlay
                 .gui
@@ -422,14 +413,13 @@ impl ApplicationHandler for App {
                 self.ctx.wctx.as_ref().unwrap().resize(physical_size);
             }
             WindowEvent::RedrawRequested => {
-                self.requested = false;
+                self.frame_requested = false;
                 self.stats.began(self.ctx.wctx.as_ref().unwrap());
                 let began = web_time::Instant::now();
                 let rebuilt = self.draw();
-                // Taken before the buffers are swapped, which is where the wait for the display
-                // is: this is the frame's own cost, not the rate it is shown at.
+                // Before the swap, which waits for the display.
                 self.stats.frame(began.elapsed(), rebuilt);
-                // After the frame rather than before it, so the page never has neither.
+                // After the frame, so the page always shows one or the other.
                 #[cfg(target_family = "wasm")]
                 take_placeholder();
                 self.ctx.wctx.as_ref().unwrap().swap_buffers().unwrap();
@@ -438,16 +428,14 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
-            // A key held as the window is left never comes back up, so the view would go on
-            // walking. Nothing else three-d reports says the window stopped hearing the keyboard.
+            // A key held while focus leaves never comes back up.
             WindowEvent::Focused(false) => {
                 self.statics.walk = Walk::default();
                 self.statics.focused = false;
             }
             WindowEvent::Focused(true) => self.statics.focused = true,
             WindowEvent::Touch(touch) => {
-                // A second finger settles what the first was doing: not a tap, not a node drag and
-                // not an orbit, but the start of a pinch.
+                // A second finger makes it a pinch.
                 if self.statics.touches.track(&touch)
                     && let Some(data) = self.data.as_mut()
                 {
@@ -470,10 +458,10 @@ impl App {
     /// the screen. [`App::resumed`] then rebuilds by the same path a first start takes, so the
     /// layout is fresh.
     fn release(&mut self) {
-        // Read before the entities holding it go: see [`App::selected`].
+        // See [`App::selected`].
         self.selected = self.data.as_ref().and_then(|data| data.selected);
         self.data = None;
-        // A dropped `gui::Gui` does not give the context's buffers back on its own.
+        // A dropped `gui::Gui` leaks the context's buffers.
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.gui.destroy();
         }
@@ -506,8 +494,7 @@ impl App {
     pub fn new() -> Self {
         let camera = Camera::new_perspective(
             Viewport::new_at_origo(1, 1),
-            // Only which way a run looks from: where it looks and how far off it stands are
-            // framed onto the tree in [`App::build`]. Picked by hand off a settled 3D layout.
+            // Direction only, picked off a settled 3D layout; [`App::build`] frames the rest.
             vec3(-49.7, -47.1, -31.0),
             vec3(218.5, -173.5, 180.6),
             vec3(0.0, 1.0, 0.0),
@@ -515,20 +502,16 @@ impl App {
             0.1,
             1000.0,
         );
-        // Read out rather than off the control below, which is moved into place before the lean's
-        // own copy of it would be taken.
+        // Read before the control moves into place.
         let centre = camera.target();
         let control = OrbitControl::new(centre, 1.0, 500.0);
-        // Nothing waits on this or holds it: it publishes what it loads where the app reads it.
+        // It publishes where the app reads it.
         drop(fetch::spawn(world::load_pages()));
 
         Self {
             ctx: AppContext::default(),
-            // Started here rather than at the first frame: the fetch is the longest thing a run
-            // waits for, and nothing it needs is owned by the window.
+            // Started now: the fetch is a run's longest wait and needs no window.
             dump: Dump::Loading(fetch::spawn(world::load(false))),
-            // For the same reason as the dump: a run that left a session behind has an account to
-            // read before it has a window to draw it in.
             yno: yno::Account::new(),
             code: world::Code::default(),
             revealed: false,
@@ -551,8 +534,8 @@ impl App {
             said: String::new(),
             veil: 1.0,
             wanted: Wanted::Now,
-            requested: false,
-            still: 0.0,
+            frame_requested: false,
+            still_seconds: 0.0,
             stats: FrameStats::new(),
         }
     }
@@ -561,8 +544,7 @@ impl App {
         let window = self.ctx.window.as_ref().unwrap();
         let surface = SurfaceSettings {
             vsync: !profile::unlocked(),
-            // Read here rather than carried, so the surface and the overlay that reports it are
-            // built from one answer. See [`Overlay::antialias_running`].
+            // One read for both surface and overlay. See [`Overlay::antialias_running`].
             multisamples: match antialias_remembered() {
                 true => MULTISAMPLES,
                 false => 0,
@@ -574,8 +556,8 @@ impl App {
         self.ctx.fig = Some(FrameInputGenerator::from_winit_window(window));
         self.overlay = Some(Overlay::new(event_loop, window, ctx));
         self.build();
-        // Nothing else would: the window is drawn on demand, and this is the first demand.
-        self.requested = false;
+        // The window draws on demand; this is the first.
+        self.frame_requested = false;
         self.request_a_frame();
     }
 
@@ -588,14 +570,11 @@ impl App {
         let Dump::Ready(dump) = &self.dump else {
             return;
         };
-        // Building on the dump alone would put the whole game on screen and take it away a moment
-        // later. See `yno::Account::settled`.
+        // Otherwise the whole game flashes on screen. See `yno::Account::settled`.
         if !self.yno.settled() {
             return;
         }
-        // The frontier is a different graph rather than a different drawing of one: it takes
-        // worlds out, and a connection names the world it leads to by index. Applied here so
-        // nothing downstream has to know.
+        // The frontier drops worlds, renumbering the connections.
         let frontier;
         let dump = match self.yno.frontier() {
             Some(visited) => {
@@ -605,23 +584,15 @@ impl App {
             None => dump,
         };
         let ctx = self.ctx.wctx.as_ref().unwrap();
-        // Whether this graph is starting rather than carrying one on, which settles whether the
-        // camera is the person's to keep.
+        // An opening graph's camera is not yet the person's.
         let opening = self.before.is_none();
-        // Taken rather than borrowed: it belongs to the graph being replaced, and the one built
-        // here is the last thing with any use for it.
         let mut data = entities(dump, self.before.take().as_ref(), ctx);
-        // A graph solved on the plane has to be looked at square on, or it is seen edge on. The
-        // switch does this when thrown; a run that opens in two dimensions because an earlier run
-        // left it there never passes through the switch.
-        //
-        // Only on a graph that is opening: one carrying another on keeps the camera it was given.
+        // A run opening in two dimensions never passes through the switch that squares the camera.
         if opening && data.graph.parameters().dimensions == Dimensions::Two {
             self.statics.face_plane();
         }
 
-        // A link's world is lit the way picking it out of the search box would light it. A name
-        // this graph has not got is not an error: a stale link opens on the tree.
+        // A stale link opens on the tree.
         if let Some(name) = self.opening_on.take()
             && self.selected.is_none()
         {
@@ -630,13 +601,11 @@ impl App {
                 log::warn!("no world is named {name}");
             }
         }
-        // Lit again where a resume dropped it, which also aims the camera: this is a selection in
-        // a new layout, so where the camera was looking is nowhere in particular.
+        // A new layout, so the old camera aim means nothing.
         if self.selected.is_some() {
             data.select(self.selected);
         }
-        // Where a graph with nothing lit opens: on the tree, framed as picking it out would frame
-        // it, and snapped rather than eased -- there is no view yet to travel from.
+        // Snapped: there is no view yet to travel from.
         if let Some(bounds) = (opening && data.selected.is_none())
             .then(|| data.framing_bounds())
             .flatten()

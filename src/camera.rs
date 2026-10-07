@@ -93,8 +93,7 @@ impl Walk {
             (self.left as i32 - self.right as i32) as f32,
             (self.forward as i32 - self.back as i32) as f32,
         );
-        // Normalized, so two keys at once carry the view as far as one rather than over the
-        // diagonal.
+        // Normalized, so a diagonal walks no faster.
         let step = WALK_SPEED * dt / across.hypot(into).max(1.0);
         (across * step, into * step)
     }
@@ -141,8 +140,7 @@ impl Touches {
         let began = self.fingers.len() > 1 && !self.pinching;
         self.pinching = (self.pinching || began) && !self.fingers.is_empty();
 
-        // Only a move measures travel: a finger arriving or leaving moves the midpoint by half
-        // the gap between the fingers, which is not a drag and would fling the camera.
+        // A finger arriving or leaving shifts the midpoint by half the gap: not a drag.
         let midpoint = self.midpoint();
         if let (Some(now), Some(was), TouchPhase::Moved) = (midpoint, self.midpoint, touch.phase) {
             self.travel.0 += now.0 - was.0;
@@ -216,7 +214,6 @@ impl AppStatics {
             return false;
         }
         let scale = self.world_per_pixel(device_pixel_ratio);
-        // Opposite the drag: moving the camera left pushes the graph right.
         let translation = self.camera.up_orthogonal() * (delta.1 * scale)
             - self.camera.right_direction() * (delta.0 * scale);
         self.camera.translate(translation);
@@ -315,27 +312,23 @@ impl AppStatics {
         dt: f32,
     ) -> bool {
         let Some(at) = at else {
-            // Primed at the view, so the next lean starts from rest rather than from wherever the
-            // last one was heading.
+            // Primed, so the next lean starts from rest.
             self.lean_aim = self.control.target;
             return false;
         };
         let goal = match dimensions {
             Dimensions::Two => at,
-            // The eye does not travel here, so the centre landing on the world also sets how far
-            // off the eye stands: only as near as the orbit will stand it.
+            // The eye stays put, so the centre landing also sets its distance, within the orbit.
             Dimensions::Three => self.within_orbit(at),
         };
-        // Against the goal, not against what the first ease has reached: that starts out level
-        // with the centre and would read as arrived before either had moved.
+        // Against the goal: the first ease starts level with the centre and would read as arrived.
         if goal.distance(self.control.target)
             < self.control.target.distance(self.camera.position()) * LEAN_ARRIVAL_TOLERANCE
         {
             return false;
         }
 
-        // A fixed fraction of what is left per unit of time, as a framing move eases, and applied
-        // twice over: see [`Self::lean_aim`].
+        // Applied twice over: see [`Self::lean_aim`].
         let step = 1.0 - (-dt / (LEAN_WINDOW_MS * 1e-3)).exp();
         self.lean_aim += (goal - self.lean_aim) * step;
         let travel = (self.lean_aim - self.control.target) * step;
@@ -358,7 +351,7 @@ impl AppStatics {
         let span = reach.magnitude();
         let direction = match span > f32::EPSILON {
             true => reach / span,
-            // A world sitting on the eye: the way it already looks is the only honest answer.
+            // A world on the eye keeps the current direction.
             false => self.camera.view_direction(),
         };
         eye + direction * span.clamp(self.control.min_distance, self.control.max_distance)
@@ -380,8 +373,7 @@ impl AppStatics {
             return false;
         }
 
-        // A fixed fraction of what is left, per unit of time rather than per frame, so the move
-        // takes as long on a slow frame rate as on a fast one.
+        // Per unit of time, not per frame, so the move lasts as long at any frame rate.
         let step = 1.0 - (-dt / (FRAMING_WINDOW_MS * 1e-3)).exp();
         let target = self.control.target + (bounds.center - self.control.target) * step;
         let distance = distance + (goal_distance - distance) * step;
@@ -412,8 +404,7 @@ pub(super) fn lock_rotation(events: &mut [Event]) {
 /// graph can be turned to. Taken from the camera's own basis, so every node shares one rotation.
 pub(super) fn billboard(camera: &Camera) -> Mat4 {
     let forward = camera.view_direction();
-    // Normalized because the camera's own up need only be the axis the view is kept upright
-    // against. The orbit control refuses to look straight along it, so this cannot collapse.
+    // The orbit control never looks along `up`, so this cannot collapse.
     let right = camera.right_direction().normalize();
     let up = right.cross(forward);
     Mat4::from_cols(

@@ -3,10 +3,10 @@
 
 use super::i18n::t;
 
-// Presence is the whole answer; the value is always empty.
+// The value is always empty.
 const DISMISSED: &str = "guide-dismissed";
 
-// Widest unwrapped line, still inside a phone's window.
+// Widest unwrapped line within a phone's window.
 const WIDTH: f32 = 320.0;
 
 pub(super) struct Guide {
@@ -32,8 +32,7 @@ impl Guide {
         if !self.open {
             return;
         }
-        // Copied out and back rather than borrowed: `Window::open` holds one field for as long
-        // as the closure reading the other runs.
+        // Copied: `Window::open` borrows one field while the closure reads the other.
         let (mut open, mut dismissed, mut taken) = (true, self.dismissed, false);
         egui::Window::new(t!("guide-title"))
             .open(&mut open)
@@ -45,7 +44,7 @@ impl Guide {
                 ui.set_max_width(WIDTH);
                 ui.strong(t!("guide-inputs"));
                 egui::Grid::new("input guide").show(ui, |ui| {
-                    // The input column is localised too: "left mouse" is prose, not a key legend.
+                    // "left mouse" is prose, so the input column is localised too.
                     for row in [
                         "fly",
                         "strafe",

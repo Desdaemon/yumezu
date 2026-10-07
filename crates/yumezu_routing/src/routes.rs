@@ -19,7 +19,7 @@ impl Routes {
     /// way to. A reader sizing its nodes by this reads it through a logarithmic curve, so the
     /// origin -- which everything hangs off -- stays on the same scale as the rest.
     pub fn descendant_counts(&self) -> Vec<u32> {
-        // Deepest first, so a world's descendants are all counted before it hands them up.
+        // Deepest first, so descendants are counted before their parent.
         let mut order: Vec<usize> = (0..self.parents.len()).collect();
         order.sort_unstable_by_key(|&world| std::cmp::Reverse(self.depth[world]));
         let mut descendants = vec![0; self.parents.len()];
@@ -33,9 +33,7 @@ impl Routes {
 
     /// A world and every world that hangs off it, shallowest first so a reader walks it outward.
     pub fn subtree(&self, root: usize) -> Vec<usize> {
-        // Shallowest first, so a world's parent has already been decided when it is reached. A
-        // world the seed cannot reach sorts before every depth and has no parent to inherit from,
-        // which keeps it out of every subtree but its own.
+        // Shallowest first, so a parent is decided first; unreachable worlds lead, parentless.
         let mut order: Vec<usize> = (0..self.parents.len()).collect();
         order.sort_unstable_by_key(|&world| self.depth[world]);
         let mut inside = vec![false; self.parents.len()];
@@ -81,7 +79,6 @@ pub fn routes_from(connections: &[Vec<Step>], origin: usize) -> Routes {
 /// those steps demand nothing, so the route through them falls to the shortest one. At
 /// [`Gate::Revisit`] nothing is demanded anywhere and the walk counts connections alone.
 pub fn routes_from_passing(connections: &[Vec<Step>], origin: usize, passable: Gate) -> Routes {
-    // Standing at a world, the worlds it can be walked on to.
     walk(connections, origin, None, move |_, step| {
         let conditions = step.out.as_ref()?.gate;
         Some(Taken {
@@ -96,10 +93,7 @@ pub fn routes_from_passing(connections: &[Vec<Step>], origin: usize, passable: G
 /// steps are left. One search answers both what the directions are and, from anywhere, which ways
 /// on still reach the end of them.
 pub fn routes_toward(connections: &[Vec<Step>], destination: usize) -> Routes {
-    // Standing at a world, the worlds that can be walked on to it.
-    // A step into an isolated section can only be the last of a walk, so it is only a way to the
-    // world the search is seeded at -- everywhere else, walking on from it is what it does not
-    // allow.
+    // A step into an isolated section can only end a walk, so only the seed world accepts it.
     walk(connections, destination, None, |at, step| {
         let conditions = step.back.as_ref()?.gate;
         (conditions.onward() || at == destination).then_some(Taken {
@@ -136,16 +130,8 @@ fn walk(
         return routes;
     }
 
-    // Dijkstra over (gate, trapped, depth, demands): a world settles on its parent's route plus
-    // one step, so the parent chain and the depth cannot disagree. `demands` sits after the depth
-    // and so cannot move it -- it only picks the least demanding of the equally short routes that
-    // share one harshest condition. Reversed because `BinaryHeap` is a max-heap; the world and the
-    // parent ride in the key so ties resolve the same way on every run.
-    //
-    // `trapped` sits above the depth so that a world reachable both ways settles on the arrival
-    // that can be walked on from, however much longer it is. Settling it on the arrival into an
-    // isolated section would leave every world past it reachable only by a route that walks out
-    // of a section with no way out.
+    // Dijkstra over (gate, trapped, depth, demands); world and parent in the key break ties.
+    // `trapped` outranks depth, so a world settles on an arrival it can walk on from.
     let escape = hub.map(escape_step);
     let mut queue = std::collections::BinaryHeap::from([std::cmp::Reverse((
         Gate::Free,
@@ -167,9 +153,7 @@ fn walk(
             let Some(taken) = taking(world, step) else {
                 continue;
             };
-            // An isolated section leads only to another one: the wiki writes the way on out of a
-            // pocket as a pocket of its own, and everything else in the world it is a pocket of
-            // is on the far side of a wall.
+            // The wiki writes a pocket's way out as another pocket.
             if trapped && taken.onward {
                 continue;
             }
@@ -307,8 +291,7 @@ fn ways_between(
         let last = found[found.len() - 1].clone();
         for at in 0..last.len() - 1 {
             let root = &last[..=at];
-            // Every step already taken out of this world by a way that reached it the same way,
-            // so a candidate has to leave differently rather than rediscover one already found.
+            // Steps already taken from here by the same prefix, so a candidate must diverge.
             let refused: std::collections::HashSet<(usize, usize)> = found
                 .iter()
                 .chain(&candidates)
@@ -413,9 +396,7 @@ pub fn ways(
             }
         }
     }
-    // Cheapest first, and the shortest of each class ahead of the rest of it. The harshest gate
-    // only separates two of a class that are the same length, so a reader offered one of them is
-    // offered the gentler.
+    // Cheapest class first, shortest within it; the harshest gate only breaks length ties.
     found.sort_by_key(|walk| {
         let (conditions, demands) = conditions_of(connections, hub, walk);
         (price(conditions, demands), walk.len(), conditions)

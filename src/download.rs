@@ -14,12 +14,11 @@ use super::i18n::t;
 /// with the version that built it, so no address stays pointed at the newest.
 pub(super) const RELEASES: &str = "https://github.com/Desdaemon/yumezu/releases/latest";
 
-// Presence is the whole answer; the value is always empty.
+// The value is always empty.
 const DISMISSED: &str = "download-dismissed";
 
 /// A platform `.github/workflows/release.yml` builds a package for. See [`Platform::detected`],
 /// which is how anything gets one.
-// Off the page nothing is ever offered, so nothing there constructs one either.
 #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 #[derive(Clone, Copy)]
 pub(super) enum Platform {
@@ -68,8 +67,7 @@ impl Platform {
                 return Some(Self::Windows);
             }
             if agent.contains("Macintosh") {
-                // An iPad set to the desktop site says `Macintosh` and drops `iPad`. No Mac
-                // reports touch points, so this is what still tells the two apart.
+                // An iPad on the desktop site says `Macintosh`; no Mac reports touch points.
                 return (navigator.max_touch_points() <= 1).then_some(Self::MacOs);
             }
             agent.contains("Linux").then_some(Self::Linux)
@@ -115,7 +113,6 @@ impl Offer {
                             .clicked()
                         {
                             super::open_in_browser(RELEASES);
-                            // Taking the offer answers it: there is nothing further to hand out.
                             self.dismiss();
                         }
                         if ui

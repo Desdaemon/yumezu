@@ -3,8 +3,7 @@ use wasm_bindgen_test::wasm_bindgen_test as test;
 
 use super::World;
 
-// The invented tree of `yumezu_routing::fixture`, as worlds this side reads. Built rather than
-// parsed, `data.json` being the wiki's to distribute and not in the tree.
+// `data.json` is the wiki's to distribute, so tests use the invented tree.
 fn load() -> Vec<World> {
     yumezu_routing::fixture::dream_tree()
         .into_iter()
@@ -57,8 +56,6 @@ fn secretive() -> Vec<World> {
     ]
 }
 
-// Getting the renumbering wrong is silent: the graph still draws, with lines to the wrong
-// worlds.
 #[test]
 fn hiding_a_world_renumbers_the_connections_that_outlive_it() {
     let mut worlds = secretive();
@@ -76,8 +73,6 @@ fn hiding_a_world_renumbers_the_connections_that_outlive_it() {
             .iter()
             .map(|world| (world.title.as_str(), far(world)))
             .collect::<Vec<_>>(),
-        // Sofa Room has moved down to 1, and the connection each wrote to the debug room is
-        // gone rather than pointing at whoever took its place.
         [("Nexus", vec![1]), ("Sofa Room", vec![0])]
     );
 }
@@ -92,9 +87,7 @@ fn the_code_is_only_taken_once_it_has_been_typed_whole() {
 
     assert!(!type_out(code, "2005072"));
     assert!(!type_out(code, "nexus"));
-    // A false start, then the code from the top.
     assert!(type_out(code, "220050726"));
-    // Half of it, dropped by a search, so what follows completes nothing.
     code.typed('2');
     code.forget();
     assert!(!type_out(code, "0050726"));
@@ -116,7 +109,6 @@ fn the_code_keeps_the_secret_worlds_and_the_ways_into_them() {
 
 #[test]
 fn a_frontier_keeps_one_step_past_what_was_visited() {
-    // Each links only the step onward, so the step back is read off the far side's listing.
     let dump = chain(&["Nexus", "Sofa Room", "Far Room", "Farther Room"], 0);
     let visited = ["Nexus".to_owned()].into_iter().collect();
     let shown = dump.showing(&visited);
@@ -127,11 +119,8 @@ fn a_frontier_keeps_one_step_past_what_was_visited() {
             .iter()
             .map(|world| (world.title.as_str(), world.cell()))
             .collect::<Vec<_>>(),
-        // Kept as a place rather than a world: no cell, so it wears the placeholder.
         [("Nexus", Some(0)), ("Sofa Room", None)]
     );
-    // Sofa Room's step onward led to a world no longer there, so it is gone rather than
-    // pointing at whoever took its place.
     assert_eq!(
         shown
             .worlds
@@ -148,7 +137,6 @@ fn a_frontier_keeps_one_step_past_what_was_visited() {
 
 #[test]
 fn a_frontier_does_not_reach_through_a_passage_it_cannot_be_walked_down() {
-    // Every listed step is one-way *into* the world listing it, so Nexus has no way onward.
     let dump = chain(
         &["Nexus", "Sofa Room", "Far Room", "Farther Room"],
         yumezu_routing::ConnType::NO_ENTRY.bits(),
@@ -161,7 +149,6 @@ fn a_frontier_does_not_reach_through_a_passage_it_cannot_be_walked_down() {
             .iter()
             .map(|world| world.title.as_str())
             .collect::<Vec<_>>(),
-        // Sofa Room is a step the player cannot take.
         ["Nexus"]
     );
 }
@@ -220,7 +207,6 @@ fn a_connection_reads_the_same_from_either_end() {
 
 #[test]
 fn a_condition_is_read_out_in_the_words_the_dump_carries() {
-    // The words asserted below are the English ones.
     crate::i18n::speak_english();
     let worlds = load();
     let connections = super::connections(&worlds);
@@ -256,7 +242,6 @@ fn an_effect_is_named_and_the_words_around_it_are_left_alone() {
         named("Polygon (Mystery Zone A) or Crossing"),
         "Polygon (Mystery Zone A) or Crossing"
     );
-    // A name is a whole word, and a word that merely starts with one is not it.
     assert_eq!(named("Springfield"), "Springfield");
 }
 
@@ -268,8 +253,6 @@ fn the_origin_roots_the_route_tree() {
     let routes = super::canonical_routes(&worlds);
     assert_eq!(routes.depth[origin], Some(0));
     assert!(routes.parents[origin].is_none());
-    // What a seed at the wrong world does not do: everything unreached is at no depth, and
-    // the graph draws that as one layer.
     let unreached: Vec<_> = routes
         .depth
         .iter()
@@ -284,7 +267,6 @@ fn the_origin_roots_the_route_tree() {
 fn directions_start_where_the_walk_is_read_from() {
     let worlds = load();
     let connections = super::connections(&worlds);
-    // Well away from the origin, which is the case the canonical routes never exercise.
     let from = (super::origin_world(&worlds) + worlds.len() / 2) % worlds.len();
     let routes = super::routes_from(&connections, from);
     assert_eq!(routes.depth[from], Some(0));
@@ -320,7 +302,6 @@ fn a_free_way_nothing_is_shorter_than_is_offered_alone() {
     let connections = super::connections(&worlds);
     let hub = super::hub_world(&worlds);
     let from = super::origin_world(&worlds);
-    // A neighbour walked to for nothing: no second way there is as short, and none is freer.
     let to = connections[from]
         .iter()
         .find(|step| {
@@ -341,7 +322,6 @@ fn the_eyeball_bomb_is_a_way_back_from_anywhere() {
     let worlds = load();
     let connections = super::connections(&worlds);
     let hub = super::hub_world(&worlds).expect("the dump has the Nexus");
-    // One that does not lead there itself, so the way back is the effect and nothing else.
     let from = connections
         .iter()
         .position(|steps| steps.iter().all(|step| step.world != hub))
@@ -366,7 +346,6 @@ fn every_way_offered_is_one_a_player_could_walk() {
     let worlds = load();
     let connections = super::connections(&worlds);
     let from = super::origin_world(&worlds);
-    // Well away from the origin, so there is more than one way to be had.
     let to = (from + worlds.len() / 2) % worlds.len();
     let hub = super::hub_world(&worlds);
     let ways = super::ways(&connections, from, to, 5, hub);
@@ -461,7 +440,6 @@ fn a_player_who_can_pass_everything_is_never_sent_further() {
     assert!(nearer > 0, "no world is nearer with every gate open");
 }
 
-// The depth and the route the overlay walks are one thing seen twice.
 #[test]
 fn depth_is_the_length_of_the_canonical_route() {
     let worlds = load();
@@ -488,7 +466,6 @@ fn depth_is_the_length_of_the_canonical_route() {
     }
 }
 
-// Compared against a walk ignoring both direction and conditions.
 #[test]
 fn conditions_only_ever_push_a_world_deeper() {
     let worlds = load();
@@ -532,7 +509,6 @@ fn conditions_only_ever_push_a_world_deeper() {
             deeper.push(worlds[world].title.as_str());
         }
     }
-    // The worlds the two conditional shortcuts stand in front of.
     assert_eq!(
         deeper,
         [
@@ -577,14 +553,10 @@ fn a_release_addresses_the_section_it_is_written_up_in() {
         super::version_url("0.129d"),
         "https://yume.wiki/2kki/Version_History/0130-0126#Version_0.129d"
     );
-    // The English wiki gives a patch no section of its own, so it opens on the release it was
-    // applied to.
     assert_eq!(
         super::version_url("0.129c patch 27"),
         "https://yume.wiki/2kki/Version_History/0130-0126#Version_0.129c"
     );
-    // The page that starts the regular run holds six releases, and the two before it hold the
-    // first hundred between them.
     assert_eq!(
         super::version_url("0.100"),
         "https://yume.wiki/2kki/Version_History/0105-0100#Version_0.100"
@@ -597,7 +569,6 @@ fn a_release_addresses_the_section_it_is_written_up_in() {
         super::version_url("0.010"),
         "https://yume.wiki/2kki/Version_History/0089-0000#Version_0.010"
     );
-    // A name from the first years that the wiki never filed this way.
     assert_eq!(
         super::version_url("0.078+"),
         "https://yume.wiki/2kki/Version_History"
@@ -614,7 +585,6 @@ fn a_release_addresses_the_japanese_wikis_own_history() {
         super::yume2kki_t_version_url("0.129c patch 27"),
         "https://wikiwiki.jp/yume2kki-t/%E3%82%86%E3%82%81%EF%BC%92%E3%81%A3%E3%81%8D%E6%9B%B4%E6%96%B0%E5%B1%A5%E6%AD%B4/%E9%81%8E%E5%8E%BB%E3%81%AE%E6%9B%B4%E6%96%B0%E5%86%85%E5%AE%B910#ver1293p27"
     );
-    // Where the dump writes a patch without the space the wiki's own names have.
     assert_eq!(
         super::yume2kki_t_version_url("0.106 patch2"),
         "https://wikiwiki.jp/yume2kki-t/%E3%82%86%E3%82%81%EF%BC%92%E3%81%A3%E3%81%8D%E6%9B%B4%E6%96%B0%E5%B1%A5%E6%AD%B4/%E9%81%8E%E5%8E%BB%E3%81%AE%E6%9B%B4%E6%96%B0%E5%86%85%E5%AE%B902#ver1060p2"
@@ -635,7 +605,6 @@ fn an_author_addresses_a_tag_on_the_japanese_wiki() {
         super::yume2kki_t_author_url("185 Go"),
         "https://wikiwiki.jp/yume2kki-t/::cmd/taglist?tag=185%20Go%E6%B0%8F"
     );
-    // And where the wiki writes a name differently from the dump, its own writing of it.
     let bean = super::japanese_author("Bean");
     assert_eq!(
         super::yume2kki_t_author_url(bean),
@@ -649,9 +618,7 @@ fn an_author_addresses_a_tag_on_the_japanese_wiki() {
 
 #[test]
 fn a_japanese_title_addresses_the_page_the_wiki_files_it_under() {
-    // A slice of the list carrying each of the four ways it writes a place: a bare name, a name
-    // with its page, a map leading to several places, and one leading somewhere different per map
-    // it came from.
+    // The list's four forms: bare name, name with page, map to several places, map per origin.
     let pages = super::parse_pages(
         r#"{
             "urlRoot": "https://wikiwiki.jp/yume2kki-t/",
@@ -669,17 +636,13 @@ fn a_japanese_title_addresses_the_page_the_wiki_files_it_under() {
             "locationUrlTitles": { "ミニゲームA": "ミニゲーム/A" }
         }"#,
     );
-    // Its own name, the ordinary case, and what an unread list leaves every name at.
     let plain = "https://wikiwiki.jp/yume2kki-t/%E6%B9%96%E4%B8%8A%E3%81%AE%E6%A9%8B";
     assert_eq!(super::page_url(&pages, "湖上の橋"), plain);
     assert_eq!(super::yume2kki_t_url("湖上の橋"), plain);
-    // An area written up inside another world's page: the anchor stays an anchor.
     assert_eq!(
         super::page_url(&pages, "製作者の部屋"),
         "https://wikiwiki.jp/yume2kki-t/%E3%81%86%E3%82%8D%E3%81%A4%E3%81%8D%E9%82%B8#map0230"
     );
-    // A place written up on a bigger page, and one filed under a path -- the latter is the only
-    // kind the list keeps outside `mapLocations`. The slash stays a slash.
     assert_eq!(
         super::page_url(&pages, "昭和路地：バスツアー"),
         "https://wikiwiki.jp/yume2kki-t/%E6%98%AD%E5%92%8C%E8%B7%AF%E5%9C%B0"
@@ -688,13 +651,11 @@ fn a_japanese_title_addresses_the_page_the_wiki_files_it_under() {
         super::page_url(&pages, "ミニゲームA"),
         "https://wikiwiki.jp/yume2kki-t/%E3%83%9F%E3%83%8B%E3%82%B2%E3%83%BC%E3%83%A0/A"
     );
-    // An area the list does not carry: the world it is named after is what has a page.
     let potato = "https://wikiwiki.jp/yume2kki-t/%E3%83%9D%E3%83%86%E5%A1%94";
     assert_eq!(super::page_url(&pages, "ポテ塔：サカナ"), potato);
     assert_eq!(super::page_url(&pages, "ポテ塔: バーガーショップ"), potato);
 }
 
-// Nothing off to the side, however near.
 #[test]
 fn a_subtree_is_a_world_and_everything_behind_it() {
     //   0 ── 1 ── 2 ── 3
@@ -707,8 +668,6 @@ fn a_subtree_is_a_world_and_everything_behind_it() {
     assert_eq!(routes.subtree(4), [4]);
     assert_eq!(routes.subtree(0), [0, 1, 4, 2, 3]);
 }
-// `format` reads an unknown name out as itself, so a stage whose message was renamed or never
-// written would put `dump-task-worlds` on screen rather than a sentence.
 #[test]
 fn every_stage_the_server_can_name_is_something_this_app_can_say() {
     super::super::i18n::speak_english();
@@ -727,8 +686,6 @@ fn every_stage_the_server_can_name_is_something_this_app_can_say() {
     );
 }
 
-// A revisit is no way in: a route walked in through one is the last thing `Gate::Revisit`
-// exists for, so a world with any other way in should never be reached by one.
 #[test]
 fn no_route_is_walked_in_through_a_revisit_a_player_could_stand_off() {
     let worlds = load();
@@ -740,8 +697,6 @@ fn no_route_is_walked_in_through_a_revisit_a_player_could_stand_off() {
             .find(|(next, _)| *next == to)
             .map(|(_, conditions)| conditions.gate)
     };
-    // A route ending in an isolated section leaves a player where the world's other
-    // connections are behind a wall, so nothing there is a way in to anywhere.
     let stranded = |world: usize| {
         let mut at = world;
         while let Some(parent) = routes.parents[at] {
@@ -762,7 +717,7 @@ fn no_route_is_walked_in_through_a_revisit_a_player_could_stand_off() {
         })
         .map(|(world, _)| world)
         .collect();
-    // Without this the loop below has nothing to iterate and the test passes proving nothing.
+    // Guards against a vacuous pass.
     assert_eq!(
         walked_in
             .iter()
@@ -786,7 +741,6 @@ fn no_route_is_walked_in_through_a_revisit_a_player_could_stand_off() {
     }
 }
 
-// The panel reads a step's demand off `connections`; one missing there drops it silently.
 #[test]
 fn every_canonical_step_is_walkable_where_the_panel_reads_it() {
     let worlds = load();

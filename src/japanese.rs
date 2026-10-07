@@ -10,7 +10,7 @@
 //! Where it comes from is the whole of what the platforms differ in. A device usually has one
 //! already, which [`installed`] looks up by name; a page downloads one.
 
-// Only ever added, never looked up: a fallback rather than a family anything names.
+// Only added as a fallback, never looked up.
 const NAME: &str = "japanese";
 
 pub(super) enum Japanese {
@@ -47,7 +47,7 @@ async fn face() -> Option<(Vec<u8>, u32)> {
 
 #[cfg(target_family = "wasm")]
 async fn face() -> Option<(Vec<u8>, u32)> {
-    // Index zero: what is served is a single face rather than a collection.
+    // The served file is a single face, not a collection.
     download().await.map(|face| (face, 0))
 }
 
@@ -99,8 +99,6 @@ fn lowered(ctx: &egui::Context, face: &[u8], index: u32) -> f32 {
     }
 
     let panel = {
-        // Read from egui rather than off the file it happens to be built with, so this stays
-        // right if the panel is ever given a different Latin face.
         let font = egui::TextStyle::Body.resolve(&ctx.style_of(ctx.theme()));
         let size = font.size;
         let galley = ctx.fonts_mut(|fonts| {
@@ -115,8 +113,7 @@ fn lowered(ctx: &egui::Context, face: &[u8], index: u32) -> f32 {
     let japanese = {
         use skrifa::{MetadataProvider as _, instance::LocationRef, prelude::Size};
 
-        // Unscaled and divided by the em, which is how egui reads these too, so that the two
-        // sides are comparable.
+        // Unscaled and divided by the em, as egui reads them.
         let Ok(font) = skrifa::FontRef::from_index(face, index) else {
             return 0.0;
         };
@@ -228,8 +225,7 @@ fn installed() -> Option<(Vec<u8>, u32)> {
             .all(|&glyph| charmap.map(glyph).is_some())
             .then(|| {
                 log::info!("Japanese drawn with {:?}", family.name());
-                // Copied out of the mapping the system holds it in: egui keeps a font's bytes for
-                // as long as it draws with them, and borrowing out of that mapping needs unsafe.
+                // Copied: egui keeps the bytes while drawing; borrowing the mapping is `unsafe`.
                 (blob.as_ref().to_vec(), font.index())
             })
     })

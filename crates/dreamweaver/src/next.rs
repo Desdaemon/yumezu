@@ -82,7 +82,6 @@ fn ways_on<'a>(
     origin: usize,
     dest: usize,
 ) -> Vec<NextLocation<'a>> {
-    // Every way on from here would be a way back here.
     if origin == dest {
         return Vec::new();
     }
@@ -99,8 +98,7 @@ fn ways_on<'a>(
             Some((left + 1, secret, step.world))
         })
         .collect();
-    // Secret-free first, then shortest; the world's own index breaks ties, so two identical
-    // questions are answered identically.
+    // Secret-free first, then shortest; the index breaks ties deterministically.
     ways.sort_unstable_by_key(|&(depth, secret, world)| (secret, depth, world));
     if let Some(&(_, through_a_secret, _)) = ways.first()
         && !through_a_secret
@@ -187,7 +185,6 @@ mod tests {
         let dump = dump();
         let routing = Routing::of(&dump);
         let origin = world(&dump, yumezu_routing::START);
-        // Far enough that the answer is a route rather than a neighbour.
         let dest = world(&dump, "Marzipan Road");
 
         let ways = super::ways_on(&dump, &routing, origin, dest);
@@ -233,7 +230,7 @@ mod tests {
             Some((from, to.world))
         });
         let Some((from, to)) = unlisted else {
-            return; // A dump listing every connection from both sides has nothing to infer.
+            return;
         };
         let (conn_type, params) = super::leaving(&dump, from, to);
         assert!(params.is_empty(), "words invented for an unlisted way");

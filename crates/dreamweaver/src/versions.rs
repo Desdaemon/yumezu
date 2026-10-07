@@ -47,9 +47,7 @@ pub fn updates(packed: &str) -> Option<Vec<VerUpdated>> {
         .split(',')
         .filter(|entry| !entry.is_empty())
         .map(|entry| {
-            // Recognised by what follows rather than where it is: the shorthand is one or two of
-            // `a-z` and `+`, which no version name is, so the dash inside `pre-` and the one before
-            // a patch number are both left alone.
+            // The shorthand is one or two of `a-z` and `+`, unlike `pre-` or a patch number.
             let shorthand = entry.rfind('-').filter(|&at| {
                 at > 0
                     && !entry[at + 1..].is_empty()
