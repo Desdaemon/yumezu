@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{ConnType, Dump};
 use crate::store::Routing;
+use yumezu_routing::World as _;
 
 /// The only site that calls it, as the reference implementation pins it.
 const CALLED_BY: &str = "https://ynoproject.net";
@@ -133,17 +134,11 @@ fn leaving(
     u16,
     std::collections::BTreeMap<u16, yumezu_routing::TypeParams>,
 ) {
-    if let Some(listed) = dump.worlds[origin]
-        .connections
-        .iter()
-        .find(|connection| connection.target_id == world)
-    {
+    if let Some(listed) = dump.worlds[origin].connection_to(world) {
         return (listed.bits, listed.type_params.clone());
     }
     let back = dump.worlds[world]
-        .connections
-        .iter()
-        .find(|connection| connection.target_id == origin)
+        .connection_to(origin)
         .map(|connection| connection.flags())
         .unwrap_or_default();
     let inferred = match back.contains(ConnType::UNLOCK) {
@@ -168,6 +163,7 @@ fn answer(body: impl IntoResponse) -> Response {
 mod tests {
     use crate::model::Dump;
     use crate::store::Routing;
+    use yumezu_routing::World as _;
 
     fn dump() -> Dump {
         crate::model::dream_tree()
@@ -198,9 +194,7 @@ mod tests {
         let toward = yumezu_routing::routes_toward(&routing.connections, dest);
         for way in &ways {
             let at = world(&dump, way.title);
-            let step = routing.connections[origin]
-                .iter()
-                .find(|step| step.world == at)
+            let step = yumezu_routing::step_between(&routing.connections, origin, at)
                 .expect("a way on is one of the origin's own connections");
             assert!(step.out.is_some(), "{} cannot be walked to", way.title);
             assert_eq!(way.depth, toward.depth[at].expect("it reaches") + 1);
@@ -221,11 +215,7 @@ mod tests {
         let routing = Routing::of(&dump);
         let unlisted = (0..dump.worlds.len()).find_map(|from| {
             let to = routing.connections[from].iter().find(|step| {
-                step.out.is_some()
-                    && !dump.worlds[from]
-                        .connections
-                        .iter()
-                        .any(|listed| listed.target_id == step.world)
+                step.out.is_some() && dump.worlds[from].connection_to(step.world).is_none()
             })?;
             Some((from, to.world))
         });
@@ -235,9 +225,7 @@ mod tests {
         let (conn_type, params) = super::leaving(&dump, from, to);
         assert!(params.is_empty(), "words invented for an unlisted way");
         let back = dump.worlds[to]
-            .connections
-            .iter()
-            .find(|connection| connection.target_id == from)
+            .connection_to(from)
             .expect("the far side lists what the origin does not");
         let locked = back.flags().contains(super::ConnType::UNLOCK);
         assert_eq!(

@@ -13,7 +13,8 @@ pub mod fixture;
 mod routes;
 
 pub use routes::{
-    Routes, Way, routes_from, routes_from_passing, routes_toward, step_conditions, ways,
+    Routes, Way, routes_from, routes_from_passing, routes_toward, step_between, step_conditions,
+    ways,
 };
 
 use serde::{Deserialize, Serialize};
@@ -103,6 +104,13 @@ pub trait World {
     /// The English one, which is what a condition naming a world names it by.
     fn title(&self) -> &str;
     fn connections(&self) -> &[Connection];
+
+    /// What this world lists as its connection to `target`, if anything.
+    fn connection_to(&self, target: usize) -> Option<&Connection> {
+        self.connections()
+            .iter()
+            .find(|connection| connection.target_id == target)
+    }
 }
 
 /// The world the Eyeball Bomb effect returns a player to, from anywhere in the game.
@@ -379,42 +387,11 @@ pub fn walkable_steps(worlds: &[impl World]) -> Vec<Vec<(usize, Conditions)>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Conditions, ConnType, Connection, Demand, Gate, Step, TypeParams, World, connections,
+        Conditions, ConnType, Connection, Demand, Gate, Step, TypeParams, connections,
         routes_toward, ways,
     };
 
-    struct Place {
-        title: String,
-        connections: Vec<Connection>,
-    }
-
-    impl World for Place {
-        fn title(&self) -> &str {
-            &self.title
-        }
-        fn connections(&self) -> &[Connection] {
-            &self.connections
-        }
-    }
-
-    /// A line of worlds, each listing the next, every connection alike.
-    fn chain(titles: &[&str], flags: ConnType) -> Vec<Place> {
-        titles
-            .iter()
-            .enumerate()
-            .map(|(at, title)| Place {
-                title: (*title).to_owned(),
-                connections: (at + 1 < titles.len())
-                    .then(|| Connection {
-                        target_id: at + 1,
-                        bits: flags.bits(),
-                        type_params: Default::default(),
-                    })
-                    .into_iter()
-                    .collect(),
-            })
-            .collect()
-    }
+    use crate::fixture::{Place, chain, connection};
 
     #[test]
     fn a_connection_lists_every_demand_harshest_first() {
@@ -517,15 +494,8 @@ mod tests {
 
     #[test]
     fn a_way_through_a_far_side_lock_never_stands_in_for_one_a_visitor_can_walk() {
-        let place = |title: &str, connections: Vec<Connection>| Place {
-            title: title.to_owned(),
-            connections,
-        };
-        let conn = |to, flags: ConnType| Connection {
-            target_id: to,
-            bits: flags.bits(),
-            type_params: Default::default(),
-        };
+        let place = |title, connections| Place { title, connections };
+        let conn = |to, flags| connection(to, flags, None);
         let worlds = [
             place(
                 "Nexus",

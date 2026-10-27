@@ -80,12 +80,7 @@ pub fn routes_from(connections: &[Vec<Step>], origin: usize) -> Routes {
 /// [`Gate::Revisit`] nothing is demanded anywhere and the walk counts connections alone.
 pub fn routes_from_passing(connections: &[Vec<Step>], origin: usize, passable: Gate) -> Routes {
     walk(connections, origin, None, move |_, step| {
-        let conditions = step.out.as_ref()?.gate;
-        Some(Taken {
-            world: step.world,
-            gate: met(conditions, passable),
-            onward: conditions.onward(),
-        })
+        Taken::outward(step, passable)
     })
 }
 
@@ -111,6 +106,19 @@ struct Taken {
     gate: Gate,
     /// Whether the walk can go on from where it lands. See [`Gate::onward`].
     onward: bool,
+}
+
+impl Taken {
+    /// `step` walked the way it leads by a player past everything up to `passable`; `None` where it
+    /// leads nowhere that way.
+    fn outward(step: &Step, passable: Gate) -> Option<Self> {
+        let conditions = step.out.as_ref()?.gate;
+        Some(Self {
+            world: step.world,
+            gate: met(conditions, passable),
+            onward: conditions.onward(),
+        })
+    }
 }
 
 /// `taking` is which of the connections of the world being stood at the walk may take and what
@@ -196,6 +204,11 @@ fn escape_step(hub: usize) -> Step {
     }
 }
 
+/// The step `from` lists toward `to`, if they are joined.
+pub fn step_between(connections: &[Vec<Step>], from: usize, to: usize) -> Option<&Step> {
+    connections[from].iter().find(|step| step.world == to)
+}
+
 /// What stepping from one world to the next demands, the way home the game gives a player
 /// everywhere included. `None` where there is no walking it.
 pub fn step_conditions(
@@ -204,10 +217,7 @@ pub fn step_conditions(
     from: usize,
     to: usize,
 ) -> Option<Conditions> {
-    let listed = connections[from]
-        .iter()
-        .find(|step| step.world == to)
-        .and_then(|step| step.out.clone());
+    let listed = step_between(connections, from, to).and_then(|step| step.out.clone());
     listed.or_else(|| (hub == Some(to) && hub != Some(from)).then(escape_conditions))
 }
 
@@ -267,13 +277,10 @@ fn ways_between(
                refused: &std::collections::HashSet<(usize, usize)>|
      -> Option<Vec<usize>> {
         let routes = walk(connections, spur, hub, |at, step| {
-            let conditions = step.out.as_ref()?.gate;
-            let barred = shut[step.world] || refused.contains(&(at, step.world));
-            (!barred).then_some(Taken {
-                world: step.world,
-                gate: met(conditions, passable),
-                onward: conditions.onward(),
-            })
+            if shut[step.world] || refused.contains(&(at, step.world)) {
+                return None;
+            }
+            Taken::outward(step, passable)
         });
         routes.depth[to]?;
         let mut way = routes.walk_from(to);

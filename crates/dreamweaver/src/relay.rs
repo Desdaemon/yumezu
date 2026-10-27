@@ -170,12 +170,8 @@ fn client() -> reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            // reqwest panics without a process-wide provider.
-            let _ = rustls::crypto::ring::default_provider().install_default();
-            reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("cannot build an http client")
+            let builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+            crate::http_client(builder)
         })
         .clone()
 }

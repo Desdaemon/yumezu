@@ -27,7 +27,7 @@
 //!     15 Tin Solarium         -> nothing
 //! ```
 
-use crate::{ConnType, Connection, TypeParams};
+use crate::{ConnType, Connection, TypeParams, World};
 
 /// A world of the tree: the wiki's English title, and what it lists as its own connections.
 pub struct Place {
@@ -35,7 +35,16 @@ pub struct Place {
     pub connections: Vec<Connection>,
 }
 
-fn conn(to: usize, flags: ConnType, worded: Option<&str>) -> Connection {
+impl World for Place {
+    fn title(&self) -> &str {
+        self.title
+    }
+    fn connections(&self) -> &[Connection] {
+        &self.connections
+    }
+}
+
+pub fn connection(to: usize, flags: ConnType, worded: Option<&str>) -> Connection {
     Connection {
         target_id: to,
         bits: flags.bits(),
@@ -54,12 +63,27 @@ fn conn(to: usize, flags: ConnType, worded: Option<&str>) -> Connection {
     }
 }
 
+/// A line of worlds, each listing the next, every connection alike.
+pub fn chain(titles: &[&'static str], flags: ConnType) -> Vec<Place> {
+    titles
+        .iter()
+        .enumerate()
+        .map(|(at, &title)| Place {
+            title,
+            connections: (at + 1 < titles.len())
+                .then(|| connection(at + 1, flags, None))
+                .into_iter()
+                .collect(),
+        })
+        .collect()
+}
+
 fn free(to: usize) -> Connection {
-    conn(to, ConnType::empty(), None)
+    connection(to, ConnType::empty(), None)
 }
 
 fn cond(to: usize, words: &str) -> Connection {
-    conn(to, ConnType::LOCKED_CONDITION, Some(words))
+    connection(to, ConnType::LOCKED_CONDITION, Some(words))
 }
 
 pub fn dream_tree() -> Vec<Place> {
@@ -76,26 +100,29 @@ pub fn dream_tree() -> Vec<Place> {
         ("Lantern Causeway", vec![free(4)]),
         (
             "Mural Vestibule",
-            vec![conn(4, ConnType::CHANCE, Some("1/8"))],
+            vec![connection(4, ConnType::CHANCE, Some("1/8"))],
         ),
         (
             "Quiet Ledger",
-            vec![conn(4, ConnType::SEASONAL, Some("Winter"))],
+            vec![connection(4, ConnType::SEASONAL, Some("Winter"))],
         ),
         (
             "Nexus",
-            vec![free(5), conn(6, ConnType::EFFECT, Some("Lantern Cloak"))],
+            vec![
+                free(5),
+                connection(6, ConnType::EFFECT, Some("Lantern Cloak")),
+            ],
         ),
         ("Sunken Orchard", vec![free(7)]),
         ("Static Shoreline", vec![cond(7, "having lit the beacon")]),
         (
             "Marzipan Road",
-            vec![free(8), conn(9, ConnType::DEAD_END, None)],
+            vec![free(8), connection(9, ConnType::DEAD_END, None)],
         ),
         (
             "Clockwork Dunes",
             vec![
-                conn(10, ConnType::UNLOCK, None),
+                connection(10, ConnType::UNLOCK, None),
                 cond(14, "having wound the drum"),
             ],
         ),
@@ -103,8 +130,8 @@ pub fn dream_tree() -> Vec<Place> {
         (
             "Chalk Observatory",
             vec![
-                conn(8, ConnType::LOCKED, None),
-                conn(11, ConnType::ONE_WAY, None),
+                connection(8, ConnType::LOCKED, None),
+                connection(11, ConnType::ONE_WAY, None),
             ],
         ),
         ("Hollow Carnival", vec![free(12), free(14)]),

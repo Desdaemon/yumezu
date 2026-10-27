@@ -190,21 +190,18 @@ pub async fn changed_since(http: &reqwest::Client, when: &str) -> Result<Vec<Str
     let mut titles = std::collections::BTreeSet::new();
     let mut carry: Option<String> = None;
     loop {
-        let mut request = http
-            .get(WIKI)
-            .header(reqwest::header::ORIGIN, ORIGIN)
-            .query(&[
-                ("action", "query"),
-                ("list", "recentchanges"),
-                ("rcnamespace", YUME2KKI_NAMESPACE),
-                ("rctype", "edit|new|log"),
-                ("rcdir", "newer"),
-                ("rcstart", when),
-                ("rclimit", "500"),
-                ("rcprop", "title"),
-                ("format", "json"),
-                ("formatversion", "2"),
-            ]);
+        let mut request = wiki_request(http).query(&[
+            ("action", "query"),
+            ("list", "recentchanges"),
+            ("rcnamespace", YUME2KKI_NAMESPACE),
+            ("rctype", "edit|new|log"),
+            ("rcdir", "newer"),
+            ("rcstart", when),
+            ("rclimit", "500"),
+            ("rcprop", "title"),
+            ("format", "json"),
+            ("formatversion", "2"),
+        ]);
         if let Some(carry) = &carry {
             request = request.query(&[("rccontinue", carry), ("continue", &"-||".to_owned())]);
         }
@@ -336,9 +333,7 @@ async fn askargs<R: DeserializeOwned>(
     let mut offset = 0;
     loop {
         let separator = if parameters.is_empty() { "" } else { "|" };
-        let answer: Answer<R> = http
-            .get(WIKI)
-            .header(reqwest::header::ORIGIN, ORIGIN)
+        let answer: Answer<R> = wiki_request(http)
             .query(&[
                 ("action", "askargs"),
                 ("format", "json"),
@@ -355,12 +350,9 @@ async fn askargs<R: DeserializeOwned>(
             .error_for_status()?
             .json()
             .await?;
-        all.extend(answer.query.results.into_iter().flat_map(|subject| {
-            subject
-                .into_iter()
-                .map(|(name, found)| (name, found.printouts))
-        }));
-        match answer.next {
+        let next = answer.next;
+        all.extend(answer.into_subject_rows());
+        match next {
             // An offset that stops growing means the store wrapped.
             Some(next) if next > offset && next <= MAX_OFFSET => offset = next,
             Some(next) if next > MAX_OFFSET => {
@@ -372,11 +364,26 @@ async fn askargs<R: DeserializeOwned>(
     }
 }
 
+fn wiki_request(http: &reqwest::Client) -> reqwest::RequestBuilder {
+    http.get(WIKI).header(reqwest::header::ORIGIN, ORIGIN)
+}
+
 #[derive(Deserialize)]
 struct Answer<R> {
     query: Found<R>,
     #[serde(rename = "query-continue-offset")]
     next: Option<u32>,
+}
+
+impl<R> Answer<R> {
+    /// Each row with the page or subobject it was found on.
+    fn into_subject_rows(self) -> impl Iterator<Item = (String, R)> {
+        self.query.results.into_iter().flat_map(|subject| {
+            subject
+                .into_iter()
+                .map(|(name, found)| (name, found.printouts))
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -658,13 +665,9 @@ mod tests {
             serde_json::from_str(answer).expect("the store's own answer");
         assert_eq!(answer.next, Some(500));
         let connection = answer
-            .query
-            .results
-            .into_iter()
-            .flat_map(|subject| subject.into_values())
-            .map(|found| found.printouts)
+            .into_subject_rows()
             .next()
-            .and_then(super::ConnectionRow::connection)
+            .and_then(|(_, row)| row.connection())
             .expect("the one connection");
         assert_eq!(connection.origin, "Snow Village");
         assert_eq!(connection.destination, "Ice Cave");
@@ -722,13 +725,7 @@ mod tests {
             "Version gaps":["0.120d patch 21-0.120e"]}}}]}}"#;
         let answer: super::Answer<super::LocationRow> =
             serde_json::from_str(answer).expect("the store's own answer");
-        let (subject, row) = answer
-            .query
-            .results
-            .into_iter()
-            .flat_map(|subject| subject.into_iter().map(|(at, found)| (at, found.printouts)))
-            .next()
-            .expect("the one world");
+        let (subject, row) = answer.into_subject_rows().next().expect("the one world");
         let world = row.location(super::without_namespace(&subject));
         assert_eq!(world.title, "3D Structures Path");
         assert_eq!(world.version_added, "0.116a");
@@ -783,13 +780,7 @@ mod tests {
                     "item":["ja"]}}]}}}]}}"#;
         let answer: super::Answer<super::AuthorRow> =
             serde_json::from_str(answer).expect("the store's own answer");
-        let row = answer
-            .query
-            .results
-            .into_iter()
-            .flat_map(|subject| subject.into_values().map(|found| found.printouts))
-            .next()
-            .expect("the one author");
+        let (_, row) = answer.into_subject_rows().next().expect("the one author");
         assert_eq!(row.name.as_deref(), Some("kirin"));
         assert_eq!(
             row.original

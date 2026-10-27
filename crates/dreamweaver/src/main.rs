@@ -82,7 +82,7 @@ async fn main() -> std::process::ExitCode {
 
     let server = Server {
         store: Arc::new(store::Store::open(&options.data)),
-        http: wiki_http(),
+        http: http_client(reqwest::Client::builder()),
         progress: Arc::default(),
     };
     tokio::spawn(refresh(server.clone(), options.sync_every));
@@ -90,10 +90,10 @@ async fn main() -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
-fn wiki_http() -> reqwest::Client {
-    // reqwest panics without a process-wide provider.
+/// reqwest panics without a process-wide provider, so every client is built here.
+fn http_client(builder: reqwest::ClientBuilder) -> reqwest::Client {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    reqwest::Client::new()
+    builder.build().expect("cannot build an http client")
 }
 
 const USAGE: &str = "dreamweaver [--listen ADDR|PATH] [--data PATH] [--sync-every HOURS]";
@@ -375,9 +375,9 @@ async fn poll_update(State(server): State<Server>) -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     /// `rustls-no-provider` moves the choice of provider out of reqwest's features and into
-    /// [`super::http`], where the builder panics at run time rather than failing to compile.
+    /// [`super::http_client`], where the builder panics at run time rather than failing to compile.
     #[test]
     fn the_client_has_a_crypto_provider() {
-        super::wiki_http();
+        super::http_client(reqwest::Client::builder());
     }
 }

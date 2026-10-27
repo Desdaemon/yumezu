@@ -10,8 +10,7 @@
 
 use crate::model::ConnType;
 
-/// The world the game starts in, and so the world every distance is measured from.
-pub(crate) const START: &str = "Urotsuki's Room";
+pub(crate) use yumezu_routing::START;
 
 pub struct Node {
     pub title: String,
