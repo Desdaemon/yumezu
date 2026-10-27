@@ -24,6 +24,7 @@ mod graph;
 mod gui;
 mod guide;
 pub(crate) mod i18n;
+mod instanced;
 mod japanese;
 mod layout;
 mod link;
@@ -47,6 +48,7 @@ mod yno;
 use arrivals::*;
 use camera::*;
 use graph::*;
+use instanced::RefilledMesh;
 use layout::*;
 use loading::*;
 use pacing::*;
@@ -251,16 +253,15 @@ struct AppEntities {
     backdrop: ColorMaterial,
     /// The worlds: a picture of each on a camera-facing quad. Drawn only once the atlas they
     /// sample has arrived, there being nothing to sample until then.
-    thumbnails: Gm<InstancedMesh, ColorMaterial>,
+    thumbnails: Gm<RefilledMesh, ColorMaterial>,
     /// One world's thumbnail again, blended over the node it is already drawn on to brighten it.
     /// Drawn only while something is [`AppEntities::pointed`] at. See [`AppEntities::aim_glow`].
     glow: Gm<Mesh, ColorMaterial>,
-    edges: Gm<InstancedMesh, ColorMaterial>,
+    edges: Gm<RefilledMesh, ColorMaterial>,
     /// `EDGE_DASHES` per one-way connection, standing in for a solid line. See
     /// [`AppEntities::march_dashes`].
-    dashes: Gm<InstancedMesh, DashMaterial>,
-    /// Kept so each frame can rewrite the transformations while keeping the colors:
-    /// `set_instances` replaces the whole [`Instances`] struct.
+    dashes: Gm<RefilledMesh, DashMaterial>,
+    /// The CPU copy, which [`AppEntities::gather_lit`] copies the lit slots out of.
     thumbnail_instances: Instances,
     /// Only the two-way connections: the one-way ones are in `dash_instances` instead. Both are
     /// filled in the graph's own edge order, so an edge always reaches the same slot.
@@ -268,11 +269,11 @@ struct AppEntities {
     dash_instances: Instances,
     /// What a selection lights, drawn again over the finished scene so the layout cannot bury it.
     /// See [`AppEntities::gather_lit`].
-    lit_thumbnails: Gm<InstancedMesh, ColorMaterial>,
-    lit_edges: Gm<InstancedMesh, ColorMaterial>,
+    lit_thumbnails: Gm<RefilledMesh, ColorMaterial>,
+    lit_edges: Gm<RefilledMesh, ColorMaterial>,
     /// Apart from `lit_edges` so a lit one-way connection still reads as one-way: the overlay's
     /// solid lines carry no dash material.
-    lit_dashes: Gm<InstancedMesh, DashMaterial>,
+    lit_dashes: Gm<RefilledMesh, DashMaterial>,
     /// Compacted copies of the lit slots of the buffers above, rather than world-indexed as those
     /// are: nothing but the overlay's own draw reads them.
     lit_thumbnail_instances: Instances,

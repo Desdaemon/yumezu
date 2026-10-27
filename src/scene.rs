@@ -280,7 +280,7 @@ pub(super) fn entities(
     };
     // Billboarded quads: a cube's uvs spread the image across six faces.
     let thumbnails = Gm::new(
-        InstancedMesh::new(ctx, &thumbnail_instances, &CpuMesh::square()),
+        RefilledMesh::new(ctx, &thumbnail_instances, &CpuMesh::square()),
         ColorMaterial::default(),
     );
     // Additive, since a lit node is already white.
@@ -300,7 +300,7 @@ pub(super) fn entities(
         },
     );
     let edges = Gm::new(
-        InstancedMesh::new(ctx, &edge_instances, &CpuMesh::cylinder(EDGE_SIDES)),
+        RefilledMesh::new(ctx, &edge_instances, &CpuMesh::cylinder(EDGE_SIDES)),
         ColorMaterial::default(),
     );
     let dash_material = || DashMaterial {
@@ -308,18 +308,18 @@ pub(super) fn entities(
         render_states: RenderStates::default(),
     };
     let dashes = Gm::new(
-        InstancedMesh::new(ctx, &dash_instances, &dash_line()),
+        RefilledMesh::new(ctx, &dash_instances, &dash_line()),
         dash_material(),
     );
     // The overlay comes first by a depth clear, not by skipping the depth test.
     let (lit_thumbnail_instances, lit_edge_instances) =
         (Instances::default(), Instances::default());
     let lit_thumbnails = Gm::new(
-        InstancedMesh::new(ctx, &lit_thumbnail_instances, &CpuMesh::square()),
+        RefilledMesh::new(ctx, &lit_thumbnail_instances, &CpuMesh::square()),
         ColorMaterial::default(),
     );
     let lit_edges = Gm::new(
-        InstancedMesh::new(ctx, &lit_edge_instances, &CpuMesh::cylinder(EDGE_SIDES)),
+        RefilledMesh::new(ctx, &lit_edge_instances, &CpuMesh::cylinder(EDGE_SIDES)),
         ColorMaterial::default(),
     );
     let lit_dash_instances = Instances {
@@ -327,7 +327,7 @@ pub(super) fn entities(
         ..Default::default()
     };
     let lit_dashes = Gm::new(
-        InstancedMesh::new(ctx, &lit_dash_instances, &dash_line()),
+        RefilledMesh::new(ctx, &lit_dash_instances, &dash_line()),
         dash_material(),
     );
 
@@ -511,24 +511,17 @@ impl AppEntities {
             edge += 1;
         });
 
-        self.thumbnails.set_instances(&self.thumbnail_instances);
-        self.edges.set_instances(&self.edge_instances);
-        self.dashes.set_instances(&self.dash_instances);
+        self.thumbnails
+            .set_colors(self.thumbnail_instances.colors.as_deref());
+        self.edges.set_colors(self.edge_instances.colors.as_deref());
+        self.dashes
+            .set_colors(self.dash_instances.colors.as_deref());
         self.gather_lit();
     }
 
     /// Called wherever the scene's own buffers are written, this being a copy of their lit slots
     /// and nothing more.
     fn gather_lit(&mut self) {
-        // Each upload builds four GPU buffers, so an empty overlay stays unwritten.
-        let lighting =
-            !self.lit_nodes.is_empty() || !self.lit_lines.is_empty() || !self.lit_dashed.is_empty();
-        let standing = self.lit_thumbnails.instance_count() > 0
-            || self.lit_edges.instance_count() > 0
-            || self.lit_dashes.instance_count() > 0;
-        if !lighting && !standing {
-            return;
-        }
         let gather = |instances: &mut Instances, from: &[&Instances], at: &[&[usize]]| {
             instances.transformations.clear();
             let colors = instances.colors.get_or_insert_default();
@@ -624,7 +617,7 @@ impl AppEntities {
             let radius = self.node_radii[world] * arrivals.grown(world);
             thumbnails.push(node_quad(world_pos(node.position()), billboard, radius));
         });
-        self.thumbnails.set_instances(&self.thumbnail_instances);
+        self.thumbnails.set_placements(&self.thumbnail_instances);
         self.billboard = billboard;
     }
 
@@ -672,8 +665,8 @@ impl AppEntities {
                 }
             }
         });
-        self.edges.set_instances(&self.edge_instances);
-        self.dashes.set_instances(&self.dash_instances);
+        self.edges.set_placements(&self.edge_instances);
+        self.dashes.set_placements(&self.dash_instances);
     }
 
     /// Stands the placeholder over every world the player has not been to.
@@ -764,7 +757,7 @@ impl AppEntities {
             return;
         };
         self.thumbnail_instances.texture_transformations = Some(cells);
-        self.thumbnails.set_instances(&self.thumbnail_instances);
+        self.thumbnails.set_placements(&self.thumbnail_instances);
         // One upload: a [`Texture2DRef`] clone is a Mat3 and an atomic.
         let atlas = Texture2DRef::from_cpu_texture(context, &atlas);
         self.glow.material.texture = Some(atlas.clone());

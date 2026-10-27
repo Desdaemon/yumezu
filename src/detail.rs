@@ -10,6 +10,7 @@ use image::DynamicImage;
 use three_d::renderer::*;
 
 use super::fetch;
+use super::instanced::RefilledMesh;
 use super::prelude::*;
 use super::thumbnails;
 
@@ -66,10 +67,10 @@ struct Unvisited {
     loading: Option<fetch::Pending<Option<CpuTexture>>>,
     /// `None` until the picture resolves, and forever if it cannot be had, which leaves these worlds
     /// their bare nodes.
-    quads: Option<Gm<InstancedMesh, ColorMaterial>>,
+    quads: Option<Gm<RefilledMesh, ColorMaterial>>,
     /// The same picture again on the subset a selection lights, for the overlay -- see
     /// [`Detail::drawn_lit`].
-    lit: Option<Gm<InstancedMesh, ColorMaterial>>,
+    lit: Option<Gm<RefilledMesh, ColorMaterial>>,
 }
 
 pub struct Magnified {
@@ -119,11 +120,11 @@ impl Detail {
                 // One upload: a [`Texture2DRef`] clone is a Mat3 and an atomic.
                 let material = quad_material(context, &picture);
                 self.unvisited.lit = Some(Gm::new(
-                    InstancedMesh::new(context, lit, &CpuMesh::square()),
+                    RefilledMesh::new(context, lit, &CpuMesh::square()),
                     material.clone(),
                 ));
                 self.unvisited.quads = Some(Gm::new(
-                    InstancedMesh::new(context, quads, &CpuMesh::square()),
+                    RefilledMesh::new(context, quads, &CpuMesh::square()),
                     material,
                 ));
             }
@@ -131,10 +132,7 @@ impl Detail {
         if let Some(drawn) = &mut self.unvisited.quads {
             drawn.set_instances(quads);
         }
-        // `set_instances` builds four GPU buffers per call, so an empty overlay is written once.
-        if let Some(drawn) = &mut self.unvisited.lit
-            && (!lit.transformations.is_empty() || drawn.instance_count() > 0)
-        {
+        if let Some(drawn) = &mut self.unvisited.lit {
             drawn.set_instances(lit);
         }
     }
