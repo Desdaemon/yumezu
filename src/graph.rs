@@ -146,7 +146,24 @@ pub(super) fn untaken(connections: &[Vec<world::Step>], unknown: &[bool]) -> Vec
     ranked.into_iter().map(|(world, _)| world).collect()
 }
 
+/// Indexed by world: whether each is one of `worlds`.
+pub(super) fn world_mask(count: usize, worlds: impl IntoIterator<Item = usize>) -> Vec<bool> {
+    let mut mask = vec![false; count];
+    for world in worlds {
+        mask[world] = true;
+    }
+    mask
+}
+
+pub(super) fn pixel_distance(a: PhysicalPoint, b: PhysicalPoint) -> f32 {
+    (a.x - b.x).hypot(a.y - b.y)
+}
+
 impl AppEntities {
+    pub(super) fn dimensions(&self) -> Dimensions {
+        self.graph.parameters().dimensions
+    }
+
     /// Masses and reaches together because the knob means one thing: a hub that pushes its
     /// neighbours harder needs the room to push them into. See [`node_mass`] and [`edge_reach`].
     ///
@@ -218,9 +235,7 @@ impl AppEntities {
                 } if !*handled => {
                     let awarded = match &mut self.gesture {
                         Some(Gesture::Held { hit, origin, .. }) => {
-                            if (position.x - origin.x).hypot(position.y - origin.y)
-                                <= GESTURE_SLOP_PIXELS
-                            {
+                            if pixel_distance(*position, *origin) <= GESTURE_SLOP_PIXELS {
                                 // Within the slop: swallowed, or every click on a node would orbit.
                                 *handled = true;
                                 None
@@ -262,8 +277,7 @@ impl AppEntities {
                     ..
                 } => {
                     if let Some(origin) = self.right_press.take()
-                        && (position.x - origin.x).hypot(position.y - origin.y)
-                            <= GESTURE_SLOP_PIXELS
+                        && pixel_distance(*position, origin) <= GESTURE_SLOP_PIXELS
                     {
                         self.menu = self.pick(camera, *position).map(|grab| ContextMenu {
                             world: grab.node.index(),
@@ -329,7 +343,7 @@ impl AppEntities {
                     pixel,
                 ),
             );
-            if (pixel.x - cursor.x).hypot(pixel.y - cursor.y) < tolerance {
+            if pixel_distance(pixel, cursor) < tolerance {
                 nearest = Some(Grab {
                     node: node.index(),
                     depth,
@@ -482,11 +496,7 @@ impl AppEntities {
         if highlighted.is_empty() {
             return None;
         }
-        let mut on_route = vec![false; self.titles.len()];
-        for node in highlighted {
-            on_route[node] = true;
-        }
-        self.bounds_of(&on_route)
+        self.bounds_of(&world_mask(self.titles.len(), highlighted))
     }
 
     /// The sphere every world sits in, whatever is selected and whatever the run opened on.
@@ -506,11 +516,7 @@ impl AppEntities {
     /// nowhere near the rest of it, and one edge like that drags the sphere across the whole graph.
     pub(super) fn arrival_bounds(&self) -> Option<Bounds> {
         let arriving = self.arrivals.arriving()?;
-        let mut wanted = vec![false; self.titles.len()];
-        for world in arriving {
-            wanted[world] = true;
-        }
-        self.bounds_of(&wanted)
+        self.bounds_of(&world_mask(self.titles.len(), arriving))
     }
 
     pub(super) fn world_at(&self, world: usize) -> Option<Vec3> {
@@ -550,27 +556,16 @@ impl AppEntities {
         Some(Bounds { center, radius })
     }
 
-    /// At most [`SEARCH_CANDIDATES`], ranked by where the match falls and then by how much title
-    /// is left over, so a prefix beats a substring and an exact name beats both.
+    /// At most [`SEARCH_CANDIDATES`], ranked as [`world::ranked_matches`] ranks them.
     ///
     /// Empty for an empty needle -- ten arbitrary worlds are noise rather than suggestions.
     pub(super) fn search(&self, needle: &str) -> Vec<usize> {
-        let needle = needle.trim().to_lowercase();
-        if needle.is_empty() {
+        if needle.trim().is_empty() {
             return Vec::new();
         }
-        let mut hits: Vec<_> = self
-            .titles
-            .iter()
-            .enumerate()
-            .filter_map(|(world, title)| {
-                let (at, length) = title.find(&needle)?;
-                Some((at, length, world))
-            })
-            .collect();
-        hits.sort_unstable();
-        hits.truncate(SEARCH_CANDIDATES);
-        hits.into_iter().map(|(_, _, world)| world).collect()
+        let mut worlds = world::ranked_matches(self.titles.iter().map(world::Title::names), needle);
+        worlds.truncate(SEARCH_CANDIDATES);
+        worlds
     }
 
     /// The world a name names, by either of its names and in whatever case. A world the player has

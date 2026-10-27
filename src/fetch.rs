@@ -49,7 +49,7 @@ pub fn spawn<T: 'static>(work: impl std::future::Future<Output = T> + 'static) -
 pub type Client = reqwest_middleware::ClientWithMiddleware;
 #[cfg(target_family = "wasm")]
 pub type Client = reqwest::Client;
-/// Named so a caller can hand a half-built request on before sending it -- see `yno`'s
+/// Named so a caller can finish a request before [`FetchExt`] sends it -- see `yno`'s
 /// `session::sign`. Aliased for the reason in [`Client`].
 #[cfg(not(target_family = "wasm"))]
 pub type RequestBuilder = reqwest_middleware::RequestBuilder;
@@ -76,15 +76,22 @@ pub fn client() -> Client {
     CLIENT.get_or_init(build).clone()
 }
 
-pub async fn bytes(url: &str) -> Result<Vec<u8>, Error> {
-    Ok(client()
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?
-        .to_vec())
+/// Sends a finished request and reads the whole body, an error status being an error.
+pub trait FetchExt {
+    fn fetch_bytes(self) -> impl Future<Output = Result<Vec<u8>, Error>>;
+    fn fetch_text(self) -> impl Future<Output = Result<String, Error>>;
+}
+
+impl FetchExt for RequestBuilder {
+    async fn fetch_bytes(self) -> Result<Vec<u8>, Error> {
+        let body = self.send().await?.error_for_status()?.bytes().await?;
+        Ok(body.into())
+    }
+
+    async fn fetch_text(self) -> Result<String, Error> {
+        let body = self.send().await?.error_for_status()?.text().await?;
+        Ok(body)
+    }
 }
 
 /// A builder runs its middleware outermost first, so [`judged`] is added before the cache and

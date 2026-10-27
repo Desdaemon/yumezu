@@ -16,6 +16,35 @@ pub(super) fn read(key: &str) -> Option<String> {
     }
 }
 
+/// `None` for a key never written, or written with neither `on` nor `off`.
+pub(super) fn read_switch(key: &str) -> Option<bool> {
+    match read(key)?.as_str() {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    }
+}
+
+pub(super) fn write_switch(key: &str, on: bool) {
+    write(key, Some(if on { "on" } else { "off" }));
+}
+
+/// A key whose presence is the whole answer.
+pub(super) fn read_flag(key: &str) -> bool {
+    read(key).is_some()
+}
+
+pub(super) fn write_flag(key: &str, set: bool) {
+    write(key, set.then_some(""));
+}
+
+/// A value written by a version that allowed a different range is brought back inside this one
+/// rather than thrown away.
+pub(super) fn read_clamped(key: &str, range: std::ops::RangeInclusive<f32>) -> Option<f32> {
+    let value: f32 = read(key)?.parse().ok()?;
+    Some(value.clamp(*range.start(), *range.end()))
+}
+
 /// `None` takes the value back.
 pub(super) fn write(key: &str, value: Option<&str>) {
     #[cfg(target_family = "wasm")]
@@ -54,15 +83,7 @@ fn file(key: &str) -> Option<std::path::PathBuf> {
     #[cfg(target_os = "android")]
     let directory = super::ANDROID.get()?.internal_data_path()?;
     #[cfg(not(target_os = "android"))]
-    let directory = std::path::PathBuf::from(match std::env::var_os("XDG_CONFIG_HOME") {
-        Some(config) => config,
-        None => {
-            let mut home = std::env::var_os("HOME")?;
-            home.push("/.config");
-            home
-        }
-    })
-    .join(env!("CARGO_PKG_NAME"));
+    let directory = xdg_directory("XDG_CONFIG_HOME", "/.config")?;
     Some(directory.join(key))
 }
 
@@ -74,17 +95,23 @@ pub(super) fn cache_directory() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "android")]
     let directory = android_cache_directory()?;
     #[cfg(not(target_os = "android"))]
-    let directory = std::path::PathBuf::from(match std::env::var_os("XDG_CACHE_HOME") {
-        Some(cache) => cache,
-        None => {
-            let mut home = std::env::var_os("HOME")?;
-            home.push("/.cache");
-            home
-        }
-    })
-    .join(env!("CARGO_PKG_NAME"));
+    let directory = xdg_directory("XDG_CACHE_HOME", "/.cache")?;
     std::fs::create_dir_all(&directory).ok()?;
     Some(directory)
+}
+
+/// This app's directory under `variable`, or under `home_suffix` in `HOME` where it is unset.
+#[cfg(not(any(target_family = "wasm", target_os = "android")))]
+fn xdg_directory(variable: &str, home_suffix: &str) -> Option<std::path::PathBuf> {
+    let base = match std::env::var_os(variable) {
+        Some(base) => base,
+        None => {
+            let mut home = std::env::var_os("HOME")?;
+            home.push(home_suffix);
+            home
+        }
+    };
+    Some(std::path::PathBuf::from(base).join(env!("CARGO_PKG_NAME")))
 }
 
 /// Read from Java because the activity glue publishes only `internalDataPath`, the app's *files*

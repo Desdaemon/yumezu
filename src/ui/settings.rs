@@ -33,29 +33,16 @@ impl Panel {
         Self::freshness(ui, dump);
         Self::yno(ui, sidebar, account, dump);
 
-        if ui
-            .hyperlink_to(
-                format!("{GITHUB}  {}", t!("github-link")),
-                "https://github.com/Desdaemon/yumezu",
-            )
-            .clicked()
-        {
-            open_in_browser("https://github.com/Desdaemon/yumezu");
-        }
+        let github = format!("{GITHUB}  {}", t!("github-link"));
+        browser_link(ui, github, "https://github.com/Desdaemon/yumezu");
 
-        if let Some(platform) = download::Platform::detected()
-            && ui
-                .hyperlink_to(
-                    format!(
-                        "{}  {}",
-                        platform.icon().codepoint,
-                        t!("download-for", platform = platform.name())
-                    ),
-                    download::RELEASES,
-                )
-                .clicked()
-        {
-            open_in_browser(download::RELEASES);
+        if let Some(platform) = download::Platform::detected() {
+            let label = format!(
+                "{}  {}",
+                platform.icon().codepoint,
+                t!("download-for", platform = platform.name())
+            );
+            browser_link(ui, label, download::RELEASES);
         }
     }
 
@@ -188,12 +175,7 @@ impl Panel {
     /// link points at the file that makes the promise rather than at the project.
     fn promise(ui: &mut egui::Ui) {
         ui.label(t!("yno-promise"));
-        if ui
-            .hyperlink_to(format!("{GITHUB}  {}", t!("yno-source")), YNO_SOURCE)
-            .clicked()
-        {
-            open_in_browser(YNO_SOURCE);
-        }
+        browser_link(ui, format!("{GITHUB}  {}", t!("yno-source")), YNO_SOURCE);
     }
 
     /// Nothing of `self`, the cache's own state being the only state there is: one store behind

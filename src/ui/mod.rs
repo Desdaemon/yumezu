@@ -8,7 +8,7 @@ mod settings;
 mod sidebar;
 mod tile;
 
-use sidebar::{matching, sidebar_opener, worlds};
+use sidebar::{sidebar_opener, worlds};
 use tile::{Tile, release_held_hover};
 
 use super::*;
@@ -521,14 +521,14 @@ impl<'a> PanelData<'a> {
             candidates: data.search(&sidebar.worlds),
             // Only the open tab.
             authors: match sidebar.tab {
-                Tab::Authors => matching(
+                Tab::Authors => world::ranked_matches(
                     data.authors.iter().map(|by| by.name.names()),
                     &sidebar.authors,
                 ),
                 _ => Vec::new(),
             },
             versions: match sidebar.tab {
-                Tab::Versions => matching(
+                Tab::Versions => world::ranked_matches(
                     data.versions
                         .iter()
                         .map(|version| std::iter::once(version.name.as_str())),
@@ -550,14 +550,8 @@ impl<'a> PanelData<'a> {
     }
 }
 
-/// A value written by a version that allowed a different range is brought back inside this one
-/// rather than thrown away.
 fn remembered_scale() -> f32 {
-    store::read(UI_SCALE)
-        .and_then(|scale| scale.parse().ok())
-        .map_or(UI_SCALE_DEFAULT, |scale: f32| {
-            scale.clamp(*UI_SCALE_RANGE.start(), *UI_SCALE_RANGE.end())
-        })
+    store::read_clamped(UI_SCALE, UI_SCALE_RANGE).unwrap_or(UI_SCALE_DEFAULT)
 }
 
 /// A window position in physical pixels, counted from the bottom, into egui's points counted from
@@ -580,7 +574,7 @@ pub(super) fn drawn_width(
 ) -> f32 {
     // `across` is square to the view, so the projection is linear: one projection, not two.
     let edge = camera.pixel_at_position(position + across * (radius * thumbnails::ASPECT));
-    2.0 * (edge.x - center.x).hypot(edge.y - center.y)
+    2.0 * pixel_distance(edge, center)
 }
 
 /// Takes the page's own loading line off the document, the once.
@@ -713,6 +707,43 @@ fn track_keyboard(wanted: bool, shown: &mut bool) {
             false => app.hide_soft_input(false),
         }
     }
+}
+
+/// A popup framed in an [`egui::Area`], at `anchor` of the window and as far off its edges as the
+/// panel stands, which clears the system's furniture.
+pub(super) fn anchored_popup<R>(
+    ctx: &egui::Context,
+    id: &str,
+    anchor: egui::Align2,
+    insets: egui::Margin,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let offset = |align: egui::Align, near: i8, far: i8| match align {
+        egui::Align::Min => f32::from(near) + f32::from(PANEL_MARGIN),
+        egui::Align::Center => 0.0,
+        egui::Align::Max => -(f32::from(far) + f32::from(PANEL_MARGIN)),
+    };
+    let x = offset(anchor.x(), insets.left, insets.right);
+    let y = offset(anchor.y(), insets.top, insets.bottom);
+    egui::Area::new(egui::Id::new(id))
+        .anchor(anchor, [x, y])
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, add_contents).inner
+        })
+        .inner
+}
+
+/// A hyperlink that opens through [`open_in_browser`], which egui's own does not reach.
+pub(super) fn browser_link(
+    ui: &mut egui::Ui,
+    label: impl Into<egui::WidgetText>,
+    url: &str,
+) -> egui::Response {
+    let link = ui.hyperlink_to(label, url);
+    if link.clicked() {
+        open_in_browser(url);
+    }
+    link
 }
 
 /// Hands a URL to whatever the person browses with: a new tab on the page, a command on a desktop,

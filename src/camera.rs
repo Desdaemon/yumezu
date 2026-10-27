@@ -216,8 +216,7 @@ impl AppStatics {
         let scale = self.world_per_pixel(device_pixel_ratio);
         let translation = self.camera.up_orthogonal() * (delta.1 * scale)
             - self.camera.right_direction() * (delta.0 * scale);
-        self.camera.translate(translation);
-        self.control.target += translation;
+        self.shift_view(translation);
         true
     }
 
@@ -231,9 +230,24 @@ impl AppStatics {
         }
         let translation =
             self.camera.view_direction() * (travel * self.world_per_pixel(device_pixel_ratio));
+        self.shift_view(translation);
+        true
+    }
+
+    /// Moves the eye and the orbit centre together.
+    fn shift_view(&mut self, translation: Vec3) {
         self.camera.translate(translation);
         self.control.target += translation;
-        true
+    }
+
+    /// Puts the orbit centre at `target` and the eye `distance` off it, looking from the side it
+    /// already looks from.
+    fn stand_off(&mut self, target: Vec3, distance: f32) {
+        let direction = (self.camera.position() - self.control.target).normalize();
+        let up = self.camera.up();
+        self.camera
+            .set_view(target + direction * distance, target, up);
+        self.control.target = target;
     }
 
     /// World units per logical pixel on the plane through the orbit centre, which keeps a drag
@@ -287,15 +301,7 @@ impl AppStatics {
     /// Puts the camera where [`Self::ease_to_frame`] would carry it, in one step: what an opening
     /// view is framed with, there being nothing on screen yet to travel from.
     pub(super) fn snap_to_frame(&mut self, bounds: &Bounds) {
-        let offset = self.camera.position() - self.control.target;
-        let up = self.camera.up();
-        let distance = self.framing_distance(bounds.radius);
-        self.camera.set_view(
-            bounds.center + offset / offset.magnitude() * distance,
-            bounds.center,
-            up,
-        );
-        self.control.target = bounds.center;
+        self.stand_off(bounds.center, self.framing_distance(bounds.radius));
     }
 
     /// Returns whether it still has ground to cover.
@@ -329,16 +335,16 @@ impl AppStatics {
         }
 
         // Applied twice over: see [`Self::lean_aim`].
-        let step = 1.0 - (-dt / (LEAN_WINDOW_MS * 1e-3)).exp();
+        let step = fraction_covered(dt, LEAN_WINDOW_MS);
         self.lean_aim += (goal - self.lean_aim) * step;
         let travel = (self.lean_aim - self.control.target) * step;
-        if dimensions == Dimensions::Two {
-            self.camera.translate(travel);
-        }
-        self.control.target += travel;
-        if dimensions == Dimensions::Three {
-            let (eye, up) = (self.camera.position(), self.camera.up());
-            self.camera.set_view(eye, self.control.target, up);
+        match dimensions {
+            Dimensions::Two => self.shift_view(travel),
+            Dimensions::Three => {
+                self.control.target += travel;
+                let (eye, up) = (self.camera.position(), self.camera.up());
+                self.camera.set_view(eye, self.control.target, up);
+            }
         }
         true
     }
@@ -363,9 +369,7 @@ impl AppStatics {
     /// exactly as the person left it, so the graph does not spin under them while it closes in.
     pub(super) fn ease_to_frame(&mut self, bounds: &Bounds, dt: f32) -> bool {
         let goal_distance = self.framing_distance(bounds.radius);
-        let offset = self.camera.position() - self.control.target;
-        let up = self.camera.up();
-        let distance = offset.magnitude();
+        let distance = self.camera.position().distance(self.control.target);
         let arrived = (bounds.center - self.control.target).magnitude()
             < bounds.radius * FRAMING_ARRIVAL_TOLERANCE
             && (goal_distance - distance).abs() < goal_distance * FRAMING_ARRIVAL_TOLERANCE;
@@ -373,15 +377,17 @@ impl AppStatics {
             return false;
         }
 
-        // Per unit of time, not per frame, so the move lasts as long at any frame rate.
-        let step = 1.0 - (-dt / (FRAMING_WINDOW_MS * 1e-3)).exp();
+        let step = fraction_covered(dt, FRAMING_WINDOW_MS);
         let target = self.control.target + (bounds.center - self.control.target) * step;
-        let distance = distance + (goal_distance - distance) * step;
-        self.camera
-            .set_view(target + offset / offset.magnitude() * distance, target, up);
-        self.control.target = target;
+        self.stand_off(target, distance + (goal_distance - distance) * step);
         true
     }
+}
+
+/// How much of what is left of an exponential ease `seconds` covers. Per unit of time, not per
+/// frame, so the move lasts as long at any frame rate.
+fn fraction_covered(seconds: f32, window_ms: f32) -> f32 {
+    1.0 - (-seconds / (window_ms * 1e-3)).exp()
 }
 /// Swallows the left-button motion [`OrbitControl`] would turn the camera with.
 ///

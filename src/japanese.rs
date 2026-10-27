@@ -242,19 +242,12 @@ const URL: &str = "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@Sans2.004/Sans
 /// `None` leaves the panel drawing the boxes it was already drawing.
 #[cfg(target_family = "wasm")]
 async fn download() -> Option<Vec<u8>> {
-    let response = super::fetch::client()
+    use super::fetch;
+    use super::prelude::*;
+    fetch::client()
         .get(URL)
-        .send()
+        .fetch_bytes()
         .await
-        .inspect_err(|error| log::warn!("cannot reach the Japanese font: {error}"))
-        .ok()?
-        .error_for_status()
-        .inspect_err(|error| log::warn!("{URL} does not serve a font: {error}"))
-        .ok()?;
-    let face = response
-        .bytes()
-        .await
-        .inspect_err(|error| log::warn!("the Japanese font did not download whole: {error}"))
-        .ok()?;
-    Some(face.into())
+        .inspect_err(|error| log::warn!("cannot download the Japanese font: {error}"))
+        .ok()
 }

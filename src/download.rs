@@ -8,7 +8,7 @@ use egui_material_icons::icons::{
     ICON_ANDROID, ICON_CLOSE, ICON_COMPUTER, ICON_DESKTOP_MAC, ICON_DESKTOP_WINDOWS,
 };
 
-use super::i18n::t;
+use super::prelude::*;
 
 /// The releases page rather than a package: `.github/workflows/release.yml` stamps every asset
 /// with the version that built it, so no address stays pointed at the newest.
@@ -86,7 +86,7 @@ pub(super) struct Offer {
 impl Offer {
     pub(super) fn new() -> Self {
         Self {
-            platform: Platform::detected().filter(|_| super::store::read(DISMISSED).is_none()),
+            platform: Platform::detected().filter(|_| !super::store::read_flag(DISMISSED)),
         }
     }
 
@@ -96,39 +96,33 @@ impl Offer {
         let Some(platform) = self.platform else {
             return;
         };
-        egui::Area::new(egui::Id::new("download offer"))
-            .anchor(
-                egui::Align2::CENTER_BOTTOM,
-                [0.0, -((insets.bottom + super::PANEL_MARGIN) as f32)],
-            )
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .button(format!(
-                                "{}  {}",
-                                platform.icon().codepoint,
-                                t!("download-app", platform = platform.name())
-                            ))
-                            .clicked()
-                        {
-                            super::open_in_browser(RELEASES);
-                            self.dismiss();
-                        }
-                        if ui
-                            .button(ICON_CLOSE)
-                            .on_hover_text(t!("dont-show-again"))
-                            .clicked()
-                        {
-                            self.dismiss();
-                        }
-                    });
-                });
+        let anchor = egui::Align2::CENTER_BOTTOM;
+        super::anchored_popup(ctx, "download offer", anchor, insets, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button(format!(
+                        "{}  {}",
+                        platform.icon().codepoint,
+                        t!("download-app", platform = platform.name())
+                    ))
+                    .clicked()
+                {
+                    super::open_in_browser(RELEASES);
+                    self.dismiss();
+                }
+                if ui
+                    .button(ICON_CLOSE)
+                    .on_hover_text(t!("dont-show-again"))
+                    .clicked()
+                {
+                    self.dismiss();
+                }
             });
+        });
     }
 
     fn dismiss(&mut self) {
         self.platform = None;
-        super::store::write(DISMISSED, Some(""));
+        super::store::write_flag(DISMISSED, true);
     }
 }

@@ -30,6 +30,7 @@ mod link;
 mod loading;
 mod map;
 mod pacing;
+mod prelude;
 #[cfg(feature = "profile")]
 mod profile;
 mod scene;
@@ -46,10 +47,10 @@ mod yno;
 use arrivals::*;
 use camera::*;
 use graph::*;
-use i18n::t;
 use layout::*;
 use loading::*;
 use pacing::*;
+use prelude::*;
 use profile::FrameStats;
 use scene::*;
 use ui::*;
@@ -81,25 +82,21 @@ const MULTISAMPLES: u8 = 4;
 /// high-contrast cylinders, and post-processing measured no cheaper on a desktop and dearer on
 /// the page.
 fn antialias_remembered() -> bool {
-    store::read(ANTIALIAS).as_deref() != Some("off")
+    store::read_switch(ANTIALIAS).unwrap_or(true)
 }
 
 fn antialias_remember(on: bool) {
-    store::write(ANTIALIAS, Some(if on { "on" } else { "off" }));
+    store::write_switch(ANTIALIAS, on);
 }
 
 /// Whether the view leans onto a world a list row is pointing at, which the panel's switch sets.
 /// Defaults to what the platform already says about motion. See [`AppStatics::lean_toward`].
 fn leaning_remembered() -> bool {
-    match store::read(LEANING).as_deref() {
-        Some("off") => false,
-        Some(_) => true,
-        None => !reduced_motion(),
-    }
+    store::read_switch(LEANING).unwrap_or_else(|| !reduced_motion())
 }
 
 fn leaning_remember(on: bool) {
-    store::write(LEANING, Some(if on { "on" } else { "off" }));
+    store::write_switch(LEANING, on);
 }
 
 /// Whether the person prefers less movement than an app would otherwise make.
@@ -478,7 +475,7 @@ impl App {
         let dimensions = self
             .data
             .as_ref()
-            .map_or(Dimensions::Three, |data| data.graph.parameters().dimensions);
+            .map_or(Dimensions::Three, AppEntities::dimensions);
         log::info!(
             "camera in {dimensions:?} dimensions: \
              vec3({:.1}, {:.1}, {:.1}), vec3({:.1}, {:.1}, {:.1})",
@@ -588,7 +585,7 @@ impl App {
         let opening = self.before.is_none();
         let mut data = entities(dump, self.before.take().as_ref(), ctx);
         // A run opening in two dimensions never passes through the switch that squares the camera.
-        if opening && data.graph.parameters().dimensions == Dimensions::Two {
+        if opening && data.dimensions() == Dimensions::Two {
             self.statics.face_plane();
         }
 

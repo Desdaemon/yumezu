@@ -15,48 +15,39 @@ impl Panel {
             Some(Highlight::Layer(depth)) => Some(depth),
             _ => None,
         };
-        egui::Area::new(egui::Id::new("layer rocker"))
-            .anchor(
-                egui::Align2::RIGHT_BOTTOM,
-                [
-                    -((insets.right + PANEL_MARGIN) as f32),
-                    -((insets.bottom + PANEL_MARGIN) as f32),
-                ],
-            )
-            .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    // Scaled, so arrows and padding grow together with the UI scale.
-                    let style = ui.style_mut();
-                    for font in style.text_styles.values_mut() {
-                        font.size *= ROCKER_SCALE;
-                    }
-                    style.spacing.button_padding *= ROCKER_SCALE;
-                    style.spacing.item_spacing *= ROCKER_SCALE;
-                    ui.vertical_centered(|ui| {
-                        if ui
-                            .add_enabled(lit != Some(0), egui::Button::new(ICON_KEYBOARD_ARROW_UP))
-                            .on_hover_text(t!("rocker-shallower"))
-                            .clicked()
-                        {
-                            self.lit = Some(Some(Highlight::Layer(
-                                lit.map_or(deepest, |depth| depth.saturating_sub(1)),
-                            )));
-                        }
-                        if ui
-                            .add_enabled(
-                                lit != Some(deepest),
-                                egui::Button::new(ICON_KEYBOARD_ARROW_DOWN),
-                            )
-                            .on_hover_text(t!("rocker-deeper"))
-                            .clicked()
-                        {
-                            self.lit = Some(Some(Highlight::Layer(
-                                lit.map_or(0, |depth| (depth + 1).min(deepest)),
-                            )));
-                        }
-                    });
-                });
+        let anchor = egui::Align2::RIGHT_BOTTOM;
+        anchored_popup(ui.ctx(), "layer rocker", anchor, insets, |ui| {
+            // Scaled, so arrows and padding grow together with the UI scale.
+            let style = ui.style_mut();
+            for font in style.text_styles.values_mut() {
+                font.size *= ROCKER_SCALE;
+            }
+            style.spacing.button_padding *= ROCKER_SCALE;
+            style.spacing.item_spacing *= ROCKER_SCALE;
+            ui.vertical_centered(|ui| {
+                if ui
+                    .add_enabled(lit != Some(0), egui::Button::new(ICON_KEYBOARD_ARROW_UP))
+                    .on_hover_text(t!("rocker-shallower"))
+                    .clicked()
+                {
+                    self.lit = Some(Some(Highlight::Layer(
+                        lit.map_or(deepest, |depth| depth.saturating_sub(1)),
+                    )));
+                }
+                if ui
+                    .add_enabled(
+                        lit != Some(deepest),
+                        egui::Button::new(ICON_KEYBOARD_ARROW_DOWN),
+                    )
+                    .on_hover_text(t!("rocker-deeper"))
+                    .clicked()
+                {
+                    self.lit = Some(Some(Highlight::Layer(
+                        lit.map_or(0, |depth| (depth + 1).min(deepest)),
+                    )));
+                }
             });
+        });
     }
 
     pub(super) fn menu(&mut self, ui: &mut egui::Ui, read: &PanelData) {

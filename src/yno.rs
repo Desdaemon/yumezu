@@ -11,8 +11,9 @@
 //! answered as if nobody had signed in. A native run may set one by hand and so keeps the session
 //! itself; on the page the cookie is the browser's, unreadable and sent regardless.
 
-use super::i18n::t;
-use super::{fetch, store};
+use super::fetch;
+use super::prelude::*;
+use super::store;
 use std::collections::HashSet;
 
 /// YNOproject serves one host per game, and this app draws exactly one: Yume 2kki.
@@ -85,7 +86,7 @@ impl Account {
         Self {
             session,
             pending,
-            frontier: store::read(FRONTIER).is_some(),
+            frontier: store::read_flag(FRONTIER),
             ..Default::default()
         }
     }
@@ -116,14 +117,18 @@ impl Account {
             Err(error) => {
                 log::warn!("cannot read what this account has seen: {error}");
                 // Usually an expired session, which would fail again next run.
-                store::write(SESSION, None);
-                self.session = None;
-                self.visited = None;
+                self.drop_session();
                 self.failed = Some(error);
             }
         }
         // A failure may have taken a frontier away; with the switch off there is none.
         self.restated |= self.frontier && changed;
+    }
+
+    fn drop_session(&mut self) {
+        store::write(SESSION, None);
+        self.session = None;
+        self.visited = None;
     }
 
     /// Reads what the account has seen in the same go: nothing else needs the session.
@@ -136,9 +141,7 @@ impl Account {
     /// game with. Only this app's copy is dropped.
     pub fn sign_out(&mut self) {
         forget();
-        store::write(SESSION, None);
-        self.session = None;
-        self.visited = None;
+        self.drop_session();
         self.pending = None;
         self.failed = None;
         self.pretended.clear();
@@ -176,7 +179,7 @@ impl Account {
             return;
         }
         self.frontier = frontier;
-        store::write(FRONTIER, frontier.then_some(""));
+        store::write_flag(FRONTIER, frontier);
         self.restated |= self.visited.is_some();
     }
 
@@ -298,8 +301,8 @@ async fn login(user: &str, password: &str) -> Result<String, String> {
         .header("content-type", "application/x-www-form-urlencoded")
         .body(format!(
             "user={}&password={}",
-            encoded(user),
-            encoded(password)
+            super::world::query_encoded(user),
+            super::world::query_encoded(password)
         ))
         .send()
         .await
@@ -419,14 +422,9 @@ struct Location {
 async fn seen(session: &str) -> Result<Vec<u64>, String> {
     let url = format!("{}/info", api());
     let said = session::sign(fetch::client().get(&url), session)
-        .send()
+        .fetch_text()
         .await
-        .map_err(|error| format!("cannot reach {url}: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("{url} refused: {error}"))?
-        .text()
-        .await
-        .map_err(|error| format!("cannot read {url}: {error}"))?;
+        .map_err(|error| format!("cannot fetch {url}: {error}"))?;
     serde_json::from_str::<Info>(&said)
         .map_err(|error| format!("{url} is not an account: {error}"))?
         .location_ids
@@ -440,30 +438,12 @@ async fn named() -> Result<std::collections::HashMap<u64, String>, String> {
     let url = format!("{}/gamelocations", api());
     let said = fetch::client()
         .get(&url)
-        .send()
+        .fetch_text()
         .await
-        .map_err(|error| format!("cannot reach {url}: {error}"))?
-        .error_for_status()
-        .map_err(|error| format!("{url} refused: {error}"))?
-        .text()
-        .await
-        .map_err(|error| format!("cannot read {url}: {error}"))?;
+        .map_err(|error| format!("cannot fetch {url}: {error}"))?;
     Ok(serde_json::from_str::<Vec<Location>>(&said)
         .map_err(|error| format!("{url} is not a list of places: {error}"))?
         .into_iter()
         .map(|location| (location.id, location.title))
         .collect())
-}
-
-/// Hand-rolled: this app posts one form, of two fields, once.
-fn encoded(field: &str) -> String {
-    let mut out = String::with_capacity(field.len());
-    for byte in field.bytes() {
-        match byte {
-            byte if byte.is_ascii_alphanumeric() => out.push(byte as char),
-            b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
-            byte => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
 }

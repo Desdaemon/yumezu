@@ -125,13 +125,8 @@ impl Panel {
             ui.horizontal(|ui| {
                 ui.label(t!("world-english-name"));
                 let link = world::wiki_url(&data.titles[world].en);
-                if ui
-                    .hyperlink_to(&data.titles[world].en, &link)
-                    .on_hover_text(t!("world-english-wiki"))
-                    .clicked()
-                {
-                    open_in_browser(&link);
-                }
+                browser_link(ui, &data.titles[world].en, &link)
+                    .on_hover_text(t!("world-english-wiki"));
             });
         }
         ui.horizontal(|ui| {
@@ -244,11 +239,7 @@ impl Panel {
                 .and_then(|from| world::step_conditions(&data.connections, data.hub, from, world))
                 .filter(|step| step.gate != Gate::Free);
             // Both directions named, as among the ways on; the escape home is no listed connection.
-            let walked = from.and_then(|from| {
-                data.connections[from]
-                    .iter()
-                    .find(|step| step.world == world)
-            });
+            let walked = from.and_then(|from| world::step_between(&data.connections, from, world));
             let row = ui.horizontal(|ui| {
                 // Left clear for the line, drawn once rows settle.
                 ui.add_space(RAIL_WIDTH);
@@ -392,9 +383,7 @@ impl Panel {
             // Lists the ways on from the world it leaves.
             Some(Highlight::Connection(at, far)) => {
                 self.world_info(ui, data, at);
-                let step = data.connections[at]
-                    .iter()
-                    .find(|step| step.world == far)
+                let step = world::step_between(&data.connections, at, far)
                     .expect("a lit connection is one of its own world's connections");
                 self.forward_connections(ui, read, at);
                 ui.separator();

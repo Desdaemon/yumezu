@@ -8,7 +8,7 @@
 
 use cargo_packager_updater::{Config, Update, semver};
 
-use super::i18n::t;
+use super::prelude::*;
 
 const MANIFEST: &str = "https://github.com/Desdaemon/yumezu/releases/latest/download/latest.json";
 

@@ -22,11 +22,12 @@ use serde::Deserialize;
 use yumezu_routing::walkable_steps;
 pub use yumezu_routing::{
     Conditions, Connection, Demand, Gate, Routes, Step, Way, connections, hub_world, origin_world,
-    routes_from, step_conditions, ways,
+    routes_from, step_between, step_conditions, ways,
 };
 
 use super::fetch;
-use super::i18n::{self, t};
+use super::i18n;
+use super::prelude::*;
 
 #[derive(Clone, Deserialize)]
 pub struct Dump {
@@ -102,6 +103,29 @@ pub struct World {
 ///
 /// Held rather than built where it is read, because [`Title::show`] hands out a borrow that a
 /// message built on the spot would not outlive. One slot per language.
+/// The entries `needle` matches, best first, or every entry where nothing is typed: a prefix beats
+/// a substring and an exact name beats both.
+pub fn ranked_matches<'a>(
+    entries: impl Iterator<Item = impl Iterator<Item = &'a str>>,
+    needle: &str,
+) -> Vec<usize> {
+    let needle = needle.trim().to_lowercase();
+    if needle.is_empty() {
+        return (0..entries.count()).collect();
+    }
+    let mut hits: Vec<_> = entries
+        .enumerate()
+        .filter_map(|(entry, names)| {
+            let (at, length) = names
+                .filter_map(|name| Some((name.to_lowercase().find(&needle)?, name.len())))
+                .min()?;
+            Some((at, length, entry))
+        })
+        .collect();
+    hits.sort_unstable();
+    hits.into_iter().map(|(_, _, entry)| entry).collect()
+}
+
 fn unvisited() -> &'static str {
     static ENGLISH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     static JAPANESE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -141,19 +165,6 @@ impl Title {
         !self.unknown
     }
 
-    /// Where `needle` falls in this name, and how much name is left over, for whichever name it
-    /// fits best. Both are searched whichever is shown.
-    ///
-    /// `needle` must already be lowercased.
-    pub fn find(&self, needle: &str) -> Option<(usize, usize)> {
-        if self.unknown {
-            return None;
-        }
-        self.names()
-            .filter_map(|name| Some((name.to_lowercase().find(needle)?, name.len())))
-            .min()
-    }
-
     /// The two wikis name their pages after their own name for a world, so a name is only ever
     /// looked up on the wiki that wrote it.
     pub fn wiki_url(&self) -> String {
@@ -163,7 +174,7 @@ impl Title {
         }
     }
 
-    /// English first. What a search reads.
+    /// English first. What a search reads, whichever is shown.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         let named = !self.unknown;
         [

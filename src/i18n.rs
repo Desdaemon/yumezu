@@ -41,6 +41,12 @@ impl Language {
         }
     }
 
+    fn identifier(self) -> LanguageIdentifier {
+        self.tag()
+            .parse()
+            .expect("a language is tagged with something that is not a language tag")
+    }
+
     fn ftl(self) -> &'static str {
         match self {
             Self::English => include_str!("../locales/en-US/main.ftl"),
@@ -79,10 +85,7 @@ impl Catalog {
         let bundles = Language::ALL
             .into_iter()
             .map(|language| {
-                let tag: LanguageIdentifier = language
-                    .tag()
-                    .parse()
-                    .expect("a language is tagged with something that is not a language tag");
+                let tag = language.identifier();
                 let resource = FluentResource::try_new(language.ftl().to_owned())
                     .expect("a language's messages are not valid Fluent");
                 let mut bundle = FluentBundle::new_concurrent(vec![tag]);
@@ -190,12 +193,7 @@ fn matching(tag: &str) -> Option<Language> {
     let wanted: LanguageIdentifier = tag.parse().ok()?;
     let tags: Vec<LanguageIdentifier> = Language::ALL
         .into_iter()
-        .map(|language| {
-            language
-                .tag()
-                .parse()
-                .expect("a language tag that is not one")
-        })
+        .map(Language::identifier)
         .collect();
     let at = tags.iter().position(|have| *have == wanted).or_else(|| {
         tags.iter()

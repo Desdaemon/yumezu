@@ -168,54 +168,24 @@ impl Panel {
     }
 }
 
-/// The names `needle` matches, best first, or the whole list where nothing is typed.
-///
-/// Ranked the way [`AppEntities::search`] ranks titles, but uncut, unlike that one: these lists
-/// are already kept in the order they are worth reading down in.
-pub(super) fn matching<'a>(
-    names: impl Iterator<Item = impl Iterator<Item = &'a str>>,
-    needle: &str,
-) -> Vec<usize> {
-    let needle = needle.trim().to_lowercase();
-    if needle.is_empty() {
-        return (0..names.count()).collect();
-    }
-    let mut hits: Vec<_> = names
-        .enumerate()
-        .filter_map(|(at, name)| {
-            // Best-fitting of an entry's names, so a search in either language finds it.
-            let (found, length) = name
-                .filter_map(|name| Some((name.to_lowercase().find(&needle)?, name.len())))
-                .min()?;
-            Some((found, length, at))
-        })
-        .collect();
-    hits.sort_unstable();
-    hits.into_iter().map(|(_, _, at)| at).collect()
-}
-
 /// In the corner the sidebar's own button was in, so it reads as the same button facing the other
 /// way. An [`egui::Area`] like the rocker, there being no panel left to hang it inside.
 pub(super) fn sidebar_opener(ui: &mut egui::Ui, sidebar: &mut Sidebar, insets: egui::Margin) {
-    egui::Area::new(egui::Id::new("sidebar opener"))
-        .anchor(
-            egui::Align2::LEFT_TOP,
-            [
-                (insets.left + PANEL_MARGIN) as f32,
-                (insets.top + PANEL_MARGIN) as f32,
-            ],
-        )
-        .show(ui.ctx(), |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                if ui
-                    .button(ICON_CHEVRON_RIGHT)
-                    .on_hover_text(t!("show-sidebar"))
-                    .clicked()
-                {
-                    sidebar.closed = false;
-                }
-            });
-        });
+    anchored_popup(
+        ui.ctx(),
+        "sidebar opener",
+        egui::Align2::LEFT_TOP,
+        insets,
+        |ui| {
+            if ui
+                .button(ICON_CHEVRON_RIGHT)
+                .on_hover_text(t!("show-sidebar"))
+                .clicked()
+            {
+                sidebar.closed = false;
+            }
+        },
+    );
 }
 
 /// `of` names the box to egui and never reaches the screen. `hint` is read in it while it is

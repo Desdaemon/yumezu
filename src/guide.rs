@@ -1,9 +1,8 @@
 //! First-run panel naming the controls: the keys are invisible and the rocker is two unlabelled
 //! arrows, so nothing on screen can announce itself.
 
-use super::i18n::t;
+use super::prelude::*;
 
-// The value is always empty.
 const DISMISSED: &str = "guide-dismissed";
 
 // Widest unwrapped line within a phone's window.
@@ -17,7 +16,7 @@ pub(super) struct Guide {
 
 impl Guide {
     pub(super) fn new() -> Self {
-        let dismissed = remembered();
+        let dismissed = super::store::read_flag(DISMISSED);
         Self {
             open: !dismissed,
             dismissed,
@@ -67,19 +66,11 @@ impl Guide {
                 ui.add_space(ui.spacing().item_spacing.y);
 
                 if ui.checkbox(&mut dismissed, t!("dont-show-again")).changed() {
-                    remember(dismissed);
+                    super::store::write_flag(DISMISSED, dismissed);
                 }
                 taken = ui.button(t!("guide-got-it")).clicked();
             });
         self.open = open && !taken;
         self.dismissed = dismissed;
     }
-}
-
-fn remembered() -> bool {
-    super::store::read(DISMISSED).is_some()
-}
-
-fn remember(dismissed: bool) {
-    super::store::write(DISMISSED, dismissed.then_some(""));
 }

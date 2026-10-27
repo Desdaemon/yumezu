@@ -70,7 +70,7 @@ fn url() -> String {
 /// route, the finer stages only the reference server names -- which all mean the plain wait.
 pub async fn building() -> Option<&'static str> {
     let url = format!("{}/pollUpdate", server());
-    let said = match download(&url).await {
+    let said = match fetch::client().get(&url).fetch_text().await {
         Ok(said) => said,
         Err(error) => {
             // Most hosts have no build status to report.
@@ -119,8 +119,8 @@ pub async fn load(revealed: bool) -> Result<Option<Dump>, String> {
         .map_err(|error| format!("{url} is not the expected world dump: {error}"))
 }
 
-/// `None` for a server that has no dump to send yet. Its own request rather than [`download`], the
-/// dump being the one document with an answer that is neither itself nor a failure.
+/// `None` for a server that has no dump to send yet. Its own request rather than [`fetch::FetchExt`],
+/// the dump being the one document with an answer that is neither itself nor a failure.
 async fn dump(url: &str) -> Result<Option<String>, fetch::Error> {
     let response = fetch::client().get(url).send().await?;
     // The server is rebuilding.
@@ -128,17 +128,6 @@ async fn dump(url: &str) -> Result<Option<String>, fetch::Error> {
         return Ok(None);
     }
     Ok(Some(response.error_for_status()?.text().await?))
-}
-
-/// For the documents that only ever answer with themselves.
-pub(super) async fn download(url: &str) -> Result<String, fetch::Error> {
-    Ok(fetch::client()
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?)
 }
 
 /// Rewrites the addresses this platform cannot use as they stand.

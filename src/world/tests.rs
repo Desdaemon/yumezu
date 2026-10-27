@@ -2,10 +2,16 @@
 use wasm_bindgen_test::wasm_bindgen_test as test;
 
 use super::World;
+use yumezu_routing::ConnType;
+use yumezu_routing::fixture::{self, Place};
 
 // `data.json` is the wiki's to distribute, so tests use the invented tree.
 fn load() -> Vec<World> {
-    yumezu_routing::fixture::dream_tree()
+    app_worlds(fixture::dream_tree())
+}
+
+fn app_worlds(places: Vec<Place>) -> Vec<World> {
+    places
         .into_iter()
         .enumerate()
         .map(|(id, place)| World {
@@ -38,11 +44,7 @@ fn world(title: &str, secret: bool, out: &[usize]) -> World {
         unknown: false,
         connections: out
             .iter()
-            .map(|&target_id| super::Connection {
-                target_id,
-                bits: 0,
-                type_params: Default::default(),
-            })
+            .map(|&to| fixture::connection(to, ConnType::empty(), None))
             .collect(),
     }
 }
@@ -109,7 +111,10 @@ fn the_code_keeps_the_secret_worlds_and_the_ways_into_them() {
 
 #[test]
 fn a_frontier_keeps_one_step_past_what_was_visited() {
-    let dump = chain(&["Nexus", "Sofa Room", "Far Room", "Farther Room"], 0);
+    let dump = chain(
+        &["Nexus", "Sofa Room", "Far Room", "Farther Room"],
+        ConnType::empty(),
+    );
     let visited = ["Nexus".to_owned()].into_iter().collect();
     let shown = dump.showing(&visited);
 
@@ -139,7 +144,7 @@ fn a_frontier_keeps_one_step_past_what_was_visited() {
 fn a_frontier_does_not_reach_through_a_passage_it_cannot_be_walked_down() {
     let dump = chain(
         &["Nexus", "Sofa Room", "Far Room", "Farther Room"],
-        yumezu_routing::ConnType::NO_ENTRY.bits(),
+        ConnType::NO_ENTRY,
     );
     let visited = ["Nexus".to_owned()].into_iter().collect();
 
@@ -154,33 +159,9 @@ fn a_frontier_does_not_reach_through_a_passage_it_cannot_be_walked_down() {
 }
 
 /// Worlds in a row, each listing the step onward under `flags`.
-fn chain(titles: &[&str], flags: u16) -> super::Dump {
-    let worlds = titles
-        .iter()
-        .enumerate()
-        .map(|(at, title)| World {
-            title: (*title).to_owned(),
-            title_jp: None,
-            author: String::new(),
-            image: format!("{title}.png"),
-            added: None,
-            map_url: None,
-            map_label: None,
-            secret: false,
-            cell: Some(at),
-            unknown: false,
-            connections: (at + 1 < titles.len())
-                .then(|| super::Connection {
-                    target_id: at + 1,
-                    bits: flags,
-                    type_params: Default::default(),
-                })
-                .into_iter()
-                .collect(),
-        })
-        .collect();
+fn chain(titles: &[&'static str], flags: ConnType) -> super::Dump {
     super::Dump {
-        worlds,
+        worlds: app_worlds(fixture::chain(titles, flags)),
         releases: Vec::new(),
         credits: Vec::new(),
         last_update: None,
@@ -194,9 +175,7 @@ fn a_connection_reads_the_same_from_either_end() {
     let connections = super::connections(&worlds);
     for (from, steps) in connections.iter().enumerate() {
         for step in steps {
-            let far = connections[step.world]
-                .iter()
-                .find(|far| far.world == from)
+            let far = super::step_between(&connections, step.world, from)
                 .expect("the world at the far end carries it too");
             assert_eq!(step.out.is_some(), far.back.is_some());
             assert_eq!(step.back.is_some(), far.out.is_some());
@@ -280,9 +259,7 @@ fn directions_start_where_the_walk_is_read_from() {
         }
         let mut step = to;
         while let Some(parent) = routes.parents[step] {
-            let onward = connections[parent]
-                .iter()
-                .find(|onward| onward.world == step)
+            let onward = super::step_between(&connections, parent, step)
                 .expect("a route steps between worlds that are connected");
             assert!(
                 onward.out.is_some(),
@@ -748,9 +725,7 @@ fn every_canonical_step_is_walkable_where_the_panel_reads_it() {
     let connections = super::connections(&worlds);
     for (world, parent) in routes.parents.iter().enumerate() {
         let Some(parent) = *parent else { continue };
-        let step = connections[parent]
-            .iter()
-            .find(|step| step.world == world)
+        let step = super::step_between(&connections, parent, world)
             .unwrap_or_else(|| panic!("{} is joined to no parent", worlds[world].title));
         assert!(
             step.out.is_some(),

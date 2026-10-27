@@ -9,7 +9,9 @@ use std::collections::{HashMap, HashSet};
 use image::DynamicImage;
 use three_d::renderer::*;
 
-use super::{fetch, thumbnails};
+use super::fetch;
+use super::prelude::*;
+use super::thumbnails;
 
 /// Node width on screen, in physical pixels, at which the full picture becomes worth fetching.
 ///
@@ -255,7 +257,8 @@ fn quad_material(context: &Context, picture: &CpuTexture) -> ColorMaterial {
 /// world keeps its slightly soft atlas cell, and a map says it has no picture.
 pub fn load(url: String) -> fetch::Pending<Option<CpuTexture>> {
     fetch::spawn(async move {
-        let bytes = match download(&url).await {
+        let request = fetch::client().get(&url).header("origin", ORIGIN);
+        let bytes = match request.fetch_bytes().await {
             Ok(bytes) => bytes,
             Err(error) => {
                 log::warn!("no full picture from {url}: {error}");
@@ -319,16 +322,4 @@ fn sieve<T: Copy>(texels: &[T], width: u32, by: u32) -> Vec<T> {
         .step_by(by)
         .flat_map(|row| row.iter().step_by(by).copied())
         .collect()
-}
-
-async fn download(url: &str) -> Result<Vec<u8>, fetch::Error> {
-    Ok(fetch::client()
-        .get(url)
-        .header("origin", ORIGIN)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?
-        .to_vec())
 }

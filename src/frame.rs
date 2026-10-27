@@ -12,19 +12,13 @@ impl App {
         // A resumed session needs its account before the graph is built.
         self.yno.poll();
         if self.yno.restated() {
-            // A frontier renumbers the worlds.
-            self.selected = None;
-            // A refresh adds to the map the person is reading.
-            self.before = self.data.as_ref().map(AppEntities::before);
-            self.data = None;
+            self.retire_graph();
             self.build();
         }
         // `world::hide` dropped these worlds on read, so revealing them takes another dump.
         if !self.revealed && self.code.taken() {
             self.revealed = true;
-            self.selected = None;
-            self.before = self.data.as_ref().map(AppEntities::before);
-            self.data = None;
+            self.retire_graph();
             self.dump = Dump::Loading(fetch::spawn(world::load(true)));
         }
         if self.data.is_none() {
@@ -37,11 +31,10 @@ impl App {
         let ctx = self.ctx.wctx.as_ref().unwrap();
         let mut frame_input = self.ctx.fig.as_mut().unwrap().generate(ctx);
         let window = self.ctx.window.as_ref().unwrap();
+        let seconds = clamped_frame_seconds(&frame_input);
 
-        // Clamped: the build frame is long, and the reveal should not pay for it.
         if self.veil > 0.0 {
-            let step = (frame_input.elapsed_time as f32 * 1e-3).min(0.05);
-            self.veil = (self.veil - step / LOADING_FADE_SECONDS).max(0.0);
+            self.veil = (self.veil - seconds / LOADING_FADE_SECONDS).max(0.0);
         }
         let fading = (self.veil > 0.0).then(|| (self.said.clone(), self.veil));
         let data = self.data.as_mut().unwrap();
@@ -61,7 +54,7 @@ impl App {
         {
             // A flat layout has no depth for repulsion to reinflate; restarting beats reseeding.
             scatter(data);
-            if data.graph.parameters().dimensions == Dimensions::Two {
+            if data.dimensions() == Dimensions::Two {
                 // Squared before rotation locks, or an oblique camera could never straighten.
                 self.statics.face_plane();
             }
@@ -72,7 +65,7 @@ impl App {
             &mut frame_input.events,
             self.statics.touches.pinching,
         );
-        if data.graph.parameters().dimensions == Dimensions::Two {
+        if data.dimensions() == Dimensions::Two {
             // Swallowing the orbit drag leaves the zoom and the pan.
             lock_rotation(&mut frame_input.events);
         }
@@ -96,10 +89,7 @@ impl App {
                 .flatten()
                 .for_each(|key| self.code.typed(key)),
         }
-        let (across, into) = self
-            .statics
-            .walk
-            .travel((frame_input.elapsed_time as f32 * 1e-3).min(0.05));
+        let (across, into) = self.statics.walk.travel(seconds);
         let walking = across != 0.0 || into != 0.0;
         let panned = self
             .statics
@@ -119,21 +109,20 @@ impl App {
             data.leaning_at = None;
         }
         let orbiting = matches!(data.gesture, Some(Gesture::Orbiting))
-            && data.graph.parameters().dimensions == Dimensions::Three;
+            && data.dimensions() == Dimensions::Three;
         self.statics
             .track_cursor(self.ctx.window.as_ref().unwrap(), orbiting);
-        let dt = (frame_input.elapsed_time as f32 * 1e-3).min(0.05);
         if data.framing {
             // Every frame: the layout is still moving. Arrivals first, then the selection.
             data.framing = match data.arrival_bounds() {
                 Some(bounds) => {
                     // Held after the camera catches up: the arrival is still moving.
-                    self.statics.ease_to_frame(&bounds, dt);
+                    self.statics.ease_to_frame(&bounds, seconds);
                     true
                 }
                 None => match data.framing_bounds() {
                     Some(bounds) => {
-                        let easing = self.statics.ease_to_frame(&bounds, dt);
+                        let easing = self.statics.ease_to_frame(&bounds, seconds);
                         // The tree is still spreading.
                         easing || (data.selected.is_none() && !data.graph.is_settled())
                     }
@@ -151,26 +140,20 @@ impl App {
             (self.overlay.as_ref().unwrap().leaning && !data.framing)
                 .then(|| data.leaning_at.and_then(|world| data.world_at(world)))
                 .flatten(),
-            data.graph.parameters().dimensions,
-            dt,
+            data.dimensions(),
+            seconds,
         );
 
         data.pull_grabbed_node(&self.statics.camera);
-        data.receive_atlas(
-            (frame_input.elapsed_time as f32 * 1e-3).min(0.05),
-            ctx,
-            self.overlay.as_ref().unwrap().gui.context(),
-        );
+        data.receive_atlas(seconds, ctx, self.overlay.as_ref().unwrap().gui.context());
         // Unclamped: the layout caps its own catch-up.
         let stepping = web_time::Instant::now();
-        let stepped = data.graph.update(frame_input.elapsed_time as f32 * 1e-3);
+        let stepped = data.graph.update(frame_seconds(&frame_input));
         self.stats.stepped(stepping.elapsed());
         // Billboards date when the camera turns.
         let turned = data.billboard != billboard(&self.statics.camera);
         // Clamped, so an arrival is not half over before it is drawn.
-        let arriving = data
-            .arrivals
-            .tick((frame_input.elapsed_time as f32 * 1e-3).min(0.05));
+        let arriving = data.arrivals.tick(seconds);
         let recolored = std::mem::take(&mut data.recolored);
         // `repaint` uploads colors itself, leaving the geometry.
         let laid_out = stepped || arriving || profile::eager();
@@ -179,15 +162,13 @@ impl App {
             data.rebuild_instances(&self.statics.camera, laid_out);
         }
         // See [`AppEntities::march_dashes`].
-        data.march_dashes((frame_input.elapsed_time as f32 * 1e-3).min(0.05));
+        data.march_dashes(seconds);
         // These also collect arrived pictures, so a pending fetch runs them even if nothing moved.
         let reading = data.detail.pending();
         // After the instances, whose colors the full pictures borrow.
         if moved || reading {
             let magnified = data.magnified(&self.statics.camera, frame_input.viewport);
             data.detail.track(ctx, &magnified);
-        }
-        if moved || reading {
             data.place_unvisited(ctx, &self.statics.camera);
         }
         // The pointer can move the glow between rows while nothing else moves.
@@ -210,47 +191,26 @@ impl App {
         // Split to order by coverage, not mesh centre: pictures first, culling the lines behind.
         let camera = &self.statics.camera;
         self.stats.timed("backdrop", ctx, || {
-            screen
-                .write::<std::convert::Infallible>(|| {
-                    apply_screen_material(ctx, &data.backdrop, camera, &[]);
-                    Ok(())
-                })
-                .unwrap();
+            write_to_screen(&screen, || {
+                apply_screen_material(ctx, &data.backdrop, camera, &[]);
+            });
             1
         });
         self.stats.timed("pictures", ctx, || {
-            let mut calls = 0;
-            screen.render(
-                camera,
-                data.drawn_thumbnails()
-                    .into_iter()
-                    .chain(data.detail.drawn())
-                    .inspect(|_| calls += 1),
-                &[],
-            );
-            calls
+            let pictures = data.drawn_thumbnails().into_iter();
+            render_counted(&screen, camera, pictures.chain(data.detail.drawn()))
         });
         self.stats.timed("lines", ctx, || {
-            let mut calls = 0;
-            screen.render(
-                camera,
-                data.edges
-                    .into_iter()
-                    .chain(&data.dashes)
-                    .inspect(|_| calls += 1),
-                &[],
-            );
-            calls
+            render_counted(&screen, camera, data.edges.into_iter().chain(&data.dashes))
         });
         // Nothing while nothing is selected, the clear included.
         self.stats.timed("lit", ctx, || {
-            let mut calls = 0;
-            if data.lit_anything() {
-                // Clearing depth lets the overlay depth-test its own worlds; a TBDR pays little.
-                screen.clear(ClearState::depth(1.0));
-                screen.render(camera, data.drawn_lit().inspect(|_| calls += 1), &[]);
+            if !data.lit_anything() {
+                return 0;
             }
-            calls
+            // Clearing depth lets the overlay depth-test its own worlds; a TBDR pays little.
+            screen.clear(ClearState::depth(1.0));
+            render_counted(&screen, camera, data.drawn_lit())
         });
         // Last of the scene: it brightens whichever pass drew its world.
         self.stats.timed("glow", ctx, || {
@@ -261,12 +221,7 @@ impl App {
         let overlay = self.overlay.as_mut().unwrap();
         self.stats.timed("panel", ctx, || {
             let mut calls = 0;
-            screen
-                .write::<std::convert::Infallible>(|| {
-                    calls = overlay.gui.paint(window) as u32;
-                    Ok(())
-                })
-                .unwrap();
+            write_to_screen(&screen, || calls = overlay.gui.paint(window) as u32);
             calls
         });
 
@@ -286,9 +241,45 @@ impl App {
             || !data.graph.is_settled();
         self.still_seconds = match moving {
             true => 0.0,
-            false => self.still_seconds + frame_input.elapsed_time as f32 * 1e-3,
+            false => self.still_seconds + frame_seconds(&frame_input),
         };
         self.wanted = self.wanted(data);
         moved
     }
+
+    /// A frontier renumbers the worlds, and a refresh adds to the map the person is reading.
+    fn retire_graph(&mut self) {
+        self.selected = None;
+        self.before = self.data.as_ref().map(AppEntities::before);
+        self.data = None;
+    }
+}
+
+pub(super) fn frame_seconds(frame_input: &FrameInput) -> f32 {
+    frame_input.elapsed_time as f32 * 1e-3
+}
+
+/// Clamped: a long frame, the build's above all, is not paid for by every animation at once.
+pub(super) fn clamped_frame_seconds(frame_input: &FrameInput) -> f32 {
+    frame_seconds(frame_input).min(0.05)
+}
+
+pub(super) fn write_to_screen(screen: &RenderTarget, draw: impl FnOnce()) {
+    screen
+        .write::<std::convert::Infallible>(|| {
+            draw();
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Answers how many objects it drew, which [`FrameStats`] counts as draw calls.
+fn render_counted<'a>(
+    screen: &RenderTarget,
+    camera: &Camera,
+    objects: impl IntoIterator<Item = &'a dyn Object>,
+) -> u32 {
+    let mut calls = 0;
+    screen.render(camera, objects.into_iter().inspect(|_| calls += 1), &[]);
+    calls
 }

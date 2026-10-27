@@ -128,7 +128,7 @@ impl App {
         let ctx = self.ctx.wctx.as_ref().unwrap();
         let frame_input = self.ctx.fig.as_mut().unwrap().generate(ctx);
         let window = self.ctx.window.as_ref().unwrap();
-        let seconds = (frame_input.elapsed_time as f32 * 1e-3).min(0.05);
+        let seconds = frame::clamped_frame_seconds(&frame_input);
         // An unreachable host is building nothing, and a delivered dump has nothing left to say.
         if matches!(
             self.dump,
@@ -163,19 +163,16 @@ impl App {
         overlay
             .gui
             .run(window, |ui| loading_frame(ui.ctx(), &says, failed, 1.0));
-        frame_input
-            .screen()
-            .clear(ClearState::color_and_depth(
-                BACKGROUND_COLOR[0],
-                BACKGROUND_COLOR[1],
-                BACKGROUND_COLOR[2],
-                1.0,
-                1.0,
-            ))
-            .write::<std::convert::Infallible>(|| {
-                overlay.gui.paint(window);
-                Ok(())
-            })
-            .unwrap();
+        let screen = frame_input.screen();
+        screen.clear(ClearState::color_and_depth(
+            BACKGROUND_COLOR[0],
+            BACKGROUND_COLOR[1],
+            BACKGROUND_COLOR[2],
+            1.0,
+            1.0,
+        ));
+        frame::write_to_screen(&screen, || {
+            overlay.gui.paint(window);
+        });
     }
 }

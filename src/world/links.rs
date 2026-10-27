@@ -2,6 +2,7 @@
 //! addresses, so every one of these is built from a name the way the wiki that holds it would.
 
 use super::*;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 
 /// Authors whose yume2kki-t tag is not their name in the dump.
 ///
@@ -26,25 +27,38 @@ pub(super) fn japanese_author(name: &str) -> &str {
         .unwrap_or(name)
 }
 
-fn append_encoded(input: &str, output: &mut String) {
-    for byte in input.bytes() {
-        match byte {
-            b' ' => output.push('_'),
-            byte if byte.is_ascii_alphanumeric() => output.push(byte as char),
-            b'-' | b'_' | b'.' | b'\'' | b'(' | b')' | b',' | b'!' | b'/' => {
-                output.push(byte as char)
-            }
-            byte => output.push_str(&format!("%{byte:02X}")),
-        }
-    }
+/// What a wiki escapes in a page name.
+const PAGE_ESCAPED: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'\'')
+    .remove(b'(')
+    .remove(b')')
+    .remove(b',')
+    .remove(b'!')
+    .remove(b'/');
+
+/// Everything but the unreserved set.
+const QUERY_ESCAPED: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+/// A wiki writes a space in a page name as `_`.
+fn page_encoded(page: &str) -> String {
+    utf8_percent_encode(&page.replace(' ', "_"), PAGE_ESCAPED).to_string()
+}
+
+pub(crate) fn query_encoded(value: &str) -> String {
+    utf8_percent_encode(value, QUERY_ESCAPED).to_string()
 }
 
 /// The dump carries no page address, only image ones, so this is built from the title the way the
 /// wiki builds it.
 pub fn wiki_url(title: &str) -> String {
-    let mut url = String::from("https://yume.wiki/2kki/");
-    append_encoded(title, &mut url);
-    url
+    format!("https://yume.wiki/2kki/{}", page_encoded(title))
 }
 
 /// A different wiki with pages of its own rather than a translation of the English one.
@@ -67,7 +81,7 @@ static PAGES: std::sync::OnceLock<Pages> = std::sync::OnceLock::new();
 /// addressed without the list, which is right for all but the few dozen worlds in it -- hence also
 /// the warning on failure.
 pub async fn load_pages() {
-    let pages = match download(YNOLOCATIONS).await {
+    let pages = match fetch::client().get(YNOLOCATIONS).fetch_text().await {
         Ok(json) => parse_pages(&json),
         Err(error) => {
             log::warn!("cannot reach {YNOLOCATIONS}: {error}");
@@ -143,30 +157,26 @@ pub(super) fn page_url(pages: &Pages, title: &str) -> String {
         Some((page, anchor)) => (page, Some(anchor)),
         None => (page, None),
     };
-    let mut url = String::from(YUME2KKI_T);
-    append_encoded(page, &mut url);
-    if let Some(anchor) = anchor {
-        url.push('#');
-        append_encoded(anchor, &mut url);
+    let url = format!("{YUME2KKI_T}{}", page_encoded(page));
+    match anchor {
+        Some(anchor) => format!("{url}#{}", page_encoded(anchor)),
+        None => url,
     }
-    url
 }
 
 /// The English wiki files one person's work as a category.
 pub fn author_url(author: &str) -> String {
-    let mut url = String::from("https://yume.wiki/Category:");
-    append_encoded(author, &mut url);
-    url
+    format!("https://yume.wiki/Category:{}", page_encoded(author))
 }
 
 /// The Japanese wiki tags a world's page with its author's name rather than giving each author a
 /// page, so what there is to open is the search for the tag.
 pub fn yume2kki_t_author_url(author: &str) -> String {
-    let mut url = format!("{YUME2KKI_T}::cmd/taglist?tag=");
     // A query, so a space stays a space rather than a page name's underscore.
-    append_query_encoded(author, &mut url);
-    append_query_encoded("氏", &mut url);
-    url
+    format!(
+        "{YUME2KKI_T}::cmd/taglist?tag={}",
+        query_encoded(&format!("{author}氏"))
+    )
 }
 
 /// A release name as both wikis break it down: `0.129c patch 27` is release 129, revision `c`,
@@ -252,30 +262,18 @@ const PAST_UPDATES: [(u32, &str); 12] = [
 /// -- and gives most patches an anchor of their own. A patch it does not name lands at the top of
 /// the right page.
 pub fn yume2kki_t_version_url(name: &str) -> String {
-    let mut url = String::from(YUME2KKI_T);
     let Some(release) = read_release(name) else {
-        append_encoded(UPDATE_HISTORY, &mut url);
-        return url;
+        return format!("{YUME2KKI_T}{}", page_encoded(UPDATE_HISTORY));
     };
     let code = release.number * 10 + release.revision;
     let page = PAST_UPDATES
         .iter()
         .find(|&&(start, _)| code >= start)
         .map_or("", |&(_, page)| page);
-    append_encoded(&format!("{UPDATE_HISTORY}/過去の更新内容{page}"), &mut url);
-    url.push_str(&format!("#ver{code:04}"));
+    let page = page_encoded(&format!("{UPDATE_HISTORY}/過去の更新内容{page}"));
+    let mut url = format!("{YUME2KKI_T}{page}#ver{code:04}");
     if let Some(patch) = release.patch {
         url.push_str(&format!("p{patch}"));
     }
     url
-}
-
-fn append_query_encoded(input: &str, output: &mut String) {
-    for byte in input.bytes() {
-        match byte {
-            byte if byte.is_ascii_alphanumeric() => output.push(byte as char),
-            b'-' | b'_' | b'.' | b'~' => output.push(byte as char),
-            byte => output.push_str(&format!("%{byte:02X}")),
-        }
-    }
 }

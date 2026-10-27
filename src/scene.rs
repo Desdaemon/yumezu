@@ -162,7 +162,7 @@ pub(super) fn entities(
     let node_radii: Vec<_> = descendants
         .iter()
         .map(|&descendants| {
-            let growth = (1.0 + descendants as f32).ln() / (1.0 + NODE_HUB_DESCENDANTS).ln();
+            let growth = (descendants as f32).ln_1p() / NODE_HUB_DESCENDANTS.ln_1p();
             NODE_LEAF_RADIUS + (NODE_HUB_RADIUS - NODE_LEAF_RADIUS) * growth
         })
         .collect();
@@ -258,24 +258,14 @@ pub(super) fn entities(
     // Both group every world, too costly per frame.
     let (authors, author_of) = dump.authors();
     let versions = dump.versions();
-    // White, so a picture shows as itself.
-    let thumbnail_instances = Instances {
-        transformations: vec![Mat4::identity(); worlds.len()],
-        colors: Some(vec![Srgba::WHITE; worlds.len()]),
-        ..Default::default()
-    };
+    let thumbnail_instances = white_instances(worlds.len());
     // Colors are left to the first `repaint`, which owns the same fan-out.
     let solid = edge_colors.len() - dashed;
-    let edge_instances = Instances {
-        transformations: vec![Mat4::identity(); solid],
-        colors: Some(vec![Srgba::WHITE; solid]),
-        ..Default::default()
-    };
+    let edge_instances = white_instances(solid);
     let dash_instances = Instances {
-        transformations: vec![Mat4::identity(); dashed],
-        colors: Some(vec![Srgba::WHITE; dashed]),
         // Not a texture: each line's length, for `dash.frag`.
         texture_transformations: Some(vec![Mat3::identity(); dashed]),
+        ..white_instances(dashed)
     };
     let backdrop = ColorMaterial {
         color: Srgba::WHITE,
@@ -341,10 +331,7 @@ pub(super) fn entities(
         dash_material(),
     );
 
-    let mut unknown = vec![false; worlds.len()];
-    for &world in &unvisited {
-        unknown[world] = true;
-    }
+    let unknown = world_mask(worlds.len(), unvisited.iter().copied());
     let untaken = untaken(&connections, &unknown);
     let arrivals = Arrivals::new(
         &titles
@@ -413,11 +400,7 @@ pub(super) fn entities(
         sheet: None,
         cells: worlds.iter().map(world::World::cell).collect(),
         unvisited: unvisited.clone(),
-        unvisited_quads: Instances {
-            transformations: vec![Mat4::identity(); unvisited.len()],
-            colors: Some(vec![Srgba::WHITE; unvisited.len()]),
-            ..Default::default()
-        },
+        unvisited_quads: white_instances(unvisited.len()),
         lit_unvisited_quads: Instances {
             colors: Some(Vec::new()),
             ..Default::default()
@@ -447,10 +430,7 @@ impl AppEntities {
     /// graph never reaches.
     pub(super) fn repaint(&mut self) {
         self.recolored = true;
-        let mut on_route = vec![false; self.titles.len()];
-        for node in self.highlighted() {
-            on_route[node] = true;
-        }
+        let on_route = world_mask(self.titles.len(), self.highlighted());
         let lit = self.selected.is_some();
         // Per world on the walk, the world it is stepped to from.
         let mut walked = vec![None; self.titles.len()];
@@ -642,12 +622,7 @@ impl AppEntities {
             let world = node.index().index();
             // Everything hung off the node quads copies this size.
             let radius = self.node_radii[world] * arrivals.grown(world);
-            // The pictures' aspect, so none are cropped or stretched.
-            thumbnails.push(
-                Mat4::from_translation(world_pos(node.position()))
-                    * billboard
-                    * Mat4::from_nonuniform_scale(radius * thumbnails::ASPECT, radius, 1.0),
-            );
+            thumbnails.push(node_quad(world_pos(node.position()), billboard, radius));
         });
         self.thumbnails.set_instances(&self.thumbnail_instances);
         self.billboard = billboard;
@@ -881,10 +856,11 @@ impl AppEntities {
                 detail::Magnified {
                     world,
                     width,
-                    transformation: Mat4::from_translation(
+                    transformation: node_quad(
                         position - forward * (radius * detail::LIFT),
-                    ) * billboard
-                        * Mat4::from_nonuniform_scale(radius * thumbnails::ASPECT, radius, 1.0),
+                        billboard,
+                        radius,
+                    ),
                     color: colors.map_or(Srgba::WHITE, |colors| colors[world]),
                 },
             ));
@@ -1026,7 +1002,7 @@ fn edge_colors(
     depth_colors: &[Srgba],
 ) -> Vec<Srgba> {
     // Against the busiest world, which the whole game hangs off.
-    let busiest = (1.0 + descendants.iter().copied().max().unwrap_or(0) as f32).ln();
+    let busiest = (descendants.iter().copied().max().unwrap_or(0) as f32).ln_1p();
     // The ramp's floor, so the correction only darkens; [`distance_color`] defines the ramp.
     const SAMPLES: u32 = 64;
     let floor = (0..=SAMPLES)
@@ -1044,7 +1020,7 @@ fn edge_colors(
             _ => b,
         };
         let to = if from == a { b } else { a };
-        let reach = (1.0 + descendants[to] as f32).ln() / busiest.max(f32::MIN_POSITIVE);
+        let reach = (descendants[to] as f32).ln_1p() / busiest.max(f32::MIN_POSITIVE);
         // Never above 1: [`UNREACHED_COLOR`] is off the ramp and stays as it is.
         let even = (floor / luminance(depth_colors[from]).max(f32::MIN_POSITIVE)).min(1.0);
         colors.push(scaled(
@@ -1054,6 +1030,23 @@ fn edge_colors(
         ));
     });
     colors
+}
+
+/// `count` untransformed instances, white so a picture shows as itself.
+fn white_instances(count: usize) -> Instances {
+    Instances {
+        transformations: vec![Mat4::identity(); count],
+        colors: Some(vec![Srgba::WHITE; count]),
+        ..Default::default()
+    }
+}
+
+/// A world's picture quad: at `position`, facing the camera, in the pictures' aspect so none are
+/// cropped or stretched.
+fn node_quad(position: Vec3, billboard: Mat4, radius: f32) -> Mat4 {
+    Mat4::from_translation(position)
+        * billboard
+        * Mat4::from_nonuniform_scale(radius * thumbnails::ASPECT, radius, 1.0)
 }
 
 #[cfg(test)]

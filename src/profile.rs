@@ -98,7 +98,7 @@ pub(super) fn unlocked() -> bool {
     #[cfg(not(target_family = "wasm"))]
     {
         static RUNNING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *RUNNING.get_or_init(|| super::store::read(UNLOCKED).as_deref() == Some("on"))
+        *RUNNING.get_or_init(|| super::store::read_switch(UNLOCKED) == Some(true))
     }
 }
 
@@ -130,13 +130,13 @@ pub(super) fn controls(ui: &mut egui::Ui) {
     // The browser paces a page's frames.
     #[cfg(not(target_family = "wasm"))]
     {
-        let mut unlock = super::store::read(UNLOCKED).as_deref() == Some("on");
+        let mut unlock = super::store::read_switch(UNLOCKED) == Some(true);
         if ui
             .checkbox(&mut unlock, "run past the display")
             .on_hover_text("Turns vsync off, which is the only way to watch the GPU's cost move.")
             .changed()
         {
-            super::store::write(UNLOCKED, Some(if unlock { "on" } else { "off" }));
+            super::store::write_switch(UNLOCKED, unlock);
         }
         if unlock != unlocked() {
             ui.label("restart to apply");

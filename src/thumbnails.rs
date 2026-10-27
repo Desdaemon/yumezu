@@ -14,6 +14,7 @@
 use three_d::renderer::*;
 
 use super::fetch;
+use super::prelude::*;
 
 // Published by the `copy-file` links in `index.html`.
 const PATH: &str = "static/thumbnails.jpg";
@@ -77,7 +78,10 @@ fn picture(path: &'static str, mip_levels: Option<u32>) -> fetch::Pending<Option
 /// One implementation for every target: [`super::world::server`] is the page's own origin on wasm,
 /// so the same relative path is the same URL there.
 async fn read(path: &str) -> Result<Vec<u8>, String> {
-    fetch::bytes(&format!("{}/{path}", super::world::server()))
+    let url = format!("{}/{path}", super::world::server());
+    fetch::client()
+        .get(&url)
+        .fetch_bytes()
         .await
         .map_err(|error| error.to_string())
 }

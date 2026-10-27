@@ -127,7 +127,7 @@ impl Default for Layout {
 
 impl Layout {
     /// Each part read on its own, so a store written by a version that knew fewer of them still
-    /// gives up the ones it has. A value outside this version's range is clamped, not discarded.
+    /// gives up the ones it has.
     pub(super) fn remembered() -> Self {
         let fallback = Self::default();
         Self {
@@ -139,16 +139,10 @@ impl Layout {
             layered: store::read(LAYERED)
                 .and_then(|layered| layered.parse().ok())
                 .unwrap_or(fallback.layered),
-            hub_repulsion: store::read(HUB_REPULSION)
-                .and_then(|push| push.parse().ok())
-                .map_or(fallback.hub_repulsion, |push: f32| {
-                    push.clamp(*HUB_REPULSION_RANGE.start(), *HUB_REPULSION_RANGE.end())
-                }),
-            link_reach: store::read(LINK_REACH)
-                .and_then(|reach| reach.parse().ok())
-                .map_or(fallback.link_reach, |reach: f32| {
-                    reach.clamp(*LINK_REACH_RANGE.start(), *LINK_REACH_RANGE.end())
-                }),
+            hub_repulsion: store::read_clamped(HUB_REPULSION, HUB_REPULSION_RANGE)
+                .unwrap_or(fallback.hub_repulsion),
+            link_reach: store::read_clamped(LINK_REACH, LINK_REACH_RANGE)
+                .unwrap_or(fallback.link_reach),
         }
     }
 
@@ -203,7 +197,7 @@ impl Rng {
 /// Both switches start over: a planar graph gives every pair the same z, so the repulsion along
 /// that axis is exactly zero and picking the dimension back up leaves it flat forever.
 pub(super) fn scatter(data: &mut AppEntities) {
-    let planar = data.graph.parameters().dimensions == Dimensions::Two;
+    let planar = data.dimensions() == Dimensions::Two;
     let rng = &mut data.rng;
     data.graph.visit_nodes_mut(|mut node| {
         node.set_position([
