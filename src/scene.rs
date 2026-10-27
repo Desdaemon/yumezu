@@ -617,7 +617,8 @@ impl AppEntities {
             let radius = self.node_radii[world] * arrivals.grown(world);
             thumbnails.push(node_quad(world_pos(node.position()), billboard, radius));
         });
-        self.thumbnails.set_placements(&self.thumbnail_instances);
+        self.thumbnails
+            .set_transformations(&self.thumbnail_instances.transformations);
         self.billboard = billboard;
     }
 
@@ -665,8 +666,12 @@ impl AppEntities {
                 }
             }
         });
-        self.edges.set_placements(&self.edge_instances);
-        self.dashes.set_placements(&self.dash_instances);
+        self.edges
+            .set_transformations(&self.edge_instances.transformations);
+        self.dashes
+            .set_transformations(&self.dash_instances.transformations);
+        self.dashes
+            .set_texture_transformations(self.dash_instances.texture_transformations.as_deref());
     }
 
     /// Stands the placeholder over every world the player has not been to.
@@ -756,8 +761,8 @@ impl AppEntities {
         let Some(cells) = thumbnails::cells(&self.cells, &atlas) else {
             return;
         };
+        self.thumbnails.set_texture_transformations(Some(&cells));
         self.thumbnail_instances.texture_transformations = Some(cells);
-        self.thumbnails.set_placements(&self.thumbnail_instances);
         // One upload: a [`Texture2DRef`] clone is a Mat3 and an atomic.
         let atlas = Texture2DRef::from_cpu_texture(context, &atlas);
         self.glow.material.texture = Some(atlas.clone());

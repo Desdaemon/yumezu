@@ -63,13 +63,12 @@ impl RefilledMesh {
     }
 
     pub(super) fn set_instances(&mut self, instances: &Instances) {
-        self.set_placements(instances);
+        self.set_transformations(&instances.transformations);
+        self.set_texture_transformations(instances.texture_transformations.as_deref());
         self.set_colors(instances.colors.as_deref());
     }
 
-    /// The transformations and texture transformations alone, for instances whose colors stand.
-    pub(super) fn set_placements(&mut self, instances: &Instances) {
-        let transformations = &instances.transformations;
+    pub(super) fn set_transformations(&mut self, transformations: &[Mat4]) {
         for (axis, staged) in self.staged_rows.iter_mut().enumerate() {
             staged.clear();
             staged.extend(transformations.iter().map(|placed| placed.row(axis)));
@@ -78,7 +77,10 @@ impl RefilledMesh {
             buffer.fill(staged);
         }
         self.count = transformations.len() as u32;
-        let Some(texture_transformations) = &instances.texture_transformations else {
+    }
+
+    pub(super) fn set_texture_transformations(&mut self, texture_transformations: Option<&[Mat3]>) {
+        let Some(texture_transformations) = texture_transformations else {
             self.texture_rows = None;
             return;
         };
@@ -221,7 +223,8 @@ impl Geometry for RefilledMesh {
         }
     }
 
-    /// Unbounded, so nothing is culled; an empty mesh is still skipped.
+    /// Unbounded, so nothing is culled and a render call keeps its given order; an empty mesh is
+    /// still skipped.
     fn aabb(&self) -> AxisAlignedBoundingBox {
         match self.count {
             0 => AxisAlignedBoundingBox::EMPTY,
