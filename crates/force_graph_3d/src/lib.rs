@@ -63,7 +63,7 @@
 
 mod octree;
 
-use octree::{Interactions, Octree};
+use octree::{Bodies, Interactions, Octree};
 use petgraph::{
     stable_graph::{NodeIndex, StableUnGraph},
     visit::{EdgeRef, IntoEdgeReferences},
@@ -701,45 +701,23 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         let (x, y, z, mass) = (&x[..n], &y[..n], &z[..n], &mass[..n]);
         let (ax, ay, az) = (&mut ax[..n], &mut ay[..n], &mut az[..n]);
 
-        self.tree.build(x, y, z, mass);
-        for cell in 0..self.tree.cell_count() {
-            let Some(bodies) = self.tree.leaf_bodies(cell) else {
-                continue;
-            };
-            let mut lo = [f32::INFINITY; 3];
-            let mut hi = [f32::NEG_INFINITY; 3];
-            for &body in bodies {
-                let body = body as usize;
-                for (axis, value) in [x[body], y[body], z[body]].into_iter().enumerate() {
-                    lo[axis] = lo[axis].min(value);
-                    hi[axis] = hi[axis].max(value);
-                }
-            }
-            self.tree.gather(
-                cell,
-                lo,
-                hi,
-                theta,
-                force_max,
-                &mut self.interactions,
-                x,
-                y,
-                z,
-                mass,
-            );
-
+        self.tree.build(Bodies { x, y, z, mass });
+        let tree = &self.tree;
+        let sorted = &tree.sorted;
+        for leaf in &tree.leaves {
+            tree.gather(leaf, theta, force_max, &mut self.interactions);
             let list = &self.interactions;
-            for &body in bodies {
-                let body = body as usize;
+            for k in leaf.start as usize..leaf.end as usize {
                 let [fx, fy, fz] = repulsion_on(
-                    [x[body], y[body], z[body]],
-                    -charge * mass[body],
+                    [sorted.x[k], sorted.y[k], sorted.z[k]],
+                    -charge * sorted.mass[k],
                     &list.x,
                     &list.y,
                     &list.z,
                     &list.mass,
                     &list.limit,
                 );
+                let body = tree.order[k] as usize;
                 ax[body] += fx;
                 ay[body] += fy;
                 az[body] += fz;
