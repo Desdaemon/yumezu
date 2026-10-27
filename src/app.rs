@@ -81,7 +81,7 @@ const MULTISAMPLES: u8 = 4;
 /// Whether the surface smooths the edges, which is settled as it is built.
 ///
 /// Multisampling rather than a pass over the finished frame: the graph is mostly thin
-/// high-contrast cylinders, and post-processing measured no cheaper on a desktop and dearer on
+/// high-contrast lines, and post-processing measured no cheaper on a desktop and dearer on
 /// the page.
 fn antialias_remembered() -> bool {
     store::read_switch(ANTIALIAS).unwrap_or(true)

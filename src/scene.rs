@@ -4,9 +4,6 @@
 use super::*;
 
 const EDGE_RADIUS: f32 = 0.05;
-/// Sides of the tube a connection is drawn as. Tens of thousands of them come out a pixel wide, so
-/// the cost is triangle setup rather than fill and the sides are very nearly the whole of it.
-const EDGE_SIDES: u32 = 3;
 /// World units rather than a share of the connection, which `layout::edge_reach` lets stretch as
 /// far as the layout wants. Against `NODE_LEAF_RADIUS` for scale.
 const EDGE_DASH_LENGTH: f32 = 1.0;
@@ -117,15 +114,6 @@ impl Material for DashMaterial {
     }
 }
 
-fn dash_line() -> CpuMesh {
-    let mut mesh = CpuMesh::cylinder(EDGE_SIDES);
-    let Positions::F32(positions) = &mesh.positions else {
-        unreachable!("`cylinder` builds its positions as f32");
-    };
-    // `cylinder` has no uvs; `u` is the fraction along the line, scaled for `dash.frag`.
-    mesh.uvs = Some(positions.iter().map(|at| vec2(at.x, 0.0)).collect());
-    mesh
-}
 /// How long the app waits before fetching the thumbnail atlas again, after a try that could not be
 /// had. Longer than the dump's retries because nothing waits on it: the graph draws without the
 /// pictures. See [`Atlas`].
@@ -300,7 +288,7 @@ pub(super) fn entities(
         },
     );
     let edges = Gm::new(
-        RefilledMesh::new(ctx, &edge_instances, &CpuMesh::cylinder(EDGE_SIDES)),
+        RefilledMesh::ribbon(ctx, &edge_instances, false),
         ColorMaterial::default(),
     );
     let dash_material = || DashMaterial {
@@ -308,7 +296,7 @@ pub(super) fn entities(
         render_states: RenderStates::default(),
     };
     let dashes = Gm::new(
-        RefilledMesh::new(ctx, &dash_instances, &dash_line()),
+        RefilledMesh::ribbon(ctx, &dash_instances, true),
         dash_material(),
     );
     // The overlay comes first by a depth clear, not by skipping the depth test.
@@ -319,7 +307,7 @@ pub(super) fn entities(
         ColorMaterial::default(),
     );
     let lit_edges = Gm::new(
-        RefilledMesh::new(ctx, &lit_edge_instances, &CpuMesh::cylinder(EDGE_SIDES)),
+        RefilledMesh::ribbon(ctx, &lit_edge_instances, false),
         ColorMaterial::default(),
     );
     let lit_dash_instances = Instances {
@@ -327,7 +315,7 @@ pub(super) fn entities(
         ..Default::default()
     };
     let lit_dashes = Gm::new(
-        RefilledMesh::new(ctx, &lit_dash_instances, &dash_line()),
+        RefilledMesh::ribbon(ctx, &lit_dash_instances, true),
         dash_material(),
     );
 

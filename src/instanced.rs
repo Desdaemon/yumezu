@@ -6,14 +6,14 @@ use three_d::renderer::*;
 /// Outside three-d's own range, which its [`GeometryId`] reserves.
 const REFILLED_MESH_ID: u16 = 0x0100;
 
-/// Drawn the way an [`InstancedMesh`] is, by the same vertex shader.
+/// Drawn the way an [`InstancedMesh`] is, by the same vertex shader, or as [`RefilledMesh::ribbon`].
+/// Unlit: no normals or tangents are uploaded.
 pub(super) struct RefilledMesh {
     context: Context,
     indices: TriangleBuffer,
     positions: VertexBuffer<Vec3>,
-    normals: Option<VertexBuffer<Vec3>>,
-    tangents: Option<VertexBuffer<Vec4>>,
     uvs: Option<VertexBuffer<Vec2>>,
+    shape: Shape,
     base_shader: String,
     rows: [InstanceBuffer<Vec4>; 3],
     texture_rows: Option<[InstanceBuffer<Vec3>; 2]>,
@@ -25,27 +25,62 @@ pub(super) struct RefilledMesh {
     staged_colors: Vec<Vec4>,
 }
 
+#[derive(Clone, Copy)]
+enum Shape {
+    Mesh,
+    Ribbon,
+}
+
 impl RefilledMesh {
     pub(super) fn new(context: &Context, instances: &Instances, cpu_mesh: &CpuMesh) -> Self {
+        let unlit = CpuMesh {
+            normals: None,
+            tangents: None,
+            ..cpu_mesh.clone()
+        };
+        let base_shader = Mesh::new(context, &unlit).vertex_shader_source();
+        Self::with_shader(context, instances, cpu_mesh, Shape::Mesh, base_shader)
+    }
+
+    /// A strip from `(0, 0, 0)` to `(1, 0, 0)` of each instance, turned to face the eye: two
+    /// triangles where a tube takes two a side. `dashed` gives it a `u` running along it.
+    pub(super) fn ribbon(context: &Context, instances: &Instances, dashed: bool) -> Self {
+        let corners = [
+            vec2(0.0, -1.0),
+            vec2(1.0, -1.0),
+            vec2(0.0, 1.0),
+            vec2(1.0, 1.0),
+        ];
+        let strip = CpuMesh {
+            positions: Positions::F32(corners.iter().map(|at| at.extend(0.0)).collect()),
+            indices: Indices::U8(vec![0, 1, 2, 2, 1, 3]),
+            uvs: dashed.then(|| corners.iter().map(|at| vec2(at.x, 0.0)).collect()),
+            ..Default::default()
+        };
+        let defines = if dashed { "#define USE_UVS\n" } else { "" };
+        let base_shader = format!("{defines}{}", include_str!("ribbon.vert"));
+        Self::with_shader(context, instances, &strip, Shape::Ribbon, base_shader)
+    }
+
+    fn with_shader(
+        context: &Context,
+        instances: &Instances,
+        cpu_mesh: &CpuMesh,
+        shape: Shape,
+        base_shader: String,
+    ) -> Self {
         assert!(cpu_mesh.colors.is_none(), "vertex colors are not uploaded");
         let mut mesh = Self {
             context: context.clone(),
             indices: TriangleBuffer::new(context, cpu_mesh),
             positions: VertexBuffer::new_with_data(context, &cpu_mesh.positions.to_f32()),
-            normals: cpu_mesh
-                .normals
-                .as_ref()
-                .map(|normals| VertexBuffer::new_with_data(context, normals)),
-            tangents: cpu_mesh
-                .tangents
-                .as_ref()
-                .map(|tangents| VertexBuffer::new_with_data(context, tangents)),
             // Flipped as three-d's own meshes flip them.
             uvs: cpu_mesh.uvs.as_ref().map(|uvs| {
                 let flipped: Vec<Vec2> = uvs.iter().map(|uv| vec2(uv.x, 1.0 - uv.y)).collect();
                 VertexBuffer::new_with_data(context, &flipped)
             }),
-            base_shader: Mesh::new(context, cpu_mesh).vertex_shader_source(),
+            shape,
+            base_shader,
             rows: std::array::from_fn(|_| InstanceBuffer::new(context)),
             texture_rows: None,
             colors: None,
@@ -126,8 +161,13 @@ impl<'a> IntoIterator for &'a RefilledMesh {
 impl Geometry for RefilledMesh {
     fn draw(&self, viewer: &dyn Viewer, program: &Program, render_states: RenderStates) {
         program.use_uniform("viewProjection", viewer.projection() * viewer.view());
-        program.use_uniform("animationTransform", Mat4::identity());
-        program.use_uniform("modelMatrix", Mat4::identity());
+        match self.shape {
+            Shape::Mesh => {
+                program.use_uniform("animationTransform", Mat4::identity());
+                program.use_uniform("modelMatrix", Mat4::identity());
+            }
+            Shape::Ribbon => program.use_uniform("eye", viewer.position()),
+        }
         for (name, buffer) in ["row1", "row2", "row3"].into_iter().zip(&self.rows) {
             program.use_instance_attribute(name, buffer);
         }
@@ -143,16 +183,6 @@ impl Geometry for RefilledMesh {
             program.use_instance_attribute("instance_color", colors);
         }
         program.use_vertex_attribute("position", &self.positions);
-        if program.requires_attribute("normal")
-            && let Some(normals) = &self.normals
-        {
-            program.use_vertex_attribute("normal", normals);
-        }
-        if program.requires_attribute("tangent")
-            && let Some(tangents) = &self.tangents
-        {
-            program.use_vertex_attribute("tangent", tangents);
-        }
         if program.requires_attribute("uv_coordinates")
             && let Some(uvs) = &self.uvs
         {
@@ -183,11 +213,13 @@ impl Geometry for RefilledMesh {
         let bit = |on: bool, at: u16| u16::from(on) << at;
         GeometryId(
             REFILLED_MESH_ID
-                | bit(self.normals.is_some(), 0)
-                | bit(self.tangents.is_some(), 1)
-                | bit(self.uvs.is_some(), 2)
-                | bit(self.colors.is_some(), 3)
-                | bit(self.texture_rows.is_some(), 4),
+                | bit(self.uvs.is_some(), 0)
+                | bit(self.colors.is_some(), 1)
+                | bit(self.texture_rows.is_some(), 2)
+                | match self.shape {
+                    Shape::Mesh => 0,
+                    Shape::Ribbon => 1 << 3,
+                },
         )
     }
 
