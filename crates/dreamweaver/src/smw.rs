@@ -69,7 +69,10 @@ pub async fn versions(http: &reqwest::Client) -> Result<Vec<Version>> {
             Some(Version {
                 name: row.name?,
                 authors: row.authors,
-                released: row.dated.and_then(|dated| dated.released()),
+                released: row
+                    .dated
+                    .and_then(|record| record.full_date)
+                    .and_then(|date| date.released()),
             })
         })
         .collect())
@@ -503,7 +506,14 @@ struct VersionRow {
     #[serde(rename = "Has contributing author", default)]
     authors: Vec<String>,
     #[serde(rename = "Version/Date", default, deserialize_with = "first")]
-    dated: Option<Date>,
+    dated: Option<DateRecord>,
+}
+
+/// The store files a release date as a record; only its `Full date` is read.
+#[derive(Deserialize)]
+struct DateRecord {
+    #[serde(rename = "Full date", default, deserialize_with = "first_in_cell")]
+    full_date: Option<Date>,
 }
 
 #[derive(Deserialize)]
@@ -790,6 +800,24 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["キリン"]
         );
+    }
+
+    #[test]
+    fn a_release_date_is_read_out_of_the_record_the_store_files_it_in() {
+        let answer = r#"{"query":{"results":[{"Yume 2kki:Version History/0130-0126# d925":{
+            "printouts":{"Version":["0.129e patch 4"],"Has contributing author":["Nabisae"],
+            "Version/Date":[{
+                "Full date":{"label":"Full date","key":"Full_date","typeid":"_dat",
+                    "item":[{"timestamp":"1792540800","raw":"1/2026/10/21"}]},
+                "Year":{"label":"Year","key":"Year","typeid":"_num","item":[2026]}}]}}}]}}"#;
+        let answer: super::Answer<super::VersionRow> =
+            serde_json::from_str(answer).expect("the store's own answer");
+        let (_, row) = answer.into_subject_rows().next().expect("the one release");
+        let released = row
+            .dated
+            .and_then(|record| record.full_date)
+            .and_then(|date| date.released());
+        assert_eq!(released.as_deref(), Some("2026-10-21T00:00:00.000Z"));
     }
 
     /// The same stamp the dump stamps itself with: a reader that takes the day off one has to be
