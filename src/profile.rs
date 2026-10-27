@@ -173,7 +173,8 @@ const GPU_CLOCK_DEPTH: usize = 4;
 /// glow reaches for `glGetQueryObjectuiv` only when GL 4.5's `glGetQueryBufferObjectiv` loaded and
 /// for the `EXT` spelling otherwise, so on a 4.1 context -- every one macOS gives out -- it calls a
 /// pointer it never loaded and panics. Both symbols are in the process, where `dlsym` finds them.
-#[cfg(unix)]
+/// Apple only: elsewhere the GL library is loaded privately, out of `dlsym`'s reach.
+#[cfg(target_vendor = "apple")]
 mod answers {
     use std::ffi::{c_char, c_void};
     use std::sync::LazyLock;
@@ -187,12 +188,8 @@ mod answers {
         fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     }
 
-    /// `RTLD_DEFAULT`, which is every symbol the process has loaded, in the order it loaded them.
-    /// Apple spells it `-2` and everybody else the null handle.
-    #[cfg(target_vendor = "apple")]
+    /// Apple's `RTLD_DEFAULT`: every symbol the process has loaded.
     const LOADED: *mut c_void = -2isize as *mut c_void;
-    #[cfg(not(target_vendor = "apple"))]
-    const LOADED: *mut c_void = std::ptr::null_mut();
 
     /// `name` must be nul terminated, and `F` must be the symbol's own signature.
     #[allow(unsafe_code)]
@@ -217,7 +214,7 @@ mod answers {
 /// Whether an answer can be read at all, which is the one thing [`GpuClock`] cannot recover from
 /// finding out late: glow panics rather than answers, and a page answers zero rather than either.
 fn readable(context: &Context) -> bool {
-    #[cfg(unix)]
+    #[cfg(target_vendor = "apple")]
     {
         let _ = context;
         answers::UIV.is_some() && answers::UI64V.is_some()
@@ -225,13 +222,13 @@ fn readable(context: &Context) -> bool {
     /// `TIME_ELAPSED` is this extension's own enum rather than WebGL2's. A context without it
     /// takes `begin_query` without complaint and reads every answer back as zero, so the queries
     /// are not made at all. Only Chromium advertises it, and only on a desktop GPU.
-    #[cfg(all(not(unix), target_family = "wasm"))]
+    #[cfg(target_family = "wasm")]
     const TIMER: &str = "EXT_disjoint_timer_query_webgl2";
-    #[cfg(all(not(unix), target_family = "wasm"))]
+    #[cfg(target_family = "wasm")]
     {
         context.supported_extensions().contains(TIMER)
     }
-    #[cfg(all(not(unix), not(target_family = "wasm")))]
+    #[cfg(not(any(target_vendor = "apple", target_family = "wasm")))]
     {
         let _ = context;
         true
@@ -242,7 +239,7 @@ fn readable(context: &Context) -> bool {
 /// `query` must be the context's own, and `parameter` one the query answers.
 #[allow(unsafe_code)]
 unsafe fn parameter_u32(context: &Context, query: three_d::context::Query, parameter: u32) -> u32 {
-    #[cfg(unix)]
+    #[cfg(target_vendor = "apple")]
     {
         let _ = context;
         let mut answer = 0;
@@ -252,7 +249,7 @@ unsafe fn parameter_u32(context: &Context, query: three_d::context::Query, param
         }
         answer
     }
-    #[cfg(not(unix))]
+    #[cfg(not(target_vendor = "apple"))]
     // SAFETY: the caller vouched for both arguments.
     unsafe {
         context.get_query_parameter_u32(query, parameter)
@@ -263,7 +260,7 @@ unsafe fn parameter_u32(context: &Context, query: three_d::context::Query, param
 /// As [`parameter_u32`].
 #[allow(unsafe_code)]
 unsafe fn parameter_u64(context: &Context, query: three_d::context::Query, parameter: u32) -> u64 {
-    #[cfg(unix)]
+    #[cfg(target_vendor = "apple")]
     {
         let _ = context;
         let mut answer = 0;
@@ -273,7 +270,7 @@ unsafe fn parameter_u64(context: &Context, query: three_d::context::Query, param
         }
         answer
     }
-    #[cfg(not(unix))]
+    #[cfg(not(target_vendor = "apple"))]
     // SAFETY: the caller vouched for both arguments.
     unsafe {
         context.get_query_parameter_u64(query, parameter)
