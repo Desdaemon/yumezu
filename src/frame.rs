@@ -65,15 +65,20 @@ impl App {
             &mut frame_input.events,
             self.statics.touches.pinching,
         );
-        if data.dimensions() == Dimensions::Two {
-            // Swallowing the orbit drag leaves the zoom and the pan.
-            lock_rotation(&mut frame_input.events);
-        }
+        // Flat, the drag that would orbit pans instead, a turn being locked there.
+        let left_dragged = match data.dimensions() {
+            Dimensions::Two => take_left_drags(&mut frame_input.events),
+            Dimensions::Three => (0.0, 0.0),
+        };
         // three-d reads the finger gap as a wheel, and the midpoint's travel is the pan.
-        let dragged = self
+        let pinch_dragged = self
             .statics
             .touches
             .take_travel(frame_input.device_pixel_ratio);
+        let dragged = (
+            left_dragged.0 + pinch_dragged.0,
+            left_dragged.1 + pinch_dragged.1,
+        );
         // After the overlay, which settles whether the keys type into the search box.
         let typing = self.overlay.as_ref().unwrap().keyboard;
         self.statics.walk.track(&frame_input.events, typing);

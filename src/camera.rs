@@ -274,7 +274,7 @@ impl AppStatics {
 
     /// Turns the camera square to the `z = 0` plane, keeping where it looks and how far off it
     /// stands. Made on the app's own, two-dimensional mode locking the turn: see
-    /// [`lock_rotation`].
+    /// [`take_left_drags`].
     pub(super) fn face_plane(&mut self) {
         let target = self.control.target;
         let distance = target.distance(self.camera.position());
@@ -389,21 +389,27 @@ impl AppStatics {
 fn fraction_covered(seconds: f32, window_ms: f32) -> f32 {
     1.0 - (-seconds / (window_ms * 1e-3)).exp()
 }
-/// Swallows the left-button motion [`OrbitControl`] would turn the camera with.
+/// Takes the left-button motion [`OrbitControl`] would turn the camera with, answering how far it
+/// travelled, in the logical pixels a pan is measured in.
 ///
 /// Called after the gesture is resolved, so a drag belonging to a node has already been taken.
 /// Presses and releases are left alone: they still resolve clicks, and neither turns anything.
-pub(super) fn lock_rotation(events: &mut [Event]) {
+pub(super) fn take_left_drags(events: &mut [Event]) -> (f32, f32) {
+    let mut travel = (0.0, 0.0);
     for event in events {
         if let Event::MouseMotion {
             button: Some(MouseButton::Left),
-            handled,
+            delta,
+            handled: handled @ false,
             ..
         } = event
         {
+            travel.0 += delta.0;
+            travel.1 += delta.1;
             *handled = true;
         }
     }
+    travel
 }
 
 /// A thumbnail is flat, so without this a node would be seen edge-on from half the angles the
