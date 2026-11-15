@@ -1,3 +1,6 @@
+# Reads `.env` when there is one, for `YUMEZU_KEYSTORE_PASS`, `CF_KEY` and `CF_ZONE`.
+set dotenv-load
+
 # Serves the page; needs `just dreamweaver` running alongside.
 serve: assets
     trunk serve --release
@@ -9,6 +12,12 @@ dist *args: assets
 thumbnails:
     curl -L https://explrer.yumemiru.dev/data -o data.json
     cargo run --release --manifest-path tools/atlas/Cargo.toml
+
+# Has Cloudflare drop its copy of the thumbnail atlas, for after a new one is deployed.
+purge-thumbnails:
+    curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE/purge_cache" \
+        -H "Authorization: Bearer $CF_KEY" -H "Content-Type: application/json" \
+        --data '{"files":["https://explorer.yumemiru.dev/static/thumbnails.jpg"]}'
 
 # Builds a signed apk at `target/android/yumezu.apk`.
 apk:
