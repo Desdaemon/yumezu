@@ -90,13 +90,13 @@ impl Offer {
         }
     }
 
-    /// The bar stands off the bottom of the safe area, not of the window, which on a phone sits
-    /// behind the navigation bar.
-    pub(super) fn show(&mut self, ctx: &egui::Context, insets: egui::Margin) {
+    /// The bar stands off the top of the safe area, not of the window, which on a phone sits
+    /// under the status bar; the foot is the message box's.
+    pub(super) fn show(&mut self, ctx: &egui::Context, insets: super::ui::Insets) {
         let Some(platform) = self.platform else {
             return;
         };
-        let anchor = egui::Align2::CENTER_BOTTOM;
+        let anchor = egui::Align2::CENTER_TOP;
         super::anchored_popup(ctx, "download offer", anchor, insets, |ui| {
             ui.horizontal(|ui| {
                 if ui

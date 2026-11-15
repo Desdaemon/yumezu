@@ -1,14 +1,15 @@
-//! Everything drawn over the graph rather than in it: the panel and its sidebar, the rocker, the
-//! right-click menu, the hover tooltip, and the frame that stands in for all of it while the dump
-//! is still on its way. See [`Overlay`] and [`Panel`].
+//! Everything drawn over the graph rather than in it: the browse and selection windows, the rocker,
+//! the right-click menu, and the message box. See [`Overlay`] and [`Panel`].
 
+mod browse;
 mod graph_overlay;
 mod selection;
 mod settings;
-mod sidebar;
+mod skin;
 mod tile;
 
-use sidebar::{sidebar_opener, worlds};
+use browse::worlds;
+use skin::Skin;
 use tile::{Tile, release_held_hover};
 
 use super::*;
@@ -27,23 +28,35 @@ pub(super) const PANEL_MARGIN: i8 = 12;
 /// someone's account is worth no more than the code that keeps it.
 const YNO_SOURCE: &str = "https://github.com/Desdaemon/yumezu/blob/main/src/yno.rs";
 
-const SIDEBAR_DEFAULT_WIDTH: f32 = 280.0;
-/// The graph runs underneath the sidebar rather than stopping at its edge, so an opaque one would
-/// hide what was just selected. Still opaque enough to keep text legible over a bright graph.
-const SIDEBAR_OPACITY: u8 = 200;
-/// Width of the right-click menu and the hover tooltip, in egui's points. Both carry a world's
-/// title, and a long one would otherwise stretch them across the window.
+/// Widths of the windows down either side of a wide window, in egui's points.
+const BROWSE_WIDTH: f32 = 300.0;
+const SELECTION_WIDTH: f32 = 320.0;
+/// Narrower than this, in egui's points, and the windows take turns over a tab bar.
+const NARROW_BELOW: f32 = 640.0;
+/// The message box between the side windows: no wider than a line reads well, and never narrower
+/// than a world's title.
+const MESSAGE_WIDTH: f32 = 560.0;
+const MESSAGE_MIN_WIDTH: f32 = 240.0;
+/// What the windows fade to while the pointer works the graph behind them.
+const FADED_OPACITY: f32 = 0.4;
+const WINDOWS_SHOWN_ID: &str = "windows shown";
+/// How much of a phone's safe area the window over the tab bar may take.
+const SHEET_SHARE: f32 = 0.4;
+/// Width of the right-click menu, in egui's points: a long title would stretch it across the window.
 const POPUP_WIDTH: f32 = 240.0;
+const SYSTEM_THEME_ID: &str = "system theme";
+/// Four themes across, which a phone held upright fits with room to spare.
+const SYSTEM_THEME_WIDTH: f32 = 280.0;
+/// The least side of a theme's square, grown to fill the row once as many as fit sit in it.
+const SYSTEM_THEME_SIDE: f32 = 64.0;
+const SYSTEM_THEME_PREVIEW: egui::Vec2 = egui::vec2(40.0, 40.0);
+const SYSTEM_THEME_HEIGHT_SHARE: f32 = 0.6;
 const UI_SCALE: &str = "ui-scale";
 
 /// The far ends are a phone held at arm's length and a desk monitor read from close up. The middle
 /// is the size the system itself says a point is, which is already right for most screens.
 const UI_SCALE_RANGE: std::ops::RangeInclusive<f32> = 0.6..=2.0;
 const UI_SCALE_DEFAULT: f32 = 1.0;
-
-/// How far below and right of the cursor the hover tooltip sits, in egui's points, so that it
-/// names the world under the pointer rather than covering it.
-const TOOLTIP_OFFSET: f32 = 16.0;
 
 // The gutter a walk's line runs down, drawn as a transit map draws a route.
 const RAIL_WIDTH: f32 = 18.0;
@@ -119,7 +132,7 @@ pub(super) struct Overlay {
     pub(super) gui: gui::Gui,
     /// Frames counted over the [`FRAME_WINDOW_MS`] so far. See [`Overlay::timed`].
     counted: Counted,
-    sidebar: Sidebar,
+    browse: Browse,
     /// Whether the on-screen keyboard was last wanted. See [`track_keyboard`].
     pub(super) keyboard: bool,
     guide: guide::Guide,
@@ -144,15 +157,18 @@ pub(super) struct Overlay {
     antialias_running: bool,
     /// Whether the view leans onto the world a row is pointing at. See [`leaning_remembered`].
     pub(super) leaning: bool,
+    skin: Skin,
 }
 
-/// What the sidebar keeps between frames: held apart from [`Panel`], which is this frame's
+/// What the browse window keeps between frames: held apart from [`Panel`], which is this frame's
 /// decisions, because these are the person's and outlive the frame that made them.
 #[derive(Default)]
-struct Sidebar {
-    /// This way round so that the default is open.
-    closed: bool,
+struct Browse {
     tab: Tab,
+    /// Whether the open tab's contents are folded away, which a new selection does to make room.
+    collapsed: bool,
+    /// The selection [`Browse::collapsed`] last followed. See [`Browse::fold_for_selection`].
+    followed: Option<Highlight>,
     /// What has been typed into each tab's own box. Matched every frame rather than cached, a scan
     /// of a few thousand titles being cheaper than the frame it happens in.
     ///
@@ -165,6 +181,8 @@ struct Sidebar {
     /// the run, and the password is never written down. See [`Panel::yno`].
     yno_user: String,
     yno_password: String,
+    /// Whether the System Theme dialog is open.
+    picking_theme: bool,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +208,7 @@ struct Panel {
     antialias_running: bool,
     /// What the switch was left set to. See [`leaning_remembered`].
     leaning: bool,
+    skin: Skin,
     /// A world picked out of one of the lists, to be routed to.
     chosen: Option<usize>,
     /// A world a list row is pointing at, to be brightened where it sits in the graph. At most one:
@@ -205,6 +224,8 @@ struct Panel {
     guide: bool,
     /// Whether the framing button was pressed, calling for a route to be framed the other way.
     refit: bool,
+    /// Whether the refocus button was pressed, calling the camera back onto the selection.
+    refocus: bool,
     /// The way among a set of directions that was picked to be drawn instead.
     way: Option<usize>,
     /// The world whose maps were called for. A second press on the same world closes them again:
@@ -235,9 +256,47 @@ struct PanelData<'a> {
     selected: Option<Highlight>,
     /// The world a right-click opened a menu over, and where to draw it in egui's points.
     menu: Option<(usize, egui::Pos2)>,
-    /// The world the pointer is over, and where it is in egui's points. `None` whenever nothing is
-    /// hovered, and on a touch screen throughout.
-    hovered: Option<(usize, egui::Pos2)>,
+    /// The world the pointer is over. `None` whenever nothing is hovered, and on a touch screen
+    /// throughout.
+    hovered: Option<usize>,
+}
+
+/// How far each edge of the safe area stands in from the window's, in egui's points. Not an
+/// [`egui::Margin`], whose `i8` stops short of a phone's keyboard.
+#[derive(Clone, Copy)]
+pub(super) struct Insets {
+    pub(super) left: f32,
+    pub(super) right: f32,
+    pub(super) top: f32,
+    pub(super) bottom: f32,
+}
+
+impl Insets {
+    pub(super) fn shrink_rect(self, rect: egui::Rect) -> egui::Rect {
+        egui::Rect::from_min_max(
+            rect.min + egui::vec2(self.left, self.top),
+            rect.max - egui::vec2(self.right, self.bottom),
+        )
+    }
+}
+
+/// Where the windows stand, chosen by how wide the window is rather than by what it runs on.
+#[derive(Clone, Copy)]
+enum Arrangement {
+    /// The browse window down the left, the selection down the right, the graph between them.
+    Wide,
+    /// One window at a time over a tab bar, which is what a phone held upright has room for.
+    Narrow,
+}
+
+/// What every window in a frame is fitted to, in egui's points.
+struct Placement {
+    insets: Insets,
+    /// The safe area's width.
+    width: f32,
+    /// The most a window's contents may take down the safe area.
+    height: f32,
+    opacity: f32,
 }
 
 pub(super) struct ContextMenu {
@@ -259,12 +318,15 @@ impl Overlay {
     ) -> Self {
         let gui = gui::Gui::new(event_loop, window, context);
         egui_material_icons::initialize(gui.context());
+        let skin = Skin::remembered();
+        skin::install_font(gui.context());
+        skin::apply_skin(gui.context(), skin);
         let scale = remembered_scale();
         let remembered = antialias_remembered();
         Self {
             gui,
             counted: Counted::default(),
-            sidebar: Sidebar::default(),
+            browse: Browse::default(),
             keyboard: false,
             guide: guide::Guide::new(),
             download: download::Offer::new(),
@@ -276,6 +338,7 @@ impl Overlay {
             antialias: remembered,
             antialias_running: remembered,
             leaning: leaning_remembered(),
+            skin,
         }
     }
 
@@ -303,7 +366,7 @@ impl Overlay {
             release_held_hover(self.gui.context());
         }
         let ratio = frame_input.device_pixel_ratio * self.ui_scale;
-        let read = PanelData::new(data, self.counted.rate(), &self.sidebar, frame_input, ratio);
+        let read = PanelData::new(data, self.counted.rate(), &self.browse, frame_input, ratio);
         let parameters = data.graph.parameters();
         // `parameters_mut` wakes the layout, so it is written back only on change.
         let mut panel = Panel {
@@ -315,6 +378,7 @@ impl Overlay {
             antialias: self.antialias,
             antialias_running: self.antialias_running,
             leaning: self.leaning,
+            skin: self.skin,
             chosen: None,
             pointed: None,
             lit: None,
@@ -324,53 +388,70 @@ impl Overlay {
             refit: false,
             way: None,
             mapped: None,
+            refocus: false,
             revealed: None,
             language: None,
         };
         // Bound out so the closure leaves `self.gui` free.
-        let sidebar = &mut self.sidebar;
+        let browse = &mut self.browse;
         let guide = &mut self.guide;
         let download = &mut self.download;
         let maps = &mut self.maps;
         let insets = safe_insets(frame_input.viewport, ratio);
         self.gui.run(window, |ui| {
-            let style = ui.style();
-            // Full height, insetting contents: stopping short of the status bar leaves a stripe.
-            let frame = egui::Frame::side_top_panel(style)
-                .inner_margin(egui::Margin {
-                    left: insets.left + PANEL_MARGIN,
-                    right: PANEL_MARGIN,
-                    top: insets.top + PANEL_MARGIN,
-                    bottom: insets.bottom + PANEL_MARGIN,
-                })
-                .fill(fade(style.visuals.panel_fill, SIDEBAR_OPACITY));
-            match sidebar.closed {
-                false => {
-                    egui::Panel::left("yumezu")
-                        .frame(frame)
-                        .default_size(SIDEBAR_DEFAULT_WIDTH)
-                        .show(ui, |ui| panel.window(ui, &read, sidebar, account, dump));
+            let ctx = ui.ctx().clone();
+            let safe = insets.shrink_rect(ctx.content_rect());
+            let (width, height) = (safe.width(), safe.height());
+            let arrangement = Arrangement::for_width(width);
+            let placement = Placement {
+                insets,
+                width,
+                height: height - 2.0 * (f32::from(PANEL_MARGIN) + f32::from(skin::WINDOW_PADDING)),
+                opacity: window_opacity(&ctx),
+            };
+            browse.fold_for_selection(read.selected);
+            let remaining_insets = match arrangement {
+                Arrangement::Wide => {
+                    panel.browse_window(ui, &read, browse, account, dump, &placement);
+                    if let Some(highlight) = read.selected {
+                        panel.selection_window(ui, &read, highlight, &placement);
+                    }
+                    insets
                 }
-                true => sidebar_opener(ui, sidebar, insets),
-            }
-            panel.rocker(ui, &read, insets);
+                Arrangement::Narrow => {
+                    panel.narrow_windows(ui, &read, browse, account, dump, &placement)
+                }
+            };
+            panel.rocker(
+                ui,
+                &read,
+                arrangement.rocker_anchor(),
+                remaining_insets,
+                placement.opacity,
+            );
             panel.directions(ui, &read);
             panel.menu(ui, &read);
-            panel.tooltip(ui, &read);
+            panel.system_theme_dialog(&ctx, &mut browse.picking_theme);
+            panel.message(
+                ui,
+                &read,
+                remaining_insets,
+                arrangement.message_width(width),
+            );
             // Within the frame that set it, so the window opens on release.
             if let Some(world) = panel.mapped {
                 maps.toggle(world, data.titles[world].show(), &data.maps[world]);
             }
-            maps.show(ui.ctx(), insets);
-            download.show(ui.ctx(), insets);
+            maps.show(&ctx, remaining_insets);
+            download.show(&ctx, remaining_insets);
             // Last, so it is drawn over everything it explains.
             if panel.guide {
                 guide.reopen();
             }
-            guide.show(ui.ctx());
-            // Over the panel too: the veil stood in for the whole interface.
+            guide.show(&ctx);
+            // Over the windows too: the veil stood in for the whole interface.
             if let Some((says, opacity)) = &fading {
-                loading_frame(ui.ctx(), says, None, *opacity);
+                loading_frame(&ctx, says, None, *opacity);
             }
         });
         // Only after the frame does egui know what lies under the pointer.
@@ -426,6 +507,9 @@ impl Overlay {
             data.frame_route = !data.frame_route;
             data.framing = true;
         }
+        if panel.refocus {
+            data.framing = true;
+        }
         if let Some(way) = panel.way {
             data.take_way(way);
         }
@@ -446,6 +530,11 @@ impl Overlay {
         if panel.antialias != self.antialias {
             self.antialias = panel.antialias;
             antialias_remember(self.antialias);
+        }
+        if panel.skin != self.skin {
+            self.skin = panel.skin;
+            skin::apply_skin(self.gui.context(), self.skin);
+            self.skin.remember();
         }
         if panel.leaning != self.leaning {
             self.leaning = panel.leaning;
@@ -503,7 +592,7 @@ impl<'a> PanelData<'a> {
     fn new(
         data: &'a AppEntities,
         fps: f32,
-        sidebar: &Sidebar,
+        browse: &Browse,
         frame_input: &FrameInput,
         ratio: f32,
     ) -> Self {
@@ -518,21 +607,21 @@ impl<'a> PanelData<'a> {
                 }
                 _ => Vec::new(),
             },
-            candidates: data.search(&sidebar.worlds),
+            candidates: data.search(&browse.worlds),
             // Only the open tab.
-            authors: match sidebar.tab {
+            authors: match browse.tab {
                 Tab::Authors => world::ranked_matches(
                     data.authors.iter().map(|by| by.name.names()),
-                    &sidebar.authors,
+                    &browse.authors,
                 ),
                 _ => Vec::new(),
             },
-            versions: match sidebar.tab {
+            versions: match browse.tab {
                 Tab::Versions => world::ranked_matches(
                     data.versions
                         .iter()
                         .map(|version| std::iter::once(version.name.as_str())),
-                    &sidebar.versions,
+                    &browse.versions,
                 ),
                 _ => Vec::new(),
             },
@@ -541,13 +630,69 @@ impl<'a> PanelData<'a> {
                 .menu
                 .as_ref()
                 .map(|menu| (menu.world, into_points(menu.at, frame_input, ratio))),
-            // A frame behind: the pointer resolves only after the panel takes its events.
-            hovered: data
-                .hover
-                .zip(data.cursor)
-                .map(|(world, cursor)| (world, into_points(cursor, frame_input, ratio))),
+            hovered: data.hover,
         }
     }
+}
+
+impl Browse {
+    /// Folds the open tab away when something new is selected, and opens it again when nothing is.
+    fn fold_for_selection(&mut self, selected: Option<Highlight>) {
+        if selected == self.followed {
+            return;
+        }
+        self.followed = selected;
+        self.collapsed = selected.is_some();
+    }
+}
+
+impl Arrangement {
+    fn for_width(width: f32) -> Self {
+        match width < NARROW_BELOW {
+            true => Self::Narrow,
+            false => Self::Wide,
+        }
+    }
+
+    /// Clear of the tab bar and the window over it on a narrow screen.
+    fn rocker_anchor(self) -> egui::Align2 {
+        match self {
+            Self::Wide => egui::Align2::RIGHT_BOTTOM,
+            Self::Narrow => egui::Align2::RIGHT_TOP,
+        }
+    }
+
+    /// How wide the message box's contents are, given the safe area's width.
+    fn message_width(self, width: f32) -> f32 {
+        let room = width - 2.0 * f32::from(PANEL_MARGIN);
+        let beside = BROWSE_WIDTH.max(SELECTION_WIDTH) + f32::from(PANEL_MARGIN);
+        let outer = match self {
+            Self::Wide => (room - 2.0 * beside).clamp(MESSAGE_MIN_WIDTH, MESSAGE_WIDTH),
+            Self::Narrow => room,
+        };
+        outer - 2.0 * f32::from(skin::WINDOW_PADDING)
+    }
+}
+
+/// Faded while the pointer works the graph, so the windows hide less of it. Never on a touch
+/// screen, where nothing hovers to bring them back.
+fn window_opacity(ctx: &egui::Context) -> f32 {
+    // A finger only points while it is down; a mouse points wherever it rests.
+    let pointing = ctx.input(|input| {
+        input.pointer.has_pointer() && (!input.has_touch_screen() || input.pointer.any_down())
+    });
+    let on_graph = pointing && !ctx.is_pointer_over_egui() && !ctx.egui_wants_keyboard_input();
+    let shown = ctx.animate_bool(egui::Id::new(WINDOWS_SHOWN_ID), !on_graph);
+    egui::lerp(FADED_OPACITY..=1.0, shown)
+}
+
+/// The one box the graph's words are said in, at the foot of the safe area the way a game says its
+/// dialogue.
+fn message_area(id: &str, insets: Insets) -> egui::Area {
+    let above = insets.bottom + f32::from(PANEL_MARGIN);
+    egui::Area::new(egui::Id::new(id))
+        .order(egui::Order::Tooltip)
+        .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -above])
 }
 
 fn remembered_scale() -> f32 {
@@ -600,8 +745,8 @@ pub(super) fn take_placeholder() {
 /// screen, and [`Overlay::panel`] draws what is left over the graph that replaced it. See
 /// [`App::veil`].
 ///
-/// The veil goes on the foreground layer and the words a layer above. Two orders rather than two
-/// layers of one: a layer painted through [`egui::Context::layer_painter`] is drawn last within
+/// The veil goes on the foreground layer and the message box a layer above. Two orders rather than
+/// two layers of one: a layer painted through [`egui::Context::layer_painter`] is drawn last within
 /// its order, which put the veil over the words.
 pub(super) fn loading_frame(ctx: &egui::Context, says: &str, failed: Option<&str>, opacity: f32) {
     let opacity = opacity.clamp(0.0, 1.0);
@@ -621,41 +766,39 @@ pub(super) fn loading_frame(ctx: &egui::Context, says: &str, failed: Option<&str
             (opacity * 255.0) as u8,
         ),
     );
+    let width = ctx.content_rect().width();
+    let width = Arrangement::for_width(width).message_width(width);
     egui::Area::new(egui::Id::new("loading"))
         .order(egui::Order::Tooltip)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             ui.set_opacity(opacity);
-            ui.horizontal(|ui| {
-                // It is always about to retry.
-                ui.add(egui::Spinner::new());
-                let line = ui.label(says);
-                // Logged in full; on screen only on hover.
-                if let Some(error) = failed {
-                    line.on_hover_text(error);
-                }
+            skin::window(ui, |ui| {
+                ui.set_width(width);
+                ui.horizontal(|ui| {
+                    // It is always about to retry.
+                    skin::walking_sprite(ui);
+                    let line = ui.label(says);
+                    // Logged in full; on screen only on hover.
+                    if let Some(error) = failed {
+                        line.on_hover_text(error);
+                    }
+                });
             });
         });
 }
 
-fn fade(color: egui::Color32, opacity: u8) -> egui::Color32 {
-    let [r, g, b, a] = color.to_srgba_unmultiplied();
-    egui::Color32::from_rgba_unmultiplied(r, g, b, (a as u16 * opacity as u16 / 255) as u8)
-}
-
 /// How far the panel and the rocker stand off each edge of the window to clear the system's own
 /// furniture, in egui's points. Zero where there is no safe area. See [`safe_rect`].
-fn safe_insets(viewport: Viewport, device_pixel_ratio: f32) -> egui::Margin {
+pub(super) fn safe_insets(viewport: Viewport, device_pixel_ratio: f32) -> Insets {
     let safe = safe_rect(viewport, device_pixel_ratio);
     let width = viewport.width as f32 / device_pixel_ratio;
     let height = viewport.height as f32 / device_pixel_ratio;
-    // A margin is an `i8`; no system inset is that deep.
-    let inset = |value: f32| value.clamp(0.0, 127.0) as i8;
-    egui::Margin {
-        left: inset(safe.min.x),
-        right: inset(width - safe.max.x),
-        top: inset(safe.min.y),
-        bottom: inset(height - safe.max.y),
+    Insets {
+        left: safe.min.x.max(0.0),
+        right: (width - safe.max.x).max(0.0),
+        top: safe.min.y.max(0.0),
+        bottom: (height - safe.max.y).max(0.0),
     }
 }
 
@@ -709,28 +852,40 @@ fn track_keyboard(wanted: bool, shown: &mut bool) {
     }
 }
 
-/// A popup framed in an [`egui::Area`], at `anchor` of the window and as far off its edges as the
-/// panel stands, which clears the system's furniture.
-pub(super) fn anchored_popup<R>(
+/// A window in an [`egui::Area`], at `anchor` of the window and as far off its edges as the panel
+/// stands, which clears the system's furniture.
+pub(super) fn anchored_window<R>(
     ctx: &egui::Context,
     id: &str,
     anchor: egui::Align2,
-    insets: egui::Margin,
+    insets: Insets,
+    opacity: f32,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    let offset = |align: egui::Align, near: i8, far: i8| match align {
-        egui::Align::Min => f32::from(near) + f32::from(PANEL_MARGIN),
+) -> egui::InnerResponse<R> {
+    let offset = |align: egui::Align, near: f32, far: f32| match align {
+        egui::Align::Min => near + f32::from(PANEL_MARGIN),
         egui::Align::Center => 0.0,
-        egui::Align::Max => -(f32::from(far) + f32::from(PANEL_MARGIN)),
+        egui::Align::Max => -(far + f32::from(PANEL_MARGIN)),
     };
     let x = offset(anchor.x(), insets.left, insets.right);
     let y = offset(anchor.y(), insets.top, insets.bottom);
     egui::Area::new(egui::Id::new(id))
         .anchor(anchor, [x, y])
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, add_contents).inner
+            ui.multiply_opacity(opacity);
+            skin::window(ui, add_contents).inner
         })
-        .inner
+}
+
+/// An [`anchored_window`] that never fades.
+pub(super) fn anchored_popup<R>(
+    ctx: &egui::Context,
+    id: &str,
+    anchor: egui::Align2,
+    insets: Insets,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    anchored_window(ctx, id, anchor, insets, 1.0, add_contents).inner
 }
 
 /// A hyperlink that opens through [`open_in_browser`], which egui's own does not reach.

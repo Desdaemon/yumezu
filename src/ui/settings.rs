@@ -6,15 +6,63 @@ use chrono::{Datelike, Timelike};
 use super::*;
 
 impl Panel {
+    /// The theme in use beside the button that opens the picker, which has a dialog of its own.
+    fn system_theme(&mut self, ui: &mut egui::Ui, picking: &mut bool) {
+        ui.horizontal(|ui| {
+            let preview = skin::skin_button(ui, self.skin, false, SYSTEM_THEME_PREVIEW);
+            if preview.clicked() || ui.button(t!("system-theme")).clicked() {
+                *picking = true;
+            }
+        });
+    }
+
+    /// Choosing applies at once, so the dialog stays open to compare one theme with the next.
+    pub(super) fn system_theme_dialog(&mut self, ctx: &egui::Context, picking: &mut bool) {
+        egui::Window::new(t!("system-theme"))
+            .id(egui::Id::new(SYSTEM_THEME_ID))
+            .open(picking)
+            .collapsible(false)
+            .auto_sized()
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .show(ctx, |ui| {
+                let room = ctx.content_rect().width()
+                    - 2.0 * (f32::from(PANEL_MARGIN) + f32::from(skin::WINDOW_PADDING));
+                let width = SYSTEM_THEME_WIDTH.min(room);
+                ui.set_width(width);
+                let spacing = ui.spacing().item_spacing.x;
+                let columns = ((width + spacing) / (SYSTEM_THEME_SIDE + spacing))
+                    .floor()
+                    .max(1.0);
+                let button_size = egui::Vec2::splat((width + spacing) / columns - spacing);
+                let skins: Vec<Skin> = Skin::every().collect();
+                egui::ScrollArea::vertical()
+                    .max_height(ctx.content_rect().height() * SYSTEM_THEME_HEIGHT_SHARE)
+                    .show(ui, |ui| {
+                        for row in skins.chunks(columns as usize) {
+                            ui.horizontal(|ui| {
+                                for &skin in row {
+                                    let chosen = skin == self.skin;
+                                    let button = skin::skin_button(ui, skin, chosen, button_size);
+                                    if button.clicked() {
+                                        self.skin = skin;
+                                    }
+                                }
+                            });
+                        }
+                    });
+            });
+    }
+
     /// A tab of its own because the knobs are set once and then left alone.
     pub(super) fn settings(
         &mut self,
         ui: &mut egui::Ui,
-        sidebar: &mut Sidebar,
+        browse: &mut Browse,
         account: &mut yno::Account,
         dump: Option<&world::Dump>,
     ) {
         self.language(ui);
+        self.system_theme(ui, &mut browse.picking_theme);
         ui.add(
             egui::Slider::new(&mut self.hub_repulsion, HUB_REPULSION_RANGE).text(t!("hub-push")),
         )
@@ -31,7 +79,7 @@ impl Panel {
         Self::clear_cache(ui);
         update::controls(ui);
         Self::freshness(ui, dump);
-        Self::yno(ui, sidebar, account, dump);
+        Self::yno(ui, browse, account, dump);
 
         let github = format!("{GITHUB}  {}", t!("github-link"));
         browser_link(ui, github, "https://github.com/Desdaemon/yumezu");
@@ -84,7 +132,7 @@ impl Panel {
     /// again rather than anything this panel draws.
     fn yno(
         ui: &mut egui::Ui,
-        sidebar: &mut Sidebar,
+        browse: &mut Browse,
         account: &mut yno::Account,
         dump: Option<&world::Dump>,
     ) {
@@ -132,20 +180,20 @@ impl Panel {
         }
         ui.label(t!("yno-hint"));
         Self::promise(ui);
-        ui.add(egui::TextEdit::singleline(&mut sidebar.yno_user).hint_text(t!("yno-user")));
+        ui.add(egui::TextEdit::singleline(&mut browse.yno_user).hint_text(t!("yno-user")));
         ui.add(
-            egui::TextEdit::singleline(&mut sidebar.yno_password)
+            egui::TextEdit::singleline(&mut browse.yno_password)
                 .password(true)
                 .hint_text(t!("yno-password")),
         );
-        let ready = !sidebar.yno_user.is_empty() && !sidebar.yno_password.is_empty();
+        let ready = !browse.yno_user.is_empty() && !browse.yno_password.is_empty();
         if ui
             .add_enabled(ready, egui::Button::new(t!("yno-sign-in")))
             .clicked()
         {
             account.sign_in(
-                std::mem::take(&mut sidebar.yno_user),
-                std::mem::take(&mut sidebar.yno_password),
+                std::mem::take(&mut browse.yno_user),
+                std::mem::take(&mut browse.yno_password),
             );
         }
     }

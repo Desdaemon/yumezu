@@ -10,6 +10,9 @@
 language-name = 日本語
 language = 言語
 
+system-theme = システムテーマ
+system-theme-painted = 標準
+
 ## The frame before the graph.
 
 dump-loading = 読み込み中...
@@ -21,13 +24,11 @@ dump-task-worlds = 世界を読み込んでいます…
 dump-task-connections = 世界のつながりを読み込んでいます…
 dump-task-assembling = グラフを組み立てています…
 
-## The sidebar and its tabs.
+## The browse window and its tabs.
 
 tab-worlds = マップ
 tab-authors = ツクラー
 tab-versions = バージョン
-hide-sidebar = サイドバーを隠す
-show-sidebar = サイドバーを表示
 
 ## The graph tab.
 
@@ -107,6 +108,7 @@ menu-open-wiki = wikiで見る
 
 rocker-shallower = 浅く
 rocker-deeper = 深く
+refocus = 選択に視点を戻す
 
 ## The settings tab.
 

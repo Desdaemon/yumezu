@@ -90,7 +90,7 @@ impl Maps {
 
     /// `insets` is what the system's own furniture covers, which matters only to the maximized
     /// window -- the one size this picks rather than the reader.
-    pub(super) fn show(&mut self, ctx: &egui::Context, insets: egui::Margin) {
+    pub(super) fn show(&mut self, ctx: &egui::Context, insets: super::ui::Insets) {
         let Some(open) = &mut self.open else {
             return;
         };
@@ -107,7 +107,7 @@ impl Maps {
             // The map pans itself, so the window does not scroll.
             Sizing::Free => window.default_size(SIZE).resizable(true),
             // three-d reports no system insets, so the app's own keep this clear of a status bar.
-            Sizing::Full(_) => window.fixed_rect(ctx.content_rect() - insets),
+            Sizing::Full(_) => window.fixed_rect(insets.shrink_rect(ctx.content_rect())),
             Sizing::Restoring(rect) => window.fixed_rect(rect),
         };
         let full = self.sizing.is_full();

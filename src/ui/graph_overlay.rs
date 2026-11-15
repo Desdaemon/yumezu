@@ -1,22 +1,28 @@
-//! The controls and labels that stand over the graph rather than in the sidebar: the layer
-//! rocker, the right-click menu, and the hover tooltip.
+//! The controls and words that stand over the graph rather than in a window beside it: the layer
+//! rocker, the right-click menu, and the message box naming what is hovered.
 
 use super::*;
 
 impl Panel {
     /// Steps the lit layer in and out from the origin.
     ///
-    /// An [`egui::Area`] rather than part of the sidebar, so it sits in the corner the graph is
-    /// visible in whatever the sidebar shows. Its middle is the off position, so a layer can be
-    /// dropped without clicking a world.
-    pub(super) fn rocker(&mut self, ui: &mut egui::Ui, read: &PanelData, insets: egui::Margin) {
+    /// An [`egui::Area`] rather than part of a window, so it sits in a corner the graph is visible
+    /// in whatever the windows show. Its middle is the off position, so a layer can be dropped
+    /// without clicking a world.
+    pub(super) fn rocker(
+        &mut self,
+        ui: &mut egui::Ui,
+        read: &PanelData,
+        anchor: egui::Align2,
+        insets: Insets,
+        opacity: f32,
+    ) {
         let deepest = read.data.deepest;
         let lit = match read.selected {
             Some(Highlight::Layer(depth)) => Some(depth),
             _ => None,
         };
-        let anchor = egui::Align2::RIGHT_BOTTOM;
-        anchored_popup(ui.ctx(), "layer rocker", anchor, insets, |ui| {
+        anchored_window(ui.ctx(), "layer rocker", anchor, insets, opacity, |ui| {
             // Scaled, so arrows and padding grow together with the UI scale.
             let style = ui.style_mut();
             for font in style.text_styles.values_mut() {
@@ -24,9 +30,29 @@ impl Panel {
             }
             style.spacing.button_padding *= ROCKER_SCALE;
             style.spacing.item_spacing *= ROCKER_SCALE;
+            // A skin's arrow takes the chevron's place without resizing the button around it.
+            let glyph = egui::WidgetText::from(ICON_KEYBOARD_ARROW_UP)
+                .into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Button,
+                )
+                .size();
+            let button_size = glyph + 2.0 * ui.spacing().button_padding;
+            let face = |arrow: skin::Arrow, icon: egui_material_icons::MaterialIcon| {
+                match skin::skin_arrow(ui.ctx(), arrow, glyph.x) {
+                    Some(image) => egui::Button::image(image).min_size(button_size),
+                    None => egui::Button::new(icon),
+                }
+            };
+            let (up, down) = (
+                face(skin::Arrow::Up, ICON_KEYBOARD_ARROW_UP),
+                face(skin::Arrow::Down, ICON_KEYBOARD_ARROW_DOWN),
+            );
             ui.vertical_centered(|ui| {
                 if ui
-                    .add_enabled(lit != Some(0), egui::Button::new(ICON_KEYBOARD_ARROW_UP))
+                    .add_enabled(lit != Some(0), up)
                     .on_hover_text(t!("rocker-shallower"))
                     .clicked()
                 {
@@ -35,16 +61,22 @@ impl Panel {
                     )));
                 }
                 if ui
-                    .add_enabled(
-                        lit != Some(deepest),
-                        egui::Button::new(ICON_KEYBOARD_ARROW_DOWN),
-                    )
+                    .add_enabled(lit != Some(deepest), down)
                     .on_hover_text(t!("rocker-deeper"))
                     .clicked()
                 {
                     self.lit = Some(Some(Highlight::Layer(
                         lit.map_or(0, |depth| (depth + 1).min(deepest)),
                     )));
+                }
+                ui.separator();
+                let refocus = egui::Button::new(ICON_CENTER_FOCUS_STRONG).min_size(button_size);
+                if ui
+                    .add_enabled(read.selected.is_some(), refocus)
+                    .on_hover_text(t!("refocus"))
+                    .clicked()
+                {
+                    self.refocus = true;
                 }
             });
         });
@@ -97,20 +129,23 @@ impl Panel {
             });
     }
 
-    /// Not while a menu is open: the menu is over the same world and already names it.
-    pub(super) fn tooltip(&self, ui: &mut egui::Ui, read: &PanelData) {
-        let Some((world, at)) = read.hovered.filter(|_| read.menu.is_none()) else {
+    /// Not while a menu is open: the menu is over the same world and already names it. Passes the
+    /// pointer through, so it never takes the hover that called it up.
+    pub(super) fn message(&self, ui: &mut egui::Ui, read: &PanelData, insets: Insets, width: f32) {
+        let Some(world) = read.hovered.filter(|_| read.menu.is_none()) else {
             return;
         };
-        egui::Area::new(egui::Id::new("world tooltip"))
-            .order(egui::Order::Tooltip)
-            .constrain(true)
-            .fixed_pos(at + egui::vec2(TOOLTIP_OFFSET, TOOLTIP_OFFSET))
+        let data = read.data;
+        message_area("world message", insets)
+            .interactable(false)
             .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_max_width(POPUP_WIDTH);
-                    ui.strong(read.data.titles[world].show());
-                    ui.label(read.data.authors[read.data.author_of[world]].name.show());
+                skin::window(ui, |ui| {
+                    ui.set_width(width);
+                    ui.label(
+                        egui::RichText::new(data.titles[world].show())
+                            .color(ui.visuals().hyperlink_color),
+                    );
+                    ui.weak(data.authors[data.author_of[world]].name.show());
                 });
             });
     }

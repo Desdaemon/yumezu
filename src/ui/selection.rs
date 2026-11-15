@@ -269,7 +269,7 @@ impl Panel {
         rail(ui, &stops);
     }
 
-    /// The ways between two worlds a reader can pick between, in a window rather than the sidebar,
+    /// The ways between two worlds a reader can pick between, in a window of its own rather than the selection window,
     /// which reads the one being walked.
     ///
     /// Nothing where there is one way or none: an alternative is what this offers. Closing it
@@ -336,21 +336,36 @@ impl Panel {
         }
     }
 
-    pub(super) fn selection(&mut self, ui: &mut egui::Ui, read: &PanelData) {
+    /// Down the right of a wide window, beside the graph rather than over the list that chose it.
+    pub(super) fn selection_window(
+        &mut self,
+        ui: &mut egui::Ui,
+        read: &PanelData,
+        highlight: Highlight,
+        placement: &Placement,
+    ) {
+        let anchor = egui::Align2::RIGHT_TOP;
+        anchored_window(
+            ui.ctx(),
+            "selection",
+            anchor,
+            placement.insets,
+            placement.opacity,
+            |ui| {
+                ui.set_width(SELECTION_WIDTH);
+                ui.set_max_height(placement.height);
+                egui::ScrollArea::vertical()
+                    .max_height(placement.height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| self.selection(ui, read, highlight));
+            },
+        );
+    }
+
+    pub(super) fn selection(&mut self, ui: &mut egui::Ui, read: &PanelData, highlight: Highlight) {
         let data = read.data;
-        match read.selected {
-            None => {
-                ui.label(t!("nothing-selected"));
-                if !data.untaken.is_empty()
-                    && ui
-                        .link(t!("untaken-worlds"))
-                        .on_hover_text(t!("untaken-worlds-hint"))
-                        .clicked()
-                {
-                    self.lit = Some(Some(Highlight::Untaken));
-                }
-            }
-            Some(Highlight::Route(world)) => {
+        match highlight {
+            Highlight::Route(world) => {
                 self.world_info(ui, data, world);
                 self.forward_connections(ui, read, world);
                 ui.separator();
@@ -364,7 +379,7 @@ impl Panel {
                 });
                 self.walked(ui, read, &read.route, Rows::Traced);
             }
-            Some(Highlight::Path(from, world)) => {
+            Highlight::Path(from, world) => {
                 self.world_info(ui, data, world);
                 self.forward_connections(ui, read, world);
                 ui.separator();
@@ -381,7 +396,7 @@ impl Panel {
                 self.walked(ui, read, &read.route, Rows::Pointed);
             }
             // Lists the ways on from the world it leaves.
-            Some(Highlight::Connection(at, far)) => {
+            Highlight::Connection(at, far) => {
                 self.world_info(ui, data, at);
                 let step = world::step_between(&data.connections, at, far)
                     .expect("a lit connection is one of its own world's connections");
@@ -399,7 +414,7 @@ impl Panel {
                 });
                 ui.label(walk_of(step));
             }
-            Some(Highlight::Descendants(world)) => {
+            Highlight::Descendants(world) => {
                 self.world_info(ui, data, world);
                 if read.notable.is_empty() {
                     ui.label(t!("no-notable-descendants"));
@@ -429,7 +444,7 @@ impl Panel {
                 ui.separator();
                 self.forward_connections(ui, read, world);
             }
-            Some(Highlight::Author(author)) => {
+            Highlight::Author(author) => {
                 let by = &data.authors[author];
                 ui.horizontal(|ui| {
                     ui.strong(by.name.show());
@@ -442,7 +457,7 @@ impl Panel {
                     self.world_row(ui, world, Tile::new(false, data.titles[world].show()));
                 }
             }
-            Some(Highlight::Version(version)) => {
+            Highlight::Version(version) => {
                 let release = &data.versions[version];
                 ui.horizontal(|ui| {
                     ui.strong(&release.name);
@@ -463,7 +478,7 @@ impl Panel {
                 }
             }
             // Bare titles: the ranking is said once, above.
-            Some(Highlight::Untaken) => {
+            Highlight::Untaken => {
                 ui.strong(t!("untaken-worlds"));
                 ui.label(t!("untaken-worlds-hint"));
                 ui.separator();
@@ -471,7 +486,7 @@ impl Panel {
                     self.world_row(ui, world, Tile::new(false, data.titles[world].show()));
                 }
             }
-            Some(Highlight::Layer(depth)) => {
+            Highlight::Layer(depth) => {
                 ui.strong(t!("layer-depth", depth = depth));
                 ui.label(worlds(read.listed.len()));
                 for &world in &read.listed {

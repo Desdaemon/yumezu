@@ -210,7 +210,7 @@ struct AppEntities {
     /// finger never moves without pressing.
     cursor: Option<PhysicalPoint>,
     hover: Option<usize>,
-    /// The world a sidebar list row is pointing at, brightened where it sits in the graph and
+    /// The world a list row is pointing at, brightened where it sits in the graph and
     /// cleared as soon as the pointer leaves the row. Only ever one: see `Panel::pointed`.
     pointed: Option<usize>,
     /// The world the view is leaning onto, which outlives the pointing that set it. `None`
@@ -293,7 +293,7 @@ struct AppEntities {
     /// The thumbnail atlas, from the request through to the pictures being on screen. See
     /// [`Atlas`].
     atlas: Atlas,
-    /// The same atlas as the sidebar's catalog draws out of. `None` until it resolves, and forever
+    /// The same atlas as the versions tab's catalog draws out of. `None` until it resolves, and forever
     /// if it cannot be had.
     sheet: Option<thumbnails::Sheet>,
     /// `None` for a world the player has not been to, which wears the placeholder instead. See
@@ -498,11 +498,11 @@ impl App {
             vec3(0.0, 1.0, 0.0),
             degrees(FOV_Y_DEGREES),
             0.1,
-            1000.0,
+            1600.0,
         );
         // Read before the control moves into place.
         let centre = camera.target();
-        let control = OrbitControl::new(centre, 1.0, 500.0);
+        let control = OrbitControl::new(centre, 1.0, 800.0);
         // It publishes where the app reads it.
         drop(fetch::spawn(world::load_pages()));
 

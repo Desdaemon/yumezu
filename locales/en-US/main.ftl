@@ -12,6 +12,10 @@
 language-name = English
 language = Language
 
+# The look the windows are drawn in: the default, or one of the game's own skins.
+system-theme = System Theme
+system-theme-painted = Default
+
 ## The frame before the graph: what is said while the world dump is on its way in, and what is
 ## said if it never arrives. See `world::load`.
 
@@ -26,13 +30,11 @@ dump-task-worlds = Loading worlds...
 dump-task-connections = Loading connections...
 dump-task-assembling = Finalizing the graph...
 
-## The sidebar and its tabs.
+## The browse window and its tabs.
 
 tab-worlds = Worlds
 tab-authors = Authors
 tab-versions = Versions
-hide-sidebar = Hide the sidebar
-show-sidebar = Show the sidebar
 
 ## The graph tab: what is on screen, and how it is laid out.
 
@@ -157,6 +159,7 @@ menu-open-wiki = Open on yume.wiki
 
 rocker-shallower = Shallower
 rocker-deeper = Deeper
+refocus = Refocus on the selection
 
 ## The settings tab.
 

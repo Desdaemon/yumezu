@@ -1,8 +1,8 @@
 //! The Japanese face, which nothing this app starts with has and everything Japanese needs.
 //!
 //! egui's own fonts carry Latin and little else, so Japanese is drawn as empty boxes without this.
-//! A face carrying the glyphs is a few megabytes, so it is sent for as the app starts and
-//! installed the frame it turns up.
+//! Shinonome is bundled and drawn first; a system face, sent for as the app starts, covers what it
+//! lacks.
 //!
 //! Sent for whatever language the run is in: an English run shows the wiki's Japanese names beside
 //! the English ones.
@@ -10,11 +10,17 @@
 //! Where it comes from is the whole of what the platforms differ in. A device usually has one
 //! already, which [`installed`] looks up by name; a page downloads one.
 
-// Only added as a fallback, never looked up.
-const NAME: &str = "japanese";
+/// Shinonome's 12-dot gothic, the face EasyRPG Player draws Japanese in. Public domain.
+const SHINONOME: &[u8] = include_bytes!("../assets/JF-Dot-Shinonome12.ttf");
+
+// Only added as fallbacks, never looked up.
+const SHINONOME_NAME: &str = "shinonome";
+const FALLBACK_NAME: &str = "japanese";
 
 pub(super) enum Japanese {
     /// Started as the app is built, so this is what every run opens in.
+    Starting(super::fetch::Pending<Option<(Vec<u8>, u32)>>),
+    /// Shinonome installed, and a system face sent for to draw whatever it lacks.
     Coming(super::fetch::Pending<Option<(Vec<u8>, u32)>>),
     /// Installed, or looked for and not found: there is no second place to look.
     Settled,
@@ -22,19 +28,33 @@ pub(super) enum Japanese {
 
 impl Japanese {
     pub(super) fn new() -> Self {
-        Self::Coming(super::fetch::spawn(face()))
+        Self::Starting(super::fetch::spawn(face()))
     }
 
-    /// Called every frame, and does nothing on all but one of them.
+    /// Called every frame, and does nothing on all but two of them.
     pub(super) fn serve(&mut self, ctx: &egui::Context) {
-        let Self::Coming(pending) = self else {
+        // egui has no fonts to measure a face against before its first pass.
+        if ctx.cumulative_pass_nr() == 0 {
             return;
+        }
+        *self = match std::mem::replace(self, Self::Settled) {
+            Self::Starting(pending) => {
+                install(ctx, SHINONOME_NAME, SHINONOME.to_vec(), 0);
+                Self::Coming(pending)
+            }
+            Self::Coming(pending) => match pending.take() {
+                None => Self::Coming(pending),
+                Some(None) => {
+                    log::warn!("no system Japanese font: what Shinonome lacks is drawn as boxes");
+                    Self::Settled
+                }
+                Some(Some((face, index))) => {
+                    install(ctx, FALLBACK_NAME, face, index);
+                    Self::Settled
+                }
+            },
+            Self::Settled => Self::Settled,
         };
-        let Some(face) = pending.take() else {
-            return;
-        };
-        install(ctx, face);
-        *self = Self::Settled;
     }
 }
 
@@ -52,12 +72,8 @@ async fn face() -> Option<(Vec<u8>, u32)> {
 }
 
 /// Added at the lowest priority, so the Latin in a Japanese sentence still comes from the font the
-/// panel is drawn in. `None` leaves the panel as it was.
-fn install(ctx: &egui::Context, face: Option<(Vec<u8>, u32)>) {
-    let Some((face, index)) = face else {
-        log::warn!("no Japanese font: Japanese will be drawn as empty boxes");
-        return;
-    };
+/// panel is drawn in, and a face installed later only draws what the earlier ones lack.
+fn install(ctx: &egui::Context, name: &str, face: Vec<u8>, index: u32) {
     let data = egui::FontData {
         index,
         tweak: egui::FontTweak {
@@ -67,7 +83,7 @@ fn install(ctx: &egui::Context, face: Option<(Vec<u8>, u32)>) {
         ..egui::FontData::from_owned(face)
     };
     ctx.add_font(egui::epaint::text::FontInsert::new(
-        NAME,
+        name,
         data,
         [egui::FontFamily::Proportional, egui::FontFamily::Monospace]
             .into_iter()

@@ -8,3 +8,4 @@
 /static/unknown_location.png
 # The release signing key: whoever holds it can ship updates. Back it up elsewhere.
 /android/production.jks
+.env

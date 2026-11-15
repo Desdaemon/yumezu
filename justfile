@@ -7,6 +7,7 @@ dist *args: assets
 
 # Packs every world's wiki image into `static/thumbnails.jpg`, caching in `tools/atlas/cache`.
 thumbnails:
+    curl -L https://explrer.yumemiru.dev/data -o data.json
     cargo run --release --manifest-path tools/atlas/Cargo.toml
 
 # Builds a signed apk at `target/android/yumezu.apk`.
