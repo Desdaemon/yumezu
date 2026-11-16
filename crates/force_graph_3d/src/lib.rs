@@ -1019,6 +1019,39 @@ fn repulsion_on(
     mass: &[f32],
     limit: &[f32],
 ) -> [f32; 3] {
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx2") {
+        // SAFETY: the CPU reports the feature the function is compiled for.
+        return unsafe { repulsion_on_avx2(target, charge_target, x, y, z, mass, limit) };
+    }
+    sum_repulsion(target, charge_target, x, y, z, mass, limit)
+}
+
+/// The desktop build targets baseline x86-64, whose vectors are half as wide.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn repulsion_on_avx2(
+    target: [f32; 3],
+    charge_target: f32,
+    x: &[f32],
+    y: &[f32],
+    z: &[f32],
+    mass: &[f32],
+    limit: &[f32],
+) -> [f32; 3] {
+    sum_repulsion(target, charge_target, x, y, z, mass, limit)
+}
+
+#[inline(always)]
+fn sum_repulsion(
+    target: [f32; 3],
+    charge_target: f32,
+    x: &[f32],
+    y: &[f32],
+    z: &[f32],
+    mass: &[f32],
+    limit: &[f32],
+) -> [f32; 3] {
     let n = x
         .len()
         .min(y.len())
@@ -1067,8 +1100,8 @@ fn repulsion_on(
 /// division to normalize: `1 / (d2 + SOFTENING)^(3/2)`.
 #[inline(always)]
 fn inv_cube(d2: f32) -> f32 {
-    let inv = (d2 + SOFTENING).sqrt().recip();
-    inv * inv * inv
+    let softened = d2 + SOFTENING;
+    (softened * softened.sqrt()).recip()
 }
 
 /// `v` held to `+/-limit`, and a NaN `v` to `-limit`. `limit` is assumed not to be NaN, the one

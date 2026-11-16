@@ -19,7 +19,7 @@ use std::process::Command;
 /// The crate reaches the kernel only through a generic type, so an `rlib` on its own instantiates
 /// nothing: this builds a throwaway consumer that steps a graph and takes the IR of whichever
 /// compilation unit the definition landed in.
-fn kernel_ir(target: Option<&str>, rustflags: &str) -> Option<String> {
+fn kernel_ir(target: Option<&str>, rustflags: &str, kernel: &str) -> Option<String> {
     let dir = scratch().join(match target {
         Some(target) => format!("codegen-{target}"),
         None => "codegen-host".into(),
@@ -40,9 +40,7 @@ edition = "2024"
 crate-type = ["rlib"]
 [dependencies]
 force_graph_3d = {{ path = "{force_graph}" }}
-# Deliberately not the shipping profile's `lto = true`: under fat LTO the per-crate IR is pre-link
-# bitcode the vectorizers have not run on, so there would be nothing here to look at. These checks
-# are about how the kernel is written, which is the same either way.
+# Without LTO: under it the per-crate IR is pre-link bitcode the vectorizers have not run on.
 [profile.release]
 opt-level = 3
 lto = false
@@ -104,11 +102,13 @@ pub extern "C" fn drive(graph: &mut ForceGraph, dt: f32) -> bool { graph.update(
         .iter()
         .rev()
         .filter_map(|f| std::fs::read_to_string(f).ok())
-        .find_map(|ir| function(&ir, "repulsion_on"))
-        .expect(
-            "no `define` for `repulsion_on` in any emitted IR: it was inlined into every caller, \
-             and this probe needs rewriting to look at the callers instead",
-        );
+        .find_map(|ir| function(&ir, kernel))
+        .unwrap_or_else(|| {
+            panic!(
+                "no `define` for `{kernel}` in any emitted IR: it was inlined into every caller, \
+                 and this probe needs rewriting to look at the callers instead"
+            )
+        });
     Some(define)
 }
 
@@ -132,10 +132,12 @@ fn walk(root: &Path) -> Box<dyn Iterator<Item = PathBuf>> {
     }))
 }
 
+/// Mangled names prefix each path segment with its length, so `repulsion_on` misses `repulsion_on_avx2`.
 fn function(ir: &str, name: &str) -> Option<String> {
+    let segment = format!("{}{name}", name.len());
     let start = ir
         .lines()
-        .position(|l| l.starts_with("define") && l.contains(name))?;
+        .position(|l| l.starts_with("define") && l.contains(&segment))?;
     let block: Vec<&str> = ir.lines().skip(start).take_while(|l| *l != "}").collect();
     Some(block.join("\n"))
 }
@@ -180,7 +182,11 @@ fn assert_clamp_is_ieee(ir: &str, expected: bool) {
 /// `simd128` is off by default and set in `.cargo/config.toml`.
 #[test]
 fn the_lane_loop_vectorizes_on_wasm() {
-    let Some(ir) = kernel_ir(Some("wasm32-unknown-unknown"), "-C target-feature=+simd128") else {
+    let Some(ir) = kernel_ir(
+        Some("wasm32-unknown-unknown"),
+        "-C target-feature=+simd128",
+        "repulsion_on",
+    ) else {
         return;
     };
     // wasm `v128` is four lanes wide whatever `LANES` is.
@@ -192,7 +198,7 @@ fn the_lane_loop_vectorizes_on_wasm() {
 /// the probe crate is an rlib that never reaches a linker, so the NDK is not needed.
 #[test]
 fn the_lane_loop_vectorizes_on_arm() {
-    let Some(ir) = kernel_ir(Some("aarch64-linux-android"), "") else {
+    let Some(ir) = kernel_ir(Some("aarch64-linux-android"), "", "repulsion_on") else {
         return;
     };
     assert_vectorized(&ir, 4);
@@ -202,7 +208,7 @@ fn the_lane_loop_vectorizes_on_arm() {
 /// The desktop and Android builds, at the baseline the toolchain picks by default.
 #[test]
 fn the_lane_loop_vectorizes_on_the_host() {
-    let ir = kernel_ir(None, "").expect("the host target is always installed");
+    let ir = kernel_ir(None, "", "repulsion_on").expect("the host target is always installed");
     // SSE2 and NEON give four lanes; AVX2 gives eight.
     assert!(
         ir.contains("<4 x float>") || ir.contains("<8 x float>"),
@@ -210,6 +216,15 @@ fn the_lane_loop_vectorizes_on_the_host() {
     );
     assert_vectorized(&ir, if ir.contains("<8 x float>") { 8 } else { 4 });
     assert_clamp_is_ieee(&ir, cfg!(target_arch = "aarch64"));
+}
+
+/// The copy the desktop build dispatches to on a CPU with AVX2.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn the_lane_loop_vectorizes_with_avx2() {
+    let ir = kernel_ir(None, "", "repulsion_on_avx2").expect("the host target is always installed");
+    assert_vectorized(&ir, 8);
+    assert_clamp_is_ieee(&ir, false);
 }
 
 /// Vectorizing the lane loop needs the unroller to widen it to `LANES` first, and both

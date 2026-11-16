@@ -4,7 +4,7 @@
 //! and is the workload the lane loop dominates; the default angle adds the octree walk around it
 //! and is what the application runs.
 //!
-//! `tools/bench-arm.sh` runs this on an Android device over adb.
+//! `tools/bench.sh` runs this here and on an Android device over adb.
 
 use force_graph_3d::*;
 use std::time::Instant;
@@ -31,7 +31,7 @@ fn main() {
         seed ^= seed << 13;
         seed ^= seed >> 7;
         seed ^= seed << 17;
-        (seed >> 40) as f32 / 2048.0 - 1.0
+        (seed >> 40) as f32 / 8_388_608.0 - 1.0
     };
     let indices: Vec<_> = (0..nodes)
         .map(|_| {

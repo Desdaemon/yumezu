@@ -12,7 +12,7 @@ cd "$(dirname "$0")/.."
 readonly ROOT=$PWD
 readonly SCRATCH=${TMPDIR:-/tmp}/force_graph_3d-bench
 
-# The desktop build ships with no `target-cpu`, so SSE2.
+# `x86-64` is the shipping build, which dispatches to AVX2 where the CPU has it.
 readonly HOST_CPUS=(x86-64 native)
 
 for variant in "${VARIANTS[@]}"; do
@@ -31,7 +31,7 @@ for cpu in "${HOST_CPUS[@]}"; do
 done
 
 sdk=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}
-ndk=$sdk/ndk/$(ls "$sdk/ndk" 2>/dev/null | sort -V | tail -1)
+ndk=$(printf '%s\n' "$sdk"/ndk/* | sort -V | tail -1)
 clang=$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/$TRIPLE$MIN_SDK-clang
 if [[ ! -x $clang ]] || ! adb get-state >/dev/null 2>&1; then
     echo "no device or no ndk under $sdk; skipping the phone"
@@ -62,7 +62,7 @@ for core in $slow $fast; do
         # Best of three: a phone throttles.
         best=$(for _ in 1 2 3; do
             adb shell "taskset $(printf '%x' $((1 << core))) $REMOTE/bench-$variant $*" | tr -d '\r'
-        done | sort -t' ' -k5 -n | head -1)
+        done | sort -k5 -n | head -1)
         printf '    %-9s %s\n' "$variant" "$best"
     done
 done
