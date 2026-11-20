@@ -2,18 +2,13 @@
 set dotenv-load
 
 # Serves the page; needs `just dreamweaver` running alongside.
-serve: assets
+serve:
     trunk serve --release
 
-dist *args: assets
+dist *args:
     trunk build --cargo-profile=min {{args}}
 
-# Packs every world's wiki image into `static/thumbnails.jpg`, caching in `tools/atlas/cache`.
-thumbnails:
-    curl -L https://explrer.yumemiru.dev/data -o data.json
-    cargo run --release --manifest-path tools/atlas/Cargo.toml
-
-# Has Cloudflare drop its copy of the thumbnail atlas, for after a new one is deployed.
+# Has Cloudflare drop its copy of the thumbnail atlas, to show a new pack before the cache expires.
 purge-thumbnails:
     curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/$CF_ZONE/purge_cache" \
         -H "Authorization: Bearer $CF_KEY" -H "Content-Type: application/json" \
@@ -27,7 +22,7 @@ apk:
 install: apk
     adb install -r target/android/yumezu.apk
 
-# Serves `data.json`, building it from the wiki and keeping it current.
+# Serves `data.json` and the thumbnail atlas, building both from the wiki and keeping them current.
 dreamweaver:
     cargo run --release -p dreamweaver -- --data data.json
 
@@ -61,15 +56,6 @@ test-arm:
 # Times the kernel's variants here and on an adb phone. Args: `<nodes> <theta> <steps>`.
 bench *args:
     tools/bench.sh {{args}}
-
-# Fetches the uncommitted thumbnail atlas and placeholder from the deployed page.
-assets:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for name in thumbnails.jpg unknown_location.png; do
-        [ -f "static/$name" ] \
-            || curl -fsSL --retry 3 -o "static/$name" "https://explorer.yumemiru.dev/static/$name"
-    done
 
 # NO_STRIP: linuxdeploy's strip cannot read `.relr.dyn` and fails fatally.
 # Unsigned without CARGO_PACKAGER_SIGN_PRIVATE_KEY; no update controls without YUMEZU_UPDATE_PUBKEY.

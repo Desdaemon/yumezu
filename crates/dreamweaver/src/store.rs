@@ -84,14 +84,11 @@ impl Store {
         self.current.read().unwrap().clone()
     }
 
-    /// Written into a neighbouring file and renamed over the real one, so a run dying mid-write
-    /// leaves the previous dump intact rather than half a document.
-    ///
     /// A failed write is reported and nothing more: the new dump is still the one served from
     /// memory, and the next sync tries the file again.
     pub fn publish(&self, dump: Dump) -> Arc<Snapshot> {
         let snapshot = Arc::new(snapshot(dump));
-        if let Err(error) = write_atomically(&self.path, &snapshot.json) {
+        if let Err(error) = write_atomically(&self.path, snapshot.json.as_bytes()) {
             tracing::error!("cannot write {}: {error}", self.path.display());
         }
         *self.current.write().unwrap() = snapshot.clone();
@@ -109,14 +106,16 @@ fn snapshot(dump: Dump) -> Snapshot {
     }
 }
 
-fn write_atomically(path: &Path, json: &str) -> std::io::Result<()> {
+/// Written beside `path` and renamed over it, so a run dying mid-write leaves the previous file whole.
+pub fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(directory) = path
         .parent()
         .filter(|directory| !directory.as_os_str().is_empty())
     {
         std::fs::create_dir_all(directory)?;
     }
-    let staging = path.with_extension("json.new");
-    std::fs::write(&staging, json)?;
+    let mut staging = path.as_os_str().to_owned();
+    staging.push(".new");
+    std::fs::write(&staging, bytes)?;
     std::fs::rename(&staging, path)
 }

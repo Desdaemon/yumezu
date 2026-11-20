@@ -1,11 +1,12 @@
 # dreamweaver
 
-Builds and serves `data.json`, the world dump yumezu draws. It queries yume.wiki's Semantic
+Builds and serves `data.json`, the world dump yumezu draws, and the thumbnail atlas of every world's
+picture. It queries yume.wiki's Semantic
 MediaWiki store for the Yume 2kki world data and keeps the result in one JSON file, which is both
 what it serves and what it reads back when it restarts.
 
 ```
-dreamweaver [--listen ADDR|PATH] [--data PATH] [--sync-every HOURS]
+dreamweaver [--listen ADDR|PATH] [--data PATH] [--atlas DIR] [--sync-every HOURS]
 ```
 
 There is nothing to run but the server and nothing to tell it to do.
@@ -14,6 +15,7 @@ There is nothing to run but the server and nothing to tell it to do.
 |---|---|---|
 | `--listen` | `127.0.0.1:5000` | a `host:port`, or the path of a Unix socket if it has a `/` in it |
 | `--data` | `data.json` | where every version of the dump is written, and read back at startup |
+| `--atlas` | `atlas` | where the atlas is written and read back, and the wiki's pictures are kept |
 | `--sync-every` | `2` | hours between syncs |
 
 A run that comes up with the wiki unreachable still serves the last dump it wrote.
@@ -37,6 +39,8 @@ socket is removed when the server stops.
 |---|---|
 | `GET /data` | the dump, byte for byte as the file holds it |
 | `GET /data.json` | the same |
+| `GET /static/thumbnails.jpg` | the thumbnail atlas |
+| `GET /static/unknown_location.png` | the picture for a world the player has not been to |
 | `GET /pollUpdate` | what the running sync is doing: `{"task": ..., "done": ...}` |
 | `GET /getNextLocations?origin=&dest=` | standing in `origin` and headed for `dest`, which ways on to take |
 | `GET /yno/info` | YNOproject, forwarded: who the session belongs to and everywhere they have been |
@@ -88,8 +92,18 @@ re-read the wiki. Three other cases read the whole wiki: a server coming up with
 dump more than thirty days old, and a wiki that cannot say what it changed.
 
 **Deleting `--data` and restarting is the only way to demand a full read.** There is no route for it.
-Expect the atlas to need repacking afterwards: a cold build has no previous dump to carry cells
-forward from, and none to carry the secret marks forward from either.
+A cold build has no previous dump to carry cells or secret marks forward from, so every world may
+change cell.
+
+## Packing the atlas
+
+At startup and after every sync that publishes, the server packs each world's wiki picture into a
+64x48 cell of `thumbnails.jpg`, skipping the pack when no world's cell or picture has changed. The
+grid's last cell holds YNOproject's placeholder. Pictures are downloaded once into `--atlas`'s
+`images/` and kept by file name, so a picture the wiki replaces under the same name is not fetched
+again until that file is deleted.
+
+Both pictures answer `503` until the first pack, and a failed pack keeps the last atlas standing.
 
 ## Fields a reader should not expect
 
@@ -97,14 +111,14 @@ forward from, and none to carry the secret marks forward from either.
 Per-world `images` and `size` are not published at all.
 
 Per-world `cell` is where in the thumbnail atlas that world's picture sits, and never changes once
-handed out. A world the atlas has no cell for draws the placeholder until yumezu's `just thumbnails`
-is run again.
+handed out. A world past the end of a cached atlas draws the placeholder until the reader fetches
+a newer one.
 
 ## Marking a world secret
 
 `secret` on a world means a reader is not meant to be shown it. Set it by hand in `data.json`; every
-later sync carries it forward by title. A world the wiki renames loses its mark, as does a cold
-build. `tools/atlas` packs a secret world's cell black, so unmarking one costs a repack.
+later sync carries it forward by title, and the restart that reads it packs the world's cell black. A
+world the wiki renames loses its mark, as does a cold build.
 
 Secret worlds stay in the dump, keep their id, and stay an end of the connections that reach them.
 yumezu is what leaves them out, as it reads the dump.

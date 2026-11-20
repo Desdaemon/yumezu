@@ -22,7 +22,7 @@ MIT OR Apache-2.0.
   and the version history, read from its Semantic MediaWiki store. Written by the wiki's editors
   and licensed [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode); see
   [YumeWiki:Copyrights](https://yume.wiki/YumeWiki:Copyrights).
-- [explorer.yume.wiki](https://explorer.yume.wiki) -- the world images that `tools/atlas` packs
+- [explorer.yume.wiki](https://explorer.yume.wiki) -- the world images that `dreamweaver` packs
   into the thumbnail atlas. The wiki's, under the same licence.
 - [YNOproject](https://ynoproject.net) -- where the game is played, and, for a signed-in player,
   which worlds they have been to. `unknown_location.png` is its client's own placeholder. Its

@@ -66,7 +66,7 @@ pub struct World {
     title_jp: Option<String>,
     pub author: String,
     /// Where the wiki serves this world's picture from, at the size the wiki holds it. Packed into
-    /// the atlas by `tools/atlas`, and fetched again once the view outruns the atlas. See
+    /// the atlas by `dreamweaver`, and fetched again once the view outruns the atlas. See
     /// `detail`.
     #[serde(rename = "filename")]
     pub image: String,

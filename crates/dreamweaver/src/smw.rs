@@ -34,7 +34,7 @@ const WIKI: &str = "https://yume.wiki/api.php";
 
 /// What the wiki's edge wants to see before it answers an API request rather than serving a
 /// challenge page: the explorer this program stands in for.
-const ORIGIN: &str = "https://explorer.yume.wiki";
+pub const ORIGIN: &str = "https://explorer.yume.wiki";
 
 const YUME2KKI_NAMESPACE: &str = "3002";
 

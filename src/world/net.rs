@@ -134,7 +134,6 @@ async fn dump(url: &str) -> Result<Option<String>, fetch::Error> {
 fn parse(json: &str, revealed: bool) -> serde_json::Result<Dump> {
     let mut dump = serde_json::from_str::<Dump>(json)?;
     hide(&mut dump.worlds, revealed);
-    // `tools/atlas` reads `data.json` at build time and bypasses this.
     #[cfg(target_family = "wasm")]
     for world in &mut dump.worlds {
         world.image = world.image.replace(WIKI_IMAGES, proxied_images());

@@ -1,11 +1,8 @@
 /target
 /dist
 /data.json
-/tools/atlas/target
-# The wiki's and YNOproject's to distribute; `just thumbnails` rebuilds them.
-/tools/atlas/cache
-/static/thumbnails.jpg
-/static/unknown_location.png
+# `just dreamweaver` packs the atlas here, beside the wiki's pictures it downloads.
+/atlas
 # The release signing key: whoever holds it can ship updates. Back it up elsewhere.
 /android/production.jks
 .env

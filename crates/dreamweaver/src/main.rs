@@ -14,8 +14,10 @@
 //! serve, so `/data` answers `503 needs update` and the client waits on `GET /pollUpdate`.
 //!
 //! ```text
-//! dreamweaver [--listen ADDR|PATH] [--data PATH] [--sync-every HOURS]
+//! dreamweaver [--listen ADDR|PATH] [--data PATH] [--atlas DIR] [--sync-every HOURS]
 //! ```
+//!
+//! It also packs the worlds' pictures into the thumbnail atlas the app draws -- see [`atlas`].
 //!
 //! Besides the dump it answers four routes carrying what YNOproject knows about the player reading
 //! the page, put through because the page may not reach YNOproject directly. See [`relay`].
@@ -32,6 +34,7 @@ use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
 
+mod atlas;
 mod depth;
 mod model;
 mod next;
@@ -45,6 +48,8 @@ mod sync;
 mod versions;
 
 const DEFAULT_DATA: &str = "data.json";
+
+const DEFAULT_ATLAS: &str = "atlas";
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:5000";
 
@@ -61,6 +66,7 @@ const FULL_EVERY: time::Duration = time::Duration::weeks(1);
 #[derive(Clone)]
 pub struct Server {
     store: Arc<store::Store>,
+    atlas: Arc<atlas::Atlas>,
     http: reqwest::Client,
     progress: Arc<progress::Progress>,
 }
@@ -82,6 +88,7 @@ async fn main() -> std::process::ExitCode {
 
     let server = Server {
         store: Arc::new(store::Store::open(&options.data)),
+        atlas: Arc::new(atlas::Atlas::open(&options.atlas)),
         http: http_client(reqwest::Client::builder()),
         progress: Arc::default(),
     };
@@ -96,12 +103,15 @@ fn http_client(builder: reqwest::ClientBuilder) -> reqwest::Client {
     builder.build().expect("cannot build an http client")
 }
 
-const USAGE: &str = "dreamweaver [--listen ADDR|PATH] [--data PATH] [--sync-every HOURS]";
+const USAGE: &str =
+    "dreamweaver [--listen ADDR|PATH] [--data PATH] [--atlas DIR] [--sync-every HOURS]";
 
 struct Options {
     /// A `host:port` or a socket path; [`Listen`] is which.
     listen: String,
     data: String,
+    /// Holds the packed atlas and the wiki pictures it was packed from.
+    atlas: String,
     sync_every: u64,
 }
 
@@ -110,13 +120,14 @@ impl Default for Options {
         Options {
             listen: DEFAULT_LISTEN.to_owned(),
             data: DEFAULT_DATA.to_owned(),
+            atlas: DEFAULT_ATLAS.to_owned(),
             sync_every: SYNC_EVERY,
         }
     }
 }
 
 impl Options {
-    /// Hand-rolled: three switches would take more configuring through a parser crate than they
+    /// Hand-rolled: four switches would take more configuring through a parser crate than they
     /// configure.
     fn read(&mut self, args: impl Iterator<Item = String>) -> Result<(), String> {
         let mut args = args;
@@ -125,6 +136,7 @@ impl Options {
             match switch.as_str() {
                 "--listen" => self.listen = value()?,
                 "--data" => self.data = value()?,
+                "--atlas" => self.atlas = value()?,
                 "--sync-every" => {
                     // Zero hours would sync forever and never serve.
                     self.sync_every = match value()?.parse() {
@@ -151,11 +163,16 @@ impl Options {
 /// not a way to make it re-read the wiki.
 async fn refresh(server: Server, hours: u64) {
     let every = std::time::Duration::from_secs(hours * 3600);
+    // Before the first sync: a restart is how a hand-set secret mark reaches the atlas.
+    pack_atlas(&server).await;
     tokio::time::sleep(first_sync(&server.store.snapshot().dump, every)).await;
     let mut fetched = sync::Fetched::default();
     loop {
         match build(&server, &mut fetched).await {
-            Ok(Some(worlds)) => tracing::info!("published {worlds} worlds"),
+            Ok(Some(worlds)) => {
+                tracing::info!("published {worlds} worlds");
+                pack_atlas(&server).await;
+            }
             Ok(None) => tracing::info!("the wiki has not changed; the dump stands"),
             // Debug names the field it could not read; Display does not.
             Err(error) => tracing::error!("sync failed: {error:?}"),
@@ -163,6 +180,11 @@ async fn refresh(server: Server, hours: u64) {
         server.progress.done();
         tokio::time::sleep(every).await;
     }
+}
+
+async fn pack_atlas(server: &Server) {
+    let snapshot = server.store.snapshot();
+    server.atlas.pack(&server.http, &snapshot.dump).await;
 }
 
 /// How long a run waits before its first sync: whatever is left of the interval the dump it came up
@@ -271,6 +293,9 @@ async fn serve(server: Server, options: Options) {
         .route("/data", get(data))
         .route("/data.json", get(data))
         .route("/pollUpdate", get(poll_update))
+        // The app's own paths for them, which shipped builds fetch from this host.
+        .route("/static/thumbnails.jpg", get(atlas_jpeg))
+        .route("/static/unknown_location.png", get(placeholder_png))
         // YNOproject's game client calls this.
         .route("/getNextLocations", get(next::get_next_locations))
         // The sign-in cookie must be rehosted for this origin.
@@ -359,6 +384,35 @@ async fn data(State(server): State<Server>) -> axum::response::Response {
     (
         [(header::CONTENT_TYPE, "application/json")],
         snapshot.json.to_string(),
+    )
+        .into_response()
+}
+
+/// `GET /static/thumbnails.jpg` -- the atlas, or `503` before the first pack.
+async fn atlas_jpeg(State(server): State<Server>) -> axum::response::Response {
+    match server.atlas.packed() {
+        Some(packed) => picture("image/jpeg", packed.atlas_jpeg.clone()),
+        None => not_packed(),
+    }
+}
+
+/// `GET /static/unknown_location.png` -- the full-size placeholder, or `503` before the first pack.
+async fn placeholder_png(State(server): State<Server>) -> axum::response::Response {
+    match server.atlas.packed() {
+        Some(packed) => picture("image/png", packed.placeholder_png.clone()),
+        None => not_packed(),
+    }
+}
+
+fn picture(content_type: &'static str, bytes: axum::body::Bytes) -> axum::response::Response {
+    ([(header::CONTENT_TYPE, content_type)], bytes).into_response()
+}
+
+fn not_packed() -> axum::response::Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "60")],
+        "not packed yet\n",
     )
         .into_response()
 }

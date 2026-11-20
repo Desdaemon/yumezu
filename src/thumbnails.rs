@@ -1,4 +1,4 @@
-//! The thumbnail atlas: one image carrying a picture of every world, packed by `tools/atlas`.
+//! The thumbnail atlas: one image carrying a picture of every world, packed by `dreamweaver`.
 //!
 //! One image rather than a texture per world, because the nodes are drawn as a single instanced
 //! mesh: fifteen hundred textures would be fifteen hundred draw calls.
@@ -16,10 +16,10 @@ use three_d::renderer::*;
 use super::fetch;
 use super::prelude::*;
 
-// Published by the `copy-file` links in `index.html`.
+// Served by `dreamweaver`.
 const PATH: &str = "static/thumbnails.jpg";
 const UNKNOWN: &str = "static/unknown_location.png";
-/// Size of one thumbnail in texels. Must match `tools/atlas`, which writes the atlas.
+/// Size of one thumbnail in texels. Must match `dreamweaver`, which packs the atlas.
 pub const CELL: [u32; 2] = [64, 48];
 pub const ASPECT: f32 = CELL[0] as f32 / CELL[1] as f32;
 /// Mipmapped because nodes are only a few pixels wide until the view comes in, and minifying that

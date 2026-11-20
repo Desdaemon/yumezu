@@ -10,6 +10,14 @@ backend = "http://127.0.0.1:5000/data"
 rewrite = "/pollUpdate"
 backend = "http://127.0.0.1:5000/pollUpdate"
 
+[[proxy]]
+rewrite = "/static/thumbnails.jpg"
+backend = "http://127.0.0.1:5000/static/thumbnails.jpg"
+
+[[proxy]]
+rewrite = "/static/unknown_location.png"
+backend = "http://127.0.0.1:5000/static/unknown_location.png"
+
 # YNOproject allows one origin; `dreamweaver` relays it and rehosts its session cookie here.
 [[proxy]]
 rewrite = "/yno/"

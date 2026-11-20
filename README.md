@@ -37,5 +37,5 @@ adb; `just dist` needs [`trunk`](https://trunkrs.dev) and `wasm32-unknown-unknow
 ## Licence
 
 The code is MIT OR Apache-2.0, except `crates/force_graph_3d` and `crates/dreamweaver`, which are
-MIT. `data.json` and `static/thumbnails.jpg` are the wiki's, under CC BY-NC-SA 4.0, and so is
+MIT. `data.json` and the thumbnail atlas are the wiki's, under CC BY-NC-SA 4.0, and so is
 anything built carrying them. See [LICENSE](LICENSE) and [ACKNOWLEDGEMENTS.md](ACKNOWLEDGEMENTS.md).

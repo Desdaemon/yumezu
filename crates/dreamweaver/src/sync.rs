@@ -374,15 +374,14 @@ fn published_place(location: &smw::Location) -> (bool, &str) {
 /// picture after the newcomer belonging to somebody else.
 ///
 /// So an atlas is still right about every world it was packed with however far the dump has moved
-/// on, and a world it has no cell for draws the placeholder until the atlas is packed again.
+/// on, and a world it has no cell for draws the placeholder until the next pack.
 ///
 /// Cells are not reused below the highest one held: handing a dropped world's gap to the next world
 /// along is the same wrong picture in miniature. A `full` run reclaims the tail, held to the weekly
 /// pass so a world the wiki marks removed and then restores keeps its picture.
 ///
 /// Title is the key, as it is for [`marked_secret`], and carries the same cost: a world the wiki
-/// renames takes a fresh cell. A cold build hands out cells in publish order, so the atlas has to
-/// be packed again after one.
+/// renames takes a fresh cell. A cold build hands out cells in publish order.
 fn cells<'a>(previous: &Dump, live: &[&'a str], full: bool) -> HashMap<&'a str, usize> {
     let mut held: HashMap<&str, usize> = previous
         .worlds
