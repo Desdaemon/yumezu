@@ -1,4 +1,3 @@
-# Reads `.env` when there is one, for `YUMEZU_KEYSTORE_PASS`, `CF_KEY` and `CF_ZONE`.
 set dotenv-load
 
 # Serves the page; needs `just dreamweaver` running alongside.

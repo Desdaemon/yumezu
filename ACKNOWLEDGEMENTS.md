@@ -34,5 +34,7 @@ MIT OR Apache-2.0.
 
 ## Fonts and icons
 
+- [JF Dot Shinonome Gothic 12](https://jikasei.me) by jikasei, converted from the Shinonome 12-dot bitmap fonts, draws Japanese. Public domain.
+- [DotGothic16](https://github.com/fontworks-fonts/DotGothic16) by Fontworks, cut down to Latin, draws the window UI's text. SIL Open Font License 1.1.
 - [Noto Sans JP](https://github.com/notofonts/noto-cjk) provides fallback Japanese fonts. SIL Open Font License 1.1.
 - [Material Symbols](https://github.com/google/material-design-icons), through `egui_material_icons`. Apache-2.0.
