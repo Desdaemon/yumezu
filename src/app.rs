@@ -4,7 +4,7 @@
 use egui::special_emojis::GITHUB;
 use egui_material_icons::icons::*;
 use force_graph_3d::{
-    DefaultNodeIdx, Dimensions, EdgeData, ForceGraph, NodeData, SimulationParameters,
+    DefaultNodeIdx, Dimensions, EdgeData, ForceGraph, Layers, NodeData, SimulationParameters,
 };
 use three_d::{FrameInput, FrameInputGenerator, SurfaceSettings, WindowedContext, renderer::*};
 use winit::{
@@ -204,8 +204,22 @@ struct AppEntities {
     /// World the camera frames at startup, with its subtree; `None` if the dump lacks it, which
     /// keeps the default camera pose. See [`opening_room`].
     opening: Option<usize>,
+    /// Per world, the door out of the Nexus its route passes through. See [`branches`].
+    branches: Vec<Option<usize>>,
+    /// Per world, its depth from the Nexus, past the deepest for the unreachable. See
+    /// [`shell_level`].
+    shell_depths: Vec<f32>,
+    pub(super) arrangement: Arrangement,
+    /// Per world, how deep it sits from the game's start, which the tree's planes count. Worlds
+    /// with no route from it go past the deepest.
+    start_depths: Vec<f32>,
+    /// Per world, how many times farther than the sky it is drawn. See [`sky_distance`].
+    sky_distances: Vec<f32>,
     /// Whether the camera is moving to frame the selection; cleared on arrival or user input.
     framing: bool,
+    /// Whether the camera is going back to its opening view; cleared on arrival or user input.
+    /// See [`AppStatics::reset_view`].
+    resetting_camera: bool,
     /// Frame the whole route instead of its last world. Persists across selections.
     frame_route: bool,
     /// Connection colors before a selection dims them, so clearing one restores the distance ramp.
@@ -216,7 +230,7 @@ struct AppEntities {
     /// UI setting: how much subtree size adds to a node's repulsion. See [`node_mass`].
     hub_repulsion: f32,
     /// UI setting: maximum edge length in layers. The simulation only stores it converted to
-    /// distance. See `LINK_REACH_DEFAULT`.
+    /// distance. Each arrangement keeps its own: see [`Arrangement::remembered_link_reach`].
     link_reach: f32,
     descendant_counts: Vec<u32>,
     /// Full-screen background, drawn first via [`apply_screen_material`]; a material, not a [`Gm`].
@@ -226,6 +240,8 @@ struct AppEntities {
     /// Additive copy of the hovered row's thumbnail, drawn over its node while
     /// [`AppEntities::hovered_row`] is set. See [`AppEntities::aim_glow`].
     glow: Gm<Mesh, ColorMaterial>,
+    /// A crosshair on the horizon at heading zero, for the eye to turn by on the 3D sky.
+    horizon_marker: Gm<Mesh, ColorMaterial>,
     edges: Gm<RefilledMesh, ColorMaterial>,
     /// One-way edges, drawn as animated dashes. See [`AppEntities::march_dashes`].
     dashes: Gm<RefilledMesh, DashMaterial>,
@@ -440,17 +456,18 @@ impl App {
     pub fn new() -> Self {
         let camera = Camera::new_perspective(
             Viewport::new_at_origo(1, 1),
-            // Direction only, picked off a settled 3D layout; [`App::build`] frames the rest.
-            vec3(-49.7, -47.1, -31.0),
-            vec3(218.5, -173.5, 180.6),
+            // Direction only; [`App::build`] frames the rest.
+            opening_facing(Dimensions::Three),
+            vec3(0.0, 0.0, 0.0),
             vec3(0.0, 1.0, 0.0),
             degrees(FOV_Y_DEGREES),
             0.1,
-            1600.0,
+            // Past the outermost shell seen from the Nexus at its centre.
+            5000.0,
         );
         // Read before the control moves into place.
         let centre = camera.target();
-        let control = OrbitControl::new(centre, 1.0, 800.0);
+        let control = OrbitControl::new(centre, 1.0, 3000.0);
         // Fire and forget: the task stores its result where the app reads it.
         drop(fetch::spawn(world::load_pages()));
 
@@ -549,12 +566,21 @@ impl App {
             data.select(self.selected);
         }
         // Snap: there is no previous view to animate from.
-        if let Some(bounds) = (opening && data.selected.is_none())
-            .then(|| data.framing_bounds())
-            .flatten()
-        {
-            self.statics.snap_to_frame(&bounds);
-            data.framing = true;
+        if opening && data.selected.is_none() {
+            match data.on_sky() {
+                true => {
+                    if let Some(nexus) = data.nexus_bounds() {
+                        self.statics.stand_at(above(&nexus));
+                        data.resetting_camera = true;
+                    }
+                }
+                false => {
+                    if let Some(bounds) = data.framing_bounds() {
+                        self.statics.snap_to_frame(&bounds);
+                        data.framing = true;
+                    }
+                }
+            }
         }
         self.data = Some(data);
     }

@@ -1,11 +1,29 @@
-//! Where the view is and how it is moved: the orbit, the pan, the dolly, the walk, the pinch,
-//! and the ease onto what a selection framed. See [`AppStatics`].
+//! Where the view is and how it is moved: the turn in place, the orbit, the pan, the dolly, the
+//! walk, the pinch, and the ease onto what a selection framed. See [`AppStatics`].
+//!
+//! In 3D the camera stands at a point and turns there, the wheel narrowing its field of view; in
+//! 2D it orbits a centre on the plane and the wheel closes on it.
 
 use super::*;
+use std::f32::consts::{PI, TAU};
+use three_d_asset::ProjectionType;
 
-/// Vertical field of view. The camera uses it, and so does the pan, which converts cursor pixels
-/// into world units through it.
+/// Vertical field of view the camera opens with and returns to.
 pub(super) const FOV_Y_DEGREES: f32 = 45.0;
+/// How high over a world's centre [`above`] stands, in its radii: clear of its picture's top edge.
+const ABOVE_WORLD_RADII: f32 = 2.0;
+/// How far the wheel may narrow and widen the field of view, in degrees.
+///
+/// Narrow enough that a world on the outermost shell, seen from the Nexus, fills the window.
+const FOV_Y_RANGE_DEGREES: std::ops::RangeInclusive<f32> = 0.25..=90.0;
+/// How far ahead of the eye a camera turning in place keeps its orbit centre, in world units: the
+/// distance the pan and the walk measure their speed at.
+const LOOK_DISTANCE: f32 = 20.0;
+/// How close to straight up or down a camera turning in place may look, in radians. Looking along
+/// `up` itself leaves the view without a sideways direction.
+const PITCH_LIMIT: f32 = 1.55;
+/// How near its goal heading a turn has to be to count as arrived, in radians.
+const TURN_ARRIVAL_TOLERANCE: f32 = 0.002;
 /// Time constant of the camera's ease onto a selected route, in milliseconds. Long enough that the
 /// move reads as travel across the graph rather than a cut, so the person keeps their bearings.
 const FRAMING_WINDOW_MS: f32 = 600.0;
@@ -48,7 +66,7 @@ pub(super) struct AppStatics {
 /// Logical pixels a second: read against the window rather than the graph, because
 /// [`AppStatics::world_per_pixel`] already scales a screen distance into world units at whatever
 /// distance the camera stands.
-const WALK_SPEED: f32 = 800.0;
+const WALK_SPEED: f32 = 2000.0;
 
 /// A key says only that it went down or came up, so what is held is kept here and read once a
 /// frame as the distance it stands for.
@@ -255,7 +273,7 @@ impl AppStatics {
     fn world_per_pixel(&self, device_pixel_ratio: f32) -> f32 {
         let distance = self.control.target.distance(self.camera.position());
         let logical_height = self.camera.viewport().height as f32 / device_pixel_ratio;
-        2.0 * distance * (FOV_Y_DEGREES.to_radians() * 0.5).tan() / logical_height
+        2.0 * distance * (self.field_of_view_y() * 0.5).tan() / logical_height
     }
 
     /// Only the two moves that take a drag are named: a pan holds the graph, an orbit turns it.
@@ -276,6 +294,7 @@ impl AppStatics {
     /// stands. Made on the app's own, two-dimensional mode locking the turn: see
     /// [`take_left_drags`].
     pub(super) fn face_plane(&mut self) {
+        self.set_field_of_view_y(FOV_Y_DEGREES.to_radians());
         let target = self.control.target;
         let distance = target.distance(self.camera.position());
         self.camera.set_view(
@@ -379,6 +398,231 @@ impl AppStatics {
         self.stand_off(target, distance + (goal_distance - distance) * step);
         true
     }
+}
+
+/// The camera that stands at a point and turns there.
+impl AppStatics {
+    /// Turns with the left drags and narrows or widens the view with the wheel, never moving the
+    /// eye. Returns whether the view changed.
+    pub(super) fn turn_in_place(&mut self, events: &mut [Event], device_pixel_ratio: f32) -> bool {
+        let mut turned = false;
+        for event in events.iter_mut() {
+            match event {
+                Event::MouseMotion {
+                    button: Some(MouseButton::Left),
+                    delta,
+                    handled: handled @ false,
+                    ..
+                } => {
+                    // Read against the field of view, so what was under the cursor stays there.
+                    let logical_height = self.camera.viewport().height as f32 / device_pixel_ratio;
+                    let per_pixel = self.field_of_view_y() / logical_height;
+                    let (yaw, pitch) = heading(self.camera.view_direction());
+                    self.look_along(direction_of(
+                        yaw + delta.0 * per_pixel,
+                        pitch + delta.1 * per_pixel,
+                    ));
+                    *handled = true;
+                    turned = true;
+                }
+                Event::MouseWheel {
+                    delta,
+                    handled: handled @ false,
+                    ..
+                } => {
+                    let narrowed = self.field_of_view_y() * (-delta.1 * 0.01).exp();
+                    self.set_field_of_view_y(narrowed);
+                    *handled = true;
+                    turned = true;
+                }
+                _ => (),
+            }
+        }
+        turned
+    }
+
+    /// Brings `bounds` into view: turned toward from where the eye stands at the Nexus, closed on
+    /// otherwise. Returns whether there is moving left to do.
+    pub(super) fn bring_into_view(&mut self, bounds: &Bounds, standing: bool, dt: f32) -> bool {
+        match standing {
+            true => self.turn_to_frame(bounds, dt),
+            false => self.ease_to_frame(bounds, dt),
+        }
+    }
+
+    /// Carries the camera back to its opening view of `home`: the eye onto it when standing, and
+    /// otherwise framed on it from [`opening_facing`]. Returns whether there is moving left to do.
+    pub(super) fn reset_view(
+        &mut self,
+        home: &Bounds,
+        standing: bool,
+        dimensions: Dimensions,
+        dt: f32,
+    ) -> bool {
+        if standing {
+            return self.fly_to(above(home), dt);
+        }
+        let goal = opening_facing(dimensions);
+        let facing = (self.camera.position() - self.control.target).normalize();
+        let turning = facing.angle(goal).0 > TURN_ARRIVAL_TOLERANCE;
+        if turning {
+            let step = fraction_covered(dt, FRAMING_WINDOW_MS);
+            let eased = (facing + (goal - facing) * step).normalize();
+            let (target, distance) = (
+                self.control.target,
+                self.control.target.distance(self.camera.position()),
+            );
+            self.camera
+                .set_view(target + eased * distance, target, vec3(0.0, 1.0, 0.0));
+        }
+        self.ease_to_frame(home, dt) || turning
+    }
+
+    /// Turns toward `bounds` and narrows the view until it holds them, from where the eye stands.
+    /// Returns whether there is turning left to do.
+    pub(super) fn turn_to_frame(&mut self, bounds: &Bounds, dt: f32) -> bool {
+        let reach = bounds.center - self.camera.position();
+        let distance = reach.magnitude();
+        let goal_fov = match distance > bounds.radius * FRAMING_MARGIN {
+            true => self.holding_field_of_view(bounds.radius * FRAMING_MARGIN / distance),
+            // From inside, nothing narrower holds them.
+            false => FOV_Y_DEGREES.to_radians(),
+        };
+        let fov = self.field_of_view_y();
+        let fov_arrived = (goal_fov - fov).abs() < goal_fov * FRAMING_ARRIVAL_TOLERANCE;
+        let step = fraction_covered(dt, FRAMING_WINDOW_MS);
+        let turning = distance > f32::EPSILON && self.turn_toward_by(reach, step);
+        if fov_arrived && !turning {
+            return false;
+        }
+        self.set_field_of_view_y(fov + (goal_fov - fov) * step);
+        true
+    }
+
+    /// Eases the view toward `at`, the eye staying put. Returns whether it is still turning.
+    pub(super) fn turn_toward(&mut self, at: Vec3, dt: f32) -> bool {
+        let reach = at - self.camera.position();
+        reach.magnitude() > f32::EPSILON
+            && self.turn_toward_by(reach, fraction_covered(dt, ROW_FOLLOW_WINDOW_MS))
+    }
+
+    /// Carries the eye to `at` and the field of view back to its default, still looking the way
+    /// it looked. Returns whether there is ground left to cover.
+    pub(super) fn fly_to(&mut self, at: Vec3, dt: f32) -> bool {
+        let gap = at - self.camera.position();
+        let (fov, goal_fov) = (self.field_of_view_y(), FOV_Y_DEGREES.to_radians());
+        if gap.magnitude() < LOOK_DISTANCE * FRAMING_ARRIVAL_TOLERANCE
+            && (goal_fov - fov).abs() < goal_fov * FRAMING_ARRIVAL_TOLERANCE
+        {
+            return false;
+        }
+        let step = fraction_covered(dt, FRAMING_WINDOW_MS);
+        self.shift_view(gap * step);
+        self.set_field_of_view_y(fov + (goal_fov - fov) * step);
+        true
+    }
+
+    /// Puts the eye at `at` in one step, with the default field of view and looking along
+    /// [`heading_zero`]: what an opening view starts from.
+    pub(super) fn stand_at(&mut self, at: Vec3) {
+        self.shift_view(at - self.camera.position());
+        self.set_field_of_view_y(FOV_Y_DEGREES.to_radians());
+        self.look_along(heading_zero());
+    }
+
+    /// Covers `step` of the turn toward `reach`. Returns whether it had not yet arrived.
+    fn turn_toward_by(&mut self, reach: Vec3, step: f32) -> bool {
+        let (yaw, pitch) = heading(self.camera.view_direction());
+        let (goal_yaw, goal_pitch) = heading(reach.normalize());
+        let goal_pitch = goal_pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        // The short way round.
+        let yaw_gap = (goal_yaw - yaw + PI).rem_euclid(TAU) - PI;
+        let pitch_gap = goal_pitch - pitch;
+        if yaw_gap.abs() < TURN_ARRIVAL_TOLERANCE && pitch_gap.abs() < TURN_ARRIVAL_TOLERANCE {
+            return false;
+        }
+        self.look_along(direction_of(yaw + yaw_gap * step, pitch + pitch_gap * step));
+        true
+    }
+
+    /// Points the camera along `direction` from where it stands, keeping the orbit centre
+    /// [`LOOK_DISTANCE`] ahead so the pan and the walk keep their speed.
+    fn look_along(&mut self, direction: Vec3) {
+        let eye = self.camera.position();
+        self.control.target = eye + direction * LOOK_DISTANCE;
+        self.camera
+            .set_view(eye, self.control.target, vec3(0.0, 1.0, 0.0));
+    }
+
+    /// The vertical field of view that holds a sphere whose radius is `sine` of the distance to
+    /// it, read against whichever axis of the window is narrower.
+    fn holding_field_of_view(&self, sine: f32) -> f32 {
+        let half = sine.min(1.0).asin();
+        let viewport = self.camera.viewport();
+        let aspect = viewport.width as f32 / viewport.height as f32;
+        let half_y = match aspect < 1.0 {
+            true => (half.tan() / aspect).atan(),
+            false => half,
+        };
+        2.0 * half_y
+    }
+
+    fn field_of_view_y(&self) -> f32 {
+        match self.camera.projection_type() {
+            ProjectionType::Perspective { field_of_view_y } => field_of_view_y.0,
+            _ => FOV_Y_DEGREES.to_radians(),
+        }
+    }
+
+    /// Held to [`FOV_Y_RANGE_DEGREES`].
+    pub(super) fn reset_field_of_view(&mut self) {
+        self.set_field_of_view_y(FOV_Y_DEGREES.to_radians());
+    }
+
+    fn set_field_of_view_y(&mut self, radians: f32) {
+        let range = FOV_Y_RANGE_DEGREES;
+        let clamped = radians.clamp(range.start().to_radians(), range.end().to_radians());
+        let (near, far) = (self.camera.z_near(), self.camera.z_far());
+        self.camera
+            .set_perspective_projection(Rad(clamped), near, far);
+    }
+}
+
+/// The level direction the horizon marker stands in.
+pub(super) fn heading_zero() -> Vec3 {
+    vec3(0.0, 0.0, 1.0)
+}
+
+/// The side the opening view frames the graph from: square to the plane in 2D, and in 3D a
+/// direction picked off a settled layout.
+pub(super) fn opening_facing(dimensions: Dimensions) -> Vec3 {
+    match dimensions {
+        Dimensions::Two => vec3(0.0, 0.0, 1.0),
+        Dimensions::Three => vec3(-268.2, 126.4, -211.6).normalize(),
+    }
+}
+
+/// Where the eye stands to look out from a world: over its picture, which sits below the view.
+pub(super) fn above(bounds: &Bounds) -> Vec3 {
+    bounds.center + vec3(0.0, bounds.radius * ABOVE_WORLD_RADII, 0.0)
+}
+
+/// The turn about `up` and the tilt toward it that point the view along `direction`.
+fn heading(direction: Vec3) -> (f32, f32) {
+    (
+        direction.x.atan2(direction.z),
+        direction.y.clamp(-1.0, 1.0).asin(),
+    )
+}
+
+/// Inverse of [`heading`], the tilt held within [`PITCH_LIMIT`].
+fn direction_of(yaw: f32, pitch: f32) -> Vec3 {
+    let pitch = pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    vec3(
+        pitch.cos() * yaw.sin(),
+        pitch.sin(),
+        pitch.cos() * yaw.cos(),
+    )
 }
 
 /// How much of what is left of an exponential ease `seconds` covers. Per unit of time, not per

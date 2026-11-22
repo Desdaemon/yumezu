@@ -29,9 +29,9 @@ const HELD: usize = 8;
 /// The wiki's edge answers a request with no `Origin` with a challenge page rather than the
 /// picture. Only the native build sets it: the browser sets its own and will not be overridden.
 const ORIGIN: &str = "https://explorer.yume.wiki";
-/// How far in front of its own atlas quad a full picture is drawn, as a fraction of the node's
-/// radius: coplanar, the depth test would pick between them per pixel.
-pub const LIFT: f32 = 0.02;
+/// How far toward the eye a full picture is drawn in front of its own atlas quad, as a share of
+/// its distance: coplanar, the depth test would pick between them per pixel.
+pub const LIFT: f32 = 0.01;
 /// What the art is drawn at.
 ///
 /// The wiki calls for this and enforces nothing: four in five uploads are the same art at exactly
@@ -176,7 +176,7 @@ impl Detail {
     }
 
     pub fn drawn(&self) -> impl Iterator<Item = &dyn Object> {
-        // The placeholder wins on depth: [`LIFT`] uses the full radius, the picture a shrunk one.
+        // The placeholder wins on depth, sitting two [`LIFT`]s in front to the picture's one.
         self.unvisited
             .quads
             .iter()

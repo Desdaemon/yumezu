@@ -30,8 +30,12 @@ tab-versions = バージョン
 
 fps = { $fps } fps
 graph-size = { $worlds } マップ、{ $connections } 接続
-layered = 階層表示
-layered-hint = マップを深さごとの層に分けます
+arrangement = 配置
+arrangement-flat = 平面
+arrangement-radial = 放射
+arrangement-free = 自由
+arrangement-tree = 樹形
+arrangement-orbital = 天球
 search-worlds = マップを検索 (英名で検索可能)
 search-authors = ツクラーを検索
 search-versions = バージョンを検索
@@ -104,14 +108,14 @@ menu-open-wiki = wikiで見る
 
 rocker-shallower = 浅く
 rocker-deeper = 深く
-refocus = 選択に視点を戻す
+reset-camera = 視点をリセット
 
 ## The settings tab.
 
 hub-push = ハブの反発
 hub-push-hint = 値が大きいほど、接続の多いマップが周囲から遠ざかります
 link-reach = 接続の長さ
-link-reach-hint = つながった2つのマップが離れられる距離を階層数で表します。一方通行の接続はこの制限を受けません
+link-reach-hint = つながった2つのマップが離れられる距離を階層数で表します。配置ごとに別々に保存されます。一方通行の接続はこの制限を受けません
 ui-scale = UIの大きさ
 antialias = 輪郭をなめらかに
 antialias-hint = グラフの輪郭をなめらかにします。フレームレートがディスプレイに届かないときは、

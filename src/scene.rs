@@ -4,7 +4,7 @@
 use super::*;
 
 const EDGE_RADIUS: f32 = 0.05;
-/// In world units, not a fraction of the edge, since `layout::edge_reach` lets edges stretch.
+/// In world units, not a fraction of the edge, since connections stretch.
 /// Compare `NODE_LEAF_RADIUS` for scale.
 const EDGE_DASH_LENGTH: f32 = 1.0;
 /// Distance from one dash start to the next; the gap is the remainder.
@@ -50,6 +50,15 @@ const ROUTE_COLOR: Srgba = Srgba::new(255, 242, 194, 255);
 const ROUTE_HOME_COLOR: Srgba = Srgba::new(255, 58, 74, 255);
 /// Brightness of everything outside the highlight.
 const DIMMED_BRIGHTNESS: f32 = 0.25;
+/// How far out the horizon marker is drawn, in world units: past the deepest world, inside the far
+/// plane.
+const HORIZON_MARKER_DISTANCE: f32 = 4000.0;
+/// Half the height of the horizon marker's tick, as a share of the view's half-height.
+const HORIZON_MARKER_SHARE: f32 = 0.012;
+/// Half the length of the horizon marker's stripe, in tick half-heights.
+const HORIZON_STRIPE_LENGTH: f32 = 3.0;
+/// Half the thickness of the horizon marker's tick and stripe, in tick half-heights.
+const HORIZON_LINE_WIDTH: f32 = 0.12;
 /// Strength of the additive glow on the world of a hovered list row. Additive because a
 /// highlighted node is already full white.
 const HOVERED_ROW_BRIGHTNESS: f32 = 0.85;
@@ -121,7 +130,17 @@ pub(super) fn entities(
     // One depth computation for both edge colors and DAG levels.
     let routes = world::routes_from(&connections, world::origin_world(worlds));
     let deepest = routes.depth.iter().flatten().copied().max().unwrap_or(0);
-    let furthest = deepest.max(1) as f32;
+    let nexus = opening_room(worlds);
+    // Shells count from the Nexus, which the camera stands on, rather than from the game's start.
+    let from_nexus = nexus.map(|nexus| world::routes_from(&connections, nexus));
+    let shells = from_nexus
+        .as_ref()
+        .map_or(&routes.depth, |from_nexus| &from_nexus.depth);
+    let branches = match (&from_nexus, nexus) {
+        (Some(from_nexus), Some(nexus)) => branches(from_nexus, nexus),
+        _ => vec![None; worlds.len()],
+    };
+    let outermost = shells.iter().flatten().copied().max().unwrap_or(0).max(1) as f32;
     // Node radius grows with log(descendant count).
     let descendants = routes.descendant_counts();
     let node_radii: Vec<_> = descendants
@@ -134,39 +153,42 @@ pub(super) fn entities(
 
     let layout = before.map_or_else(Layout::remembered, |before| before.layout);
     let Layout {
-        dimensions,
+        arrangement,
         hub_repulsion,
         link_reach,
-        ..
     } = layout;
     let Solve {
         dag_level_distance,
+        dag_layers,
         dag_level_slack,
         force_charge,
         link_distance_max,
+        repulsion_range,
     } = layout.parameters();
     let mut graph = Graph::new(SimulationParameters {
-        dimensions,
+        dimensions: arrangement.dimensions(),
         dag_level_distance,
+        dag_layers,
         dag_level_slack,
         force_charge,
         link_distance_max,
+        repulsion_range,
         settle_after: Some(SETTLE_AFTER),
         ..Default::default()
     });
-    // Positions come from `scatter`, so the initial layout and a restart match.
-    let nodes: Vec<_> = routes
+    // Unreachable worlds get a shell past the deepest.
+    let shell_depths: Vec<f32> = shells
+        .iter()
+        .map(|depth| depth.map_or(outermost + 1.0, |depth| depth as f32))
+        .collect();
+    let start_depths: Vec<f32> = routes
         .depth
         .iter()
-        .enumerate()
-        .map(|(world, depth)| {
-            graph.add_node(NodeData {
-                // Unreachable worlds get a layer past the deepest.
-                level: depth.map_or(furthest + 1.0, |depth| depth as f32),
-                mass: node_mass(node_radii[world], hub_repulsion),
-                ..Default::default()
-            })
-        })
+        .map(|depth| depth.map_or(deepest as f32 + 1.0, |depth| depth as f32))
+        .collect();
+    // Positions come from `scatter`, levels and masses from `set_masses_and_leads`.
+    let nodes: Vec<_> = (0..worlds.len())
+        .map(|_| graph.add_node(NodeData::default()))
         .collect();
     // Degrees counted from the drawn edges, so the panel matches the graph.
     let mut degrees = vec![0; worlds.len()];
@@ -188,13 +210,10 @@ pub(super) fn entities(
             graph.add_edge(
                 nodes[from],
                 nodes[to],
+                // Leads are fitted to the layout once the scene stands: see `set_masses_and_leads`.
                 EdgeData {
-                    reach: edge_reach(
-                        step.one_way(),
-                        node_radii[from].max(node_radii[to]),
-                        hub_repulsion,
-                    ),
                     user_data: step.one_way(),
+                    ..Default::default()
                 },
             );
             degrees[from] += 1;
@@ -207,7 +226,7 @@ pub(super) fn entities(
         .depth
         .iter()
         .map(|depth| match depth {
-            Some(depth) => distance_color(*depth as f32 / furthest),
+            Some(depth) => distance_color(*depth as f32 / deepest.max(1) as f32),
             None => UNREACHED_COLOR,
         })
         .collect();
@@ -262,6 +281,13 @@ pub(super) fn entities(
                 ..Default::default()
             },
             is_transparent: true,
+        },
+    );
+    let horizon_marker = Gm::new(
+        Mesh::new(ctx, &crosshair()),
+        ColorMaterial {
+            color: Srgba::WHITE,
+            ..Default::default()
         },
     );
     let edges = Gm::new(
@@ -320,7 +346,12 @@ pub(super) fn entities(
         author_of,
         versions,
         selected: None,
-        opening: opening_room(worlds),
+        opening: nexus,
+        branches,
+        sky_distances: vec![1.0; shell_depths.len()],
+        start_depths,
+        arrangement,
+        shell_depths,
         deepest,
         right_press: None,
         menu: None,
@@ -329,6 +360,7 @@ pub(super) fn entities(
         hovered_row: None,
         row_follow_target: None,
         framing: arriving,
+        resetting_camera: false,
         frame_route: false,
         ways: Vec::new(),
         way: 0,
@@ -361,6 +393,7 @@ pub(super) fn entities(
 
         recolored: true,
         glowing: None,
+        horizon_marker,
         atlas: Atlas::Loading(thumbnails::load()),
         sheet: None,
         cells: worlds.iter().map(world::World::cell).collect(),
@@ -380,6 +413,7 @@ pub(super) fn entities(
         arrivals,
     };
     data.repaint();
+    data.set_masses_and_leads();
     scatter(&mut data);
     // A rebuilt graph starts from the previous graph's positions.
     if let Some(before) = before {
@@ -570,25 +604,28 @@ impl AppEntities {
 
     fn rebuild_nodes(&mut self, camera: &Camera) {
         let billboard = billboard(camera);
-        let thumbnails = &mut self.thumbnail_instances.transformations;
+        let mut thumbnails = std::mem::take(&mut self.thumbnail_instances.transformations);
         thumbnails.clear();
-        let arrivals = &self.arrivals;
         self.graph.visit_nodes(|node| {
             let world = node.index().index();
-            // Placeholder, glow and detail quads all copy this size.
-            let radius = self.node_radii[world] * arrivals.grown(world);
-            thumbnails.push(node_quad(world_pos(node.position()), billboard, radius));
+            let position = world_pos(node.position(), self.sky_distances[world]);
+            let radius = self.node_radii[world] * self.arrivals.grown(world);
+            thumbnails.push(node_quad(position, billboard, radius));
         });
+        self.thumbnail_instances.transformations = thumbnails;
         self.thumbnails
             .set_transformations(&self.thumbnail_instances.transformations);
         self.billboard = billboard;
     }
 
     /// Dash ribbons are rebuilt with the solid edges, not per frame: `DashMaterial` animates them
-    /// in the shader.
+    /// in the shader. On the 3D sky a connection between branches is drawn only when lit.
     fn rebuild_edges(&mut self) {
+        let hides_crossings = self.on_sky();
+        let branches = &self.branches;
+        let (mut shown_edges, mut shown_dashes) = (Vec::new(), Vec::new());
         let radius = self.edge_radius();
-        let arrivals = &self.arrivals;
+        let (arrivals, distances) = (&self.arrivals, &self.sky_distances);
         let dash_radius = radius * EDGE_DASH_WIDTH;
         let (edges, dashes, spans) = (
             &mut self.edge_instances.transformations,
@@ -602,12 +639,12 @@ impl AppEntities {
         dashes.clear();
         spans.clear();
         self.graph.visit_edges(|a, b, data| {
-            let (from, to) = (world_pos(a.position()), world_pos(b.position()));
+            let (a_world, b_world) = (a.index().index(), b.index().index());
+            let from = world_pos(a.position(), distances[a_world]);
+            let to = world_pos(b.position(), distances[b_world]);
             let dir = to - from;
             let span = dir.magnitude();
-            let grown = arrivals
-                .grown(a.index().index())
-                .min(arrivals.grown(b.index().index()));
+            let grown = arrivals.grown(a_world).min(arrivals.grown(b_world));
             let one_way = data.user_data;
             let radius = grown * if one_way { dash_radius } else { radius };
             // Center to center: the opaque thumbnails draw first and hide the edge ends.
@@ -620,18 +657,24 @@ impl AppEntities {
                 // Coincident nodes would divide by zero.
                 false => Mat4::from_scale(0.0),
             };
+            let shown = match hides_crossings && crosses_branches(branches, a_world, b_world) {
+                true => Mat4::from_scale(0.0),
+                false => placed,
+            };
             match one_way {
-                false => edges.push(placed),
+                false => {
+                    edges.push(placed);
+                    shown_edges.push(shown);
+                }
                 true => {
                     dashes.push(placed);
+                    shown_dashes.push(shown);
                     spans.push(Mat3::from_nonuniform_scale(span, 1.0));
                 }
             }
         });
-        self.edges
-            .set_transformations(&self.edge_instances.transformations);
-        self.dashes
-            .set_transformations(&self.dash_instances.transformations);
+        self.edges.set_transformations(&shown_edges);
+        self.dashes.set_transformations(&shown_dashes);
         self.dashes
             .set_texture_transformations(self.dash_instances.texture_transformations.as_deref());
     }
@@ -642,7 +685,7 @@ impl AppEntities {
         if self.unvisited.is_empty() && !self.arrivals.turning() {
             return;
         }
-        let forward = camera.view_direction();
+        let eye = camera.position();
         let nodes = &self.thumbnail_instances;
         let painted = nodes.colors.as_ref();
         let wearing = self.unvisited.iter().copied().chain(self.arrivals.veiled());
@@ -663,8 +706,7 @@ impl AppEntities {
             let Some(node) = nodes.transformations.get(world) else {
                 continue;
             };
-            let placed =
-                Mat4::from_translation(-forward * (self.node_radii[world] * detail::LIFT)) * node;
+            let placed = lift_toward_eye(eye, 2.0) * node;
             let color = painted.map_or(Srgba::WHITE, |painted| painted[world]);
             // `highlight_nodes` is in world order.
             if highlight_nodes.binary_search(&world).is_ok() {
@@ -736,9 +778,8 @@ impl AppEntities {
             .then_some(&self.thumbnails as &dyn Object)
     }
 
-    /// Places the glow quad on the hovered row's world: its node quad offset by twice
-    /// [`detail::LIFT`], since a detail quad already sits one lift in front. The offset is below
-    /// depth precision; the `LessOrEqual` depth test covers that.
+    /// Places the glow quad on the hovered row's world: its node quad lifted in front of the detail
+    /// picture and the placeholder.
     pub(super) fn aim_glow(&mut self, camera: &Camera) {
         let Some(world) = self.hovered_row else {
             return;
@@ -749,12 +790,32 @@ impl AppEntities {
         let Some(quad) = self.thumbnail_instances.transformations.get(world) else {
             return;
         };
-        let lift = camera.view_direction() * (self.node_radii[world] * detail::LIFT * 2.0);
-        let quad = Mat4::from_translation(-lift) * quad;
+        let quad = lift_toward_eye(camera.position(), 3.0) * quad;
         self.glow.set_transformation(quad);
         if let Some(texture) = self.glow.material.texture.as_mut() {
             texture.transformation = cells[world];
         }
+    }
+
+    /// Places the crosshair on the horizon at heading zero, out where no world reaches, at a fixed
+    /// size on screen whatever the zoom. Upright rather than billboarded: seen from the eye, its
+    /// stripe lies along the horizon and its tick along the meridian.
+    pub(super) fn aim_horizon_marker(&mut self, camera: &Camera) {
+        let half_height = match camera.projection_type() {
+            three_d_asset::ProjectionType::Perspective { field_of_view_y } => {
+                (field_of_view_y.0 * 0.5).tan()
+            }
+            _ => return,
+        };
+        let size = HORIZON_MARKER_DISTANCE * half_height * HORIZON_MARKER_SHARE;
+        let at = camera.position() + heading_zero() * HORIZON_MARKER_DISTANCE;
+        self.horizon_marker
+            .set_transformation(Mat4::from_translation(at) * Mat4::from_scale(size));
+    }
+
+    /// `None` off the 3D sky, where the camera does not stand in place.
+    pub(super) fn drawn_horizon_marker(&self) -> Option<&dyn Object> {
+        self.on_sky().then_some(&self.horizon_marker as &dyn Object)
     }
 
     /// `None` without a hovered row or a loaded atlas.
@@ -774,7 +835,7 @@ impl AppEntities {
         let mut magnified: Vec<(f32, detail::Magnified)> = Vec::new();
         self.graph.visit_nodes(|node| {
             let world = node.index().index();
-            let position = world_pos(node.position());
+            let position = world_pos(node.position(), self.sky_distances[world]);
             if (position - camera.position()).dot(forward) <= 0.0 {
                 return;
             }
@@ -799,11 +860,8 @@ impl AppEntities {
                 detail::Magnified {
                     world,
                     width,
-                    transformation: node_quad(
-                        position - forward * (radius * detail::LIFT),
-                        billboard,
-                        radius,
-                    ),
+                    transformation: lift_toward_eye(camera.position(), 1.0)
+                        * node_quad(position, billboard, radius),
                     color: colors.map_or(Srgba::WHITE, |colors| colors[world]),
                 },
             ));
@@ -965,6 +1023,28 @@ fn white_instances(count: usize) -> Instances {
         colors: Some(vec![Srgba::WHITE; count]),
         ..Default::default()
     }
+}
+
+/// The horizon marker: a short vertical tick across a longer horizontal stripe, on the `z = 0` plane.
+fn crosshair() -> CpuMesh {
+    let rectangle = |half_width: f32, half_height: f32| {
+        [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+            .map(|(x, y)| vec3(x * half_width, y * half_height, 0.0))
+    };
+    let stripe = rectangle(HORIZON_STRIPE_LENGTH, HORIZON_LINE_WIDTH);
+    let tick = rectangle(HORIZON_LINE_WIDTH, 1.0);
+    CpuMesh {
+        positions: Positions::F32([stripe, tick].concat()),
+        indices: Indices::U8(vec![0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7]),
+        ..Default::default()
+    }
+}
+
+/// Shrinks a quad toward the eye by `lifts` [`detail::LIFT`]s, which draws it on the same pixels in
+/// front of whatever it covers, at any distance.
+fn lift_toward_eye(eye: Vec3, lifts: f32) -> Mat4 {
+    let kept = 1.0 - detail::LIFT * lifts;
+    Mat4::from_translation(eye) * Mat4::from_scale(kept) * Mat4::from_translation(-eye)
 }
 
 /// A world's billboard quad at `position`, in the thumbnail aspect ratio.

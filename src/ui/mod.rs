@@ -197,11 +197,10 @@ enum Tab {
 
 /// What the panel was left at, once it is built and the frame's clicks have landed on it.
 struct Panel {
-    dimensions: Dimensions,
+    arrangement: Arrangement,
     hub_repulsion: f32,
     link_reach: f32,
     ui_scale: f32,
-    layered: bool,
     /// What the smoothing was left set to, and what the running surface is actually doing, so the
     /// tab can say when the two have parted. See [`Overlay::antialias_running`].
     antialias: bool,
@@ -223,8 +222,8 @@ struct Panel {
     guide: bool,
     /// Whether the framing button was pressed, calling for a route to be framed the other way.
     refit: bool,
-    /// Whether the refocus button was pressed, calling the camera back onto the selection.
-    refocus: bool,
+    /// Whether the reset button was pressed, taking the camera back to its opening view.
+    reset_camera: bool,
     /// The way among a set of directions that was picked to be drawn instead.
     way: Option<usize>,
     /// The world whose maps were called for. A second press on the same world closes them again:
@@ -281,7 +280,7 @@ impl Insets {
 
 /// Where the windows stand, chosen by how wide the window is rather than by what it runs on.
 #[derive(Clone, Copy)]
-enum Arrangement {
+enum PanelFit {
     /// The browse window down the left, the selection down the right, the graph between them.
     Wide,
     /// One window at a time over a tab bar, which is what a phone held upright has room for.
@@ -366,14 +365,12 @@ impl Overlay {
         }
         let ratio = frame_input.device_pixel_ratio * self.ui_scale;
         let read = PanelData::new(data, self.counted.rate(), &self.browse, frame_input, ratio);
-        let parameters = data.graph.parameters();
         // `parameters_mut` wakes the layout, so it is written back only on change.
         let mut panel = Panel {
-            dimensions: parameters.dimensions,
+            arrangement: data.arrangement,
             hub_repulsion: data.hub_repulsion,
             link_reach: data.link_reach,
             ui_scale: self.ui_scale,
-            layered: parameters.dag_level_distance.is_some(),
             antialias: self.antialias,
             antialias_running: self.antialias_running,
             row_follow: self.row_follow,
@@ -387,7 +384,7 @@ impl Overlay {
             refit: false,
             way: None,
             mapped: None,
-            refocus: false,
+            reset_camera: false,
             revealed: None,
             language: None,
         };
@@ -401,7 +398,7 @@ impl Overlay {
             let ctx = ui.ctx().clone();
             let safe = insets.shrink_rect(ctx.content_rect());
             let (width, height) = (safe.width(), safe.height());
-            let arrangement = Arrangement::for_width(width);
+            let fit = PanelFit::for_width(width);
             let placement = Placement {
                 insets,
                 width,
@@ -409,34 +406,29 @@ impl Overlay {
                 opacity: window_opacity(&ctx),
             };
             browse.fold_for_selection(read.selected);
-            let remaining_insets = match arrangement {
-                Arrangement::Wide => {
+            let remaining_insets = match fit {
+                PanelFit::Wide => {
                     panel.browse_window(ui, &read, browse, account, dump, &placement);
                     if let Some(highlight) = read.selected {
                         panel.selection_window(ui, &read, highlight, &placement);
                     }
                     insets
                 }
-                Arrangement::Narrow => {
+                PanelFit::Narrow => {
                     panel.narrow_windows(ui, &read, browse, account, dump, &placement)
                 }
             };
             panel.rocker(
                 ui,
                 &read,
-                arrangement.rocker_anchor(),
+                fit.rocker_anchor(),
                 remaining_insets,
                 placement.opacity,
             );
             panel.directions(ui, &read);
             panel.menu(ui, &read);
             panel.system_theme_dialog(&ctx, &mut browse.picking_theme);
-            panel.message(
-                ui,
-                &read,
-                remaining_insets,
-                arrangement.message_width(width),
-            );
+            panel.message(ui, &read, remaining_insets, fit.message_width(width));
             // Within the frame that set it, so the window opens on release.
             if let Some(world) = panel.mapped {
                 maps.toggle(world, data.titles[world].show(), &data.maps[world]);
@@ -463,8 +455,8 @@ impl Overlay {
         panel
     }
 
-    /// Runs one frame of the panel and applies what it was left at. Returns whether the dimension
-    /// changed, which is the one switch the caller has to follow up on.
+    /// Runs one frame of the panel and applies what it was left at. Returns whether the arrangement
+    /// changed, which is the one choice the caller has to follow up on.
     pub(super) fn run(
         &mut self,
         window: &Window,
@@ -506,8 +498,9 @@ impl Overlay {
             data.frame_route = !data.frame_route;
             data.framing = true;
         }
-        if panel.refocus {
-            data.framing = true;
+        if panel.reset_camera {
+            data.framing = false;
+            data.resetting_camera = true;
         }
         if let Some(way) = panel.way {
             data.take_way(way);
@@ -547,19 +540,22 @@ impl Overlay {
         }
 
         // Ahead of the early return: two of the four change no simulation parameter.
+        let switched = panel.arrangement != data.arrangement;
         let layout = Layout {
-            dimensions: panel.dimensions,
-            layered: panel.layered,
+            arrangement: panel.arrangement,
             hub_repulsion: panel.hub_repulsion,
-            link_reach: panel.link_reach,
+            link_reach: match switched {
+                true => panel.arrangement.remembered_link_reach(),
+                false => panel.link_reach,
+            },
         };
         // Both are dragged, so each is followed live without a reseed.
         if panel.hub_repulsion != data.hub_repulsion {
             data.hub_repulsion = panel.hub_repulsion;
-            data.apply_hub_push();
+            data.set_masses_and_leads();
         }
-        if panel.link_reach != data.link_reach {
-            data.link_reach = panel.link_reach;
+        if layout.link_reach != data.link_reach {
+            data.link_reach = layout.link_reach;
             data.graph.parameters_mut().link_distance_max = layout.parameters().link_distance_max;
         }
         if layout != self.layout && !self.gui.context().egui_is_using_pointer() {
@@ -567,21 +563,23 @@ impl Overlay {
             layout.remember();
         }
 
-        let was = data.graph.parameters();
-        if panel.dimensions == was.dimensions && panel.layered == was.dag_level_distance.is_some() {
+        if !switched {
             return false;
         }
+        data.arrangement = panel.arrangement;
         let parameters = data.graph.parameters_mut();
-        let reseed = panel.dimensions != parameters.dimensions;
-        parameters.dimensions = panel.dimensions;
+        parameters.dimensions = panel.arrangement.dimensions();
         let solve = layout.parameters();
         parameters.dag_level_distance = solve.dag_level_distance;
+        parameters.dag_layers = solve.dag_layers;
         parameters.dag_level_slack = solve.dag_level_slack;
         parameters.force_charge = solve.force_charge;
         parameters.link_distance_max = solve.link_distance_max;
-        // A full settling window, since a switch rearranges the whole layout.
+        parameters.repulsion_range = solve.repulsion_range;
+        data.set_masses_and_leads();
+        // A full settling window: every arrangement starts over.
         data.graph.revive();
-        reseed
+        true
     }
 }
 
@@ -645,7 +643,7 @@ impl Browse {
     }
 }
 
-impl Arrangement {
+impl PanelFit {
     fn for_width(width: f32) -> Self {
         match width < NARROW_BELOW {
             true => Self::Narrow,
@@ -766,7 +764,7 @@ pub(super) fn loading_frame(ctx: &egui::Context, says: &str, failed: Option<&str
         ),
     );
     let width = ctx.content_rect().width();
-    let width = Arrangement::for_width(width).message_width(width);
+    let width = PanelFit::for_width(width).message_width(width);
     egui::Area::new(egui::Id::new("loading"))
         .order(egui::Order::Tooltip)
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)

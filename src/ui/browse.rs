@@ -186,12 +186,19 @@ impl Panel {
         collapsed: &mut bool,
     ) {
         let data = read.data;
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.dimensions, Dimensions::Two, t!("dimensions-2d"));
-            ui.selectable_value(&mut self.dimensions, Dimensions::Three, t!("dimensions-3d"));
-            ui.checkbox(&mut self.layered, t!("layered"))
-                .on_hover_text(t!("layered-hint"));
-        });
+        egui::ComboBox::from_label(t!("arrangement"))
+            .selected_text(self.arrangement.name())
+            .show_ui(ui, |ui| {
+                for (heading, group) in [
+                    (t!("dimensions-2d"), &Arrangement::PLANAR[..]),
+                    (t!("dimensions-3d"), &Arrangement::SPATIAL[..]),
+                ] {
+                    ui.weak(heading);
+                    for &arrangement in group {
+                        ui.selectable_value(&mut self.arrangement, arrangement, arrangement.name());
+                    }
+                }
+            });
         ui.weak(format!(
             "{}  ·  {}",
             t!(

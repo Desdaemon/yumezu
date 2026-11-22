@@ -38,8 +38,12 @@ fps = { $fps } fps
 graph-size = { $worlds } worlds, { $connections } connections
 dimensions-2d = 2D
 dimensions-3d = 3D
-layered = Layered
-layered-hint = Separates worlds into layers by depth
+arrangement = Arrangement
+arrangement-flat = Flat
+arrangement-radial = Radial
+arrangement-free = Free
+arrangement-tree = Tree
+arrangement-orbital = Orbital
 search-worlds = Search worlds
 search-authors = Search authors
 search-versions = Search versions
@@ -153,14 +157,14 @@ menu-open-wiki = Open on yume.wiki
 
 rocker-shallower = Shallower
 rocker-deeper = Deeper
-refocus = Refocus on the selection
+reset-camera = Reset camera
 
 ## The settings tab.
 
 hub-push = Hub repulsion
 hub-push-hint = How strongly larger worlds repel their neighbors
 link-reach = Max connection length
-link-reach-hint = How far apart connected worlds settle, in layers. One-way connections are exempt
+link-reach-hint = How far apart connected worlds settle, in layers. Each arrangement keeps its own. One-way connections are exempt
 ui-scale = UI scale
 antialias = Anti-aliasing
 antialias-hint = Smooths jagged edges. Turn off first if the frame rate drops below your display's

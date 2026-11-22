@@ -27,8 +27,8 @@
 //! # Modes
 //!
 //! [`SimulationParameters::dimensions`] and [`SimulationParameters::dag_level_distance`] may both
-//! change between any two steps. Neither alters the force passes: each constrains one axis after
-//! the forces have run, so a switch reads as the graph settling into the new arrangement.
+//! change between any two steps. Neither alters the force passes: each constrains the positions
+//! after the forces have run, so a switch reads as the graph settling into the new arrangement.
 //!
 //! # Vectorization
 //!
@@ -135,6 +135,18 @@ pub enum Dimensions {
     Three,
 }
 
+/// The surface each depth layer is held to in layered mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Layers {
+    /// Planes across y, so y reads as depth.
+    Planes,
+    /// Shells around the origin, so distance from it reads as depth. By symmetry the shells
+    /// inside a node push it straight outward, which the shell discards whole, where a plane
+    /// would keep the sideways part.
+    #[default]
+    Shells,
+}
+
 #[derive(Clone, Debug)]
 pub struct SimulationParameters {
     pub force_charge: f32,
@@ -167,17 +179,19 @@ pub struct SimulationParameters {
     /// such a layout coasts to a rest it would not have reached. Disturbing it hands the damping
     /// back over [`WAKE_TIME`] rather than at once.
     pub settle_after: Option<f32>,
-    /// Layered ("DAG") mode: spacing between depth layers along y, or `None` to let the forces
-    /// place nodes freely.
+    /// Layered ("DAG") mode: spacing between the [`Layers`] that hold each depth, or `None` to let
+    /// the forces place nodes freely.
     ///
-    /// Each node is pinned to the layer named by its [`NodeData::level`], so y reads as depth and
-    /// the forces only spread nodes within a layer.
+    /// Each node is held [`NodeData::level`] times this along y or from the origin, so that reads
+    /// as depth and the forces only move nodes within their layer.
     pub dag_level_distance: Option<f32>,
-    /// Layered mode: how far a node may sit from its layer along y, or `0.0` to pin it exactly.
+    /// Layered mode: what each layer is.
+    pub dag_layers: Layers,
+    /// Layered mode: how far a node may sit off its layer, or `0.0` to pin it to it.
     ///
-    /// Inside the band the axis is free, so a crowded layer stacks across its thickness instead of
-    /// squeezing onto one line. Meant for [`Dimensions::Two`], where a layer is a line with no
-    /// third axis to take the overflow. Read only while
+    /// Inside the band the radius is free, so a crowded shell stacks across its thickness instead
+    /// of squeezing onto one surface. Meant for [`Dimensions::Two`], where a shell is a ring with
+    /// no third axis to take the overflow. Read only while
     /// [`SimulationParameters::dag_level_distance`] is set, and best kept well under it, or
     /// neighbouring layers meet. The band edge is soft -- the same decay at [`CONSTRAINT_RATE`] --
     /// so a node pushed outward hard enough settles a little past it.
@@ -190,6 +204,11 @@ pub struct SimulationParameters {
     /// the spring gains a second term, [`OVERSTRETCH_STIFFNESS`] times stiffer, proportional to
     /// the excess. The ceiling is soft: an edge held open harder settles somewhat past it.
     pub link_distance_max: Option<f32>,
+    /// How far a node's repulsion reaches, or `None` for every distance.
+    ///
+    /// A pushed node only stops where something holds it, so with an unlimited reach every edge
+    /// with slack in it is pushed taut. Past this distance nothing pushes, and slack can stay.
+    pub repulsion_range: Option<f32>,
 }
 
 impl Default for SimulationParameters {
@@ -204,9 +223,11 @@ impl Default for SimulationParameters {
             settle_speed: 5.0,
             settle_after: Some(5.0),
             dimensions: Dimensions::default(),
-            dag_level_distance: Some(800.0),
+            dag_level_distance: None,
+            dag_layers: Layers::default(),
             dag_level_slack: 0.0,
             link_distance_max: None,
+            repulsion_range: None,
         }
     }
 }
@@ -215,9 +236,9 @@ pub struct NodeData<UserNodeData = ()> {
     pub x: f32,
     pub y: f32,
     pub z: f32,
-    /// Which depth layer the node belongs to. Read only while
-    /// [`SimulationParameters::dag_level_distance`] is set, which turns it into a y coordinate;
-    /// what a layer counts is the caller's to decide.
+    /// Which depth shell the node belongs to. Read only while
+    /// [`SimulationParameters::dag_level_distance`] is set, which turns it into a distance from the
+    /// origin; what a level counts is the caller's to decide.
     pub level: f32,
     /// A heavier node repels its neighbours harder.
     pub mass: f32,
@@ -249,6 +270,9 @@ pub struct EdgeData<UserEdgeData = ()> {
     /// way round should not drag together two ends the layout keeps apart. `f32::INFINITY` exempts
     /// the edge, leaving it a plain linear spring however far it stretches.
     pub reach: f32,
+    /// This edge's pull within its ceiling, as a multiple of [`SimulationParameters::force_spring`].
+    /// Past the ceiling the overstretch term holds it whatever this is, so `0.0` is slack, not cut.
+    pub stiffness: f32,
     pub user_data: UserEdgeData,
 }
 
@@ -259,6 +283,7 @@ where
     fn default() -> Self {
         EdgeData {
             reach: 1.0,
+            stiffness: 1.0,
             user_data: Default::default(),
         }
     }
@@ -284,7 +309,7 @@ struct NodeStore {
     mass: Vec<f32>,
     /// `1.0` for a node the simulation may move, `0.0` for an anchor or a free slot.
     mobility: Vec<f32>,
-    /// Depth layer per node, as handed over in [`NodeData::level`]. Only layered mode reads it.
+    /// Depth shell per node, as handed over in [`NodeData::level`]. Only layered mode reads it.
     level: Vec<f32>,
 }
 
@@ -595,11 +620,17 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
             self.parameters.damping_factor * self.rest.advance(dt, self.parameters.settle_after);
         self.repel();
         self.attract();
-        // A constrained axis is driven by `constrain` alone, or 2D would never be exactly planar.
-        // A slack layer's constraint is a band, which the forces fill.
+        // A constrained direction is driven by `constrain` alone, or 2D would never be exactly
+        // planar. A slack layer's constraint is a band, which the forces fill.
+        let pinned =
+            self.parameters.dag_level_distance.is_some() && self.parameters.dag_level_slack <= 0.0;
+        let planes = self.parameters.dag_layers == Layers::Planes;
+        if pinned && !planes {
+            self.discard_radial_force();
+        }
         let free = [
             true,
-            self.parameters.dag_level_distance.is_none() || self.parameters.dag_level_slack > 0.0,
+            !(pinned && planes),
             self.parameters.dimensions == Dimensions::Three,
         ];
         self.integrate(dt, damping, free);
@@ -640,12 +671,20 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         }
     }
 
+    /// The squared [`SimulationParameters::repulsion_range`], infinite when unset.
+    fn range_sq(&self) -> f32 {
+        self.parameters
+            .repulsion_range
+            .map_or(f32::INFINITY, |range| range * range)
+    }
+
     /// Every pair, summed exactly. O(n²), and the reference the approximate pass is tested
     /// against.
     fn repel_exact(&mut self) {
         let n = self.nodes.len();
         let force_max = self.parameters.force_max;
         let charge = self.parameters.force_charge;
+        let range_sq = self.range_sq();
         let NodeStore {
             x,
             y,
@@ -668,6 +707,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
             let [fx, fy, fz] = repulsion_on(
                 [x[i], y[i], z[i]],
                 -charge * mass[i],
+                range_sq,
                 x,
                 y,
                 z,
@@ -687,6 +727,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         let n = self.nodes.len();
         let force_max = self.parameters.force_max;
         let charge = self.parameters.force_charge;
+        let range_sq = self.range_sq();
         let theta = self.parameters.theta;
         let NodeStore {
             x,
@@ -711,6 +752,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
                 let [fx, fy, fz] = repulsion_on(
                     [sorted.x[k], sorted.y[k], sorted.z[k]],
                     -charge * sorted.mass[k],
+                    range_sq,
                     &list.x,
                     &list.y,
                     &list.z,
@@ -747,12 +789,13 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
             );
             // Only an edge past its ceiling pays for the square root.
             let ceiling = max * edge.weight().reach;
+            let stiffness = edge.weight().stiffness;
             let squared = dx * dx + dy * dy + dz * dz;
             let strength = if squared > ceiling * ceiling {
                 let distance = squared.sqrt();
-                rate * (1.0 + OVERSTRETCH_STIFFNESS * (distance - ceiling) / distance)
+                rate * (stiffness + OVERSTRETCH_STIFFNESS * (distance - ceiling) / distance)
             } else {
-                rate
+                rate * stiffness
             };
             let (fx, fy, fz) = (dx * strength, dy * strength, dz * strength);
             nodes.ax[i] += fx;
@@ -761,6 +804,33 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
             nodes.ax[j] -= fx;
             nodes.ay[j] -= fy;
             nodes.az[j] -= fz;
+        }
+    }
+
+    /// Removes the part of each accumulated force that points along its node's radius, leaving
+    /// what moves it around its shell. A node bound for the origin keeps none.
+    fn discard_radial_force(&mut self) {
+        let n = self.nodes.len();
+        let NodeStore {
+            x,
+            y,
+            z,
+            ax,
+            ay,
+            az,
+            level,
+            ..
+        } = &mut self.nodes;
+        for i in 0..n {
+            let radius = (x[i] * x[i] + y[i] * y[i] + z[i] * z[i]).sqrt();
+            if level[i] <= 0.0 || radius == 0.0 {
+                [ax[i], ay[i], az[i]] = [0.0; 3];
+                continue;
+            }
+            let along = (ax[i] * x[i] + ay[i] * y[i] + az[i] * z[i]) / (radius * radius);
+            ax[i] -= along * x[i];
+            ay[i] -= along * y[i];
+            az[i] -= along * z[i];
         }
     }
 
@@ -805,8 +875,12 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         let n = self.nodes.len();
         let mut reached = true;
         let retained = (-CONSTRAINT_RATE * dt).exp();
+        let slack = self.parameters.dag_level_slack.max(0.0);
 
-        if let Some(distance) = self.parameters.dag_level_distance {
+        if let (Some(distance), Layers::Planes) = (
+            self.parameters.dag_level_distance,
+            self.parameters.dag_layers,
+        ) {
             self.targets.clear();
             self.targets
                 .extend(self.nodes.level[..n].iter().map(|level| level * distance));
@@ -815,7 +889,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
                 &mut self.nodes.vy[..n],
                 &self.nodes.mobility[..n],
                 &self.targets,
-                self.parameters.dag_level_slack.max(0.0),
+                slack,
                 retained,
             );
         }
@@ -831,6 +905,14 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
                 0.0,
                 retained,
             );
+        }
+
+        // After the plane, which scaling about the origin leaves planar.
+        if let (Some(distance), Layers::Shells) = (
+            self.parameters.dag_level_distance,
+            self.parameters.dag_layers,
+        ) {
+            reached &= constrain_shells(&mut self.nodes, distance, slack, retained);
         }
 
         reached
@@ -956,6 +1038,11 @@ pub struct NodeMut<'a, UserNodeData = ()> {
 }
 
 impl<UserNodeData> NodeMut<'_, UserNodeData> {
+    /// See [`NodeData::level`].
+    pub fn level(&self) -> f32 {
+        self.nodes.level[self.slot]
+    }
+
     pub fn position(&self) -> [f32; 3] {
         [
             self.nodes.x[self.slot],
@@ -979,6 +1066,12 @@ impl<UserNodeData> NodeMut<'_, UserNodeData> {
         self.nodes.vx[self.slot] = vx;
         self.nodes.vy[self.slot] = vy;
         self.nodes.vz[self.slot] = vz;
+    }
+
+    /// See [`NodeData::level`].
+    pub fn set_level(&mut self, level: f32) {
+        self.rest.wake();
+        self.nodes.level[self.slot] = level;
     }
 
     pub fn set_mass(&mut self, mass: f32) {
@@ -1010,9 +1103,11 @@ impl<UserNodeData> NodeMut<'_, UserNodeData> {
 /// Not `#[inline]`: entered once per node and run over every interaction that node has, so the
 /// call is already amortized and one out-of-line copy keeps the vectorized loop somewhere a
 /// disassembler can find it.
+#[expect(clippy::too_many_arguments)]
 fn repulsion_on(
     target: [f32; 3],
     charge_target: f32,
+    range_sq: f32,
     x: &[f32],
     y: &[f32],
     z: &[f32],
@@ -1022,30 +1117,34 @@ fn repulsion_on(
     #[cfg(target_arch = "x86_64")]
     if is_x86_feature_detected!("avx2") {
         // SAFETY: the CPU reports the feature the function is compiled for.
-        return unsafe { repulsion_on_avx2(target, charge_target, x, y, z, mass, limit) };
+        return unsafe { repulsion_on_avx2(target, charge_target, range_sq, x, y, z, mass, limit) };
     }
-    sum_repulsion(target, charge_target, x, y, z, mass, limit)
+    sum_repulsion(target, charge_target, range_sq, x, y, z, mass, limit)
 }
 
 /// The desktop build targets baseline x86-64, whose vectors are half as wide.
 #[cfg(target_arch = "x86_64")]
+#[expect(clippy::too_many_arguments)]
 #[target_feature(enable = "avx2")]
 fn repulsion_on_avx2(
     target: [f32; 3],
     charge_target: f32,
+    range_sq: f32,
     x: &[f32],
     y: &[f32],
     z: &[f32],
     mass: &[f32],
     limit: &[f32],
 ) -> [f32; 3] {
-    sum_repulsion(target, charge_target, x, y, z, mass, limit)
+    sum_repulsion(target, charge_target, range_sq, x, y, z, mass, limit)
 }
 
+#[expect(clippy::too_many_arguments)]
 #[inline(always)]
 fn sum_repulsion(
     target: [f32; 3],
     charge_target: f32,
+    range_sq: f32,
     x: &[f32],
     y: &[f32],
     z: &[f32],
@@ -1077,7 +1176,10 @@ fn sum_repulsion(
             let dx = xs[l] - tx;
             let dy = ys[l] - ty;
             let dz = zs[l] - tz;
-            let strength = charge_target * ms[l] * inv_cube(dx * dx + dy * dy + dz * dz);
+            let d2 = dx * dx + dy * dy + dz * dz;
+            // A select rather than a branch, so the lanes stay in step.
+            let reach = if d2 < range_sq { charge_target } else { 0.0 };
+            let strength = reach * ms[l] * inv_cube(d2);
             // Clamped per interaction, so one close neighbour cannot dominate the sum.
             fx[l] += clamp_symmetric(dx * strength, ls[l]);
             fy[l] += clamp_symmetric(dy * strength, ls[l]);
@@ -1087,7 +1189,9 @@ fn sum_repulsion(
     // At most `LANES - 1`, a bound the type carries, so this is peeled.
     for ((((&px, &py), &pz), &m), &l) in xr.iter().zip(yr).zip(zr).zip(mr).zip(lr) {
         let (dx, dy, dz) = (px - tx, py - ty, pz - tz);
-        let strength = charge_target * m * inv_cube(dx * dx + dy * dy + dz * dz);
+        let d2 = dx * dx + dy * dy + dz * dz;
+        let reach = if d2 < range_sq { charge_target } else { 0.0 };
+        let strength = reach * m * inv_cube(d2);
         fx[0] += clamp_symmetric(dx * strength, l);
         fy[0] += clamp_symmetric(dy * strength, l);
         fz[0] += clamp_symmetric(dz * strength, l);
@@ -1185,6 +1289,58 @@ fn constrain_axis(
     reached
 }
 
+/// Relaxes each node's distance from the origin toward its shell, scaling its position about the
+/// origin and discarding the radial part of its velocity, as [`constrain_axis`] does for one axis.
+fn constrain_shells(nodes: &mut NodeStore, distance: f32, slack: f32, retained: f32) -> bool {
+    let n = nodes.len();
+    let NodeStore {
+        x,
+        y,
+        z,
+        vx,
+        vy,
+        vz,
+        mobility,
+        level,
+        ..
+    } = nodes;
+    let mut reached = true;
+    for i in 0..n {
+        if mobility[i] == 0.0 {
+            continue;
+        }
+        let shell = level[i] * distance;
+        let radius = (x[i] * x[i] + y[i] * y[i] + z[i] * z[i]).sqrt();
+        let target = radius.clamp((shell - slack).max(0.0), shell + slack);
+        if radius == target {
+            continue;
+        }
+        let mut relaxed = radius + (target - radius) * (1.0 - retained);
+        // Scaling three coordinates places a far shell's radius only to a few parts in ten million.
+        if (relaxed - target).abs() < CONSTRAINT_SNAP.max(target * 1e-6) {
+            relaxed = target;
+        } else {
+            reached = false;
+        }
+        if radius == 0.0 {
+            // No direction to scale along; any will do.
+            [x[i], y[i], z[i]] = [relaxed, 0.0, 0.0];
+            continue;
+        }
+        let scale = relaxed / radius;
+        [x[i], y[i], z[i]] = [x[i] * scale, y[i] * scale, z[i] * scale];
+        if relaxed == 0.0 {
+            [vx[i], vy[i], vz[i]] = [0.0; 3];
+            continue;
+        }
+        let along = (vx[i] * x[i] + vy[i] * y[i] + vz[i] * z[i]) / (relaxed * relaxed);
+        vx[i] -= along * x[i];
+        vy[i] -= along * y[i];
+        vz[i] -= along * z[i];
+    }
+    reached
+}
+
 /// Damped explicit-Euler step for one axis. `mobility` zeroes both the velocity and the motion of
 /// an anchored or free slot, which keeps the loop free of branches.
 fn integrate_axis(
@@ -1209,6 +1365,10 @@ fn integrate_axis(
 #[cfg(test)]
 mod test {
     use super::*;
+
+    fn radius([x, y, z]: [f32; 3]) -> f32 {
+        (x * x + y * y + z * z).sqrt()
+    }
 
     fn positions<N, E>(graph: &ForceGraph<N, E>) -> Vec<[f32; 3]> {
         let mut out = Vec::new();
@@ -1261,6 +1421,7 @@ mod test {
             n2_idx,
             EdgeData {
                 reach: 1.0,
+                stiffness: 1.0,
                 user_data: UserEdgeData {},
             },
         );
@@ -1772,9 +1933,9 @@ mod test {
         assert!(positions.iter().all(|p| p[2] == 0.0), "{positions:?}");
     }
 
-    /// Across the band rather than piled onto its line, and none of them leaving the band.
+    /// Across the band rather than piled onto its ring, and none of them leaving the band.
     #[test]
-    fn slack_stacks_a_crowded_layer() {
+    fn slack_stacks_a_crowded_shell() {
         let mut graph = <ForceGraph>::new(SimulationParameters {
             dag_level_distance: Some(1000.0),
             dag_level_slack: 200.0,
@@ -1784,7 +1945,7 @@ mod test {
         for i in 0..8 {
             graph.add_node(NodeData {
                 x: i as f32 * 10.0,
-                // Nodes sharing a y have no y force to spread them.
+                // Nodes at one radius have no radial force to spread them.
                 y: 1000.0 + (i % 4) as f32,
                 level: 1.0,
                 ..Default::default()
@@ -1794,11 +1955,14 @@ mod test {
         for _ in 0..120 {
             graph.update(FIXED_STEP);
         }
-        let ys: Vec<f32> = positions(&graph).iter().map(|p| p[1]).collect();
+        let radii: Vec<f32> = positions(&graph).iter().map(|&p| radius(p)).collect();
         // Soft edge: see [`SimulationParameters::dag_level_slack`].
-        assert!(ys.iter().all(|y| (y - 1000.0).abs() <= 220.0), "{ys:?}");
-        let spread = ys.iter().fold(0.0f32, |a, y| a.max((y - 1000.0).abs()));
-        assert!(spread > 1.0, "{ys:?}");
+        assert!(
+            radii.iter().all(|r| (r - 1000.0).abs() <= 220.0),
+            "{radii:?}"
+        );
+        let spread = radii.iter().fold(0.0f32, |a, r| a.max((r - 1000.0).abs()));
+        assert!(spread > 1.0, "{radii:?}");
     }
 
     /// However hard the rest of the graph pulls the two ends apart. The plain linear spring does
@@ -1809,9 +1973,11 @@ mod test {
 
         /// The longest edge of a hub with sixteen leaves. The leaves push each other off the hub,
         /// so every edge carries the repulsion of the whole star rather than of one neighbour.
-        fn star(link_distance_max: Option<f32>, reach: f32) -> f32 {
+        fn star(link_distance_max: Option<f32>, reach: f32, stiffness: f32) -> f32 {
             let mut graph = <ForceGraph>::new(SimulationParameters {
                 link_distance_max,
+                // Flat, so the leaves crowd each other harder than a sphere of them would.
+                dimensions: Dimensions::Two,
                 ..Default::default()
             });
             let hub = graph.add_node(Default::default());
@@ -1828,6 +1994,7 @@ mod test {
                     leaf,
                     EdgeData {
                         reach,
+                        stiffness,
                         user_data: (),
                     },
                 );
@@ -1842,20 +2009,24 @@ mod test {
             })
         }
 
-        let held = star(Some(CEILING), 1.0);
-        let free = star(None, 1.0);
+        let held = star(Some(CEILING), 1.0, 1.0);
+        let free = star(None, 1.0, 1.0);
         // Soft: see [`OVERSTRETCH_STIFFNESS`].
         assert!(held < CEILING * 1.3, "{held}");
         assert!(free > held * 1.5, "{free} vs {held}");
-        let roomier = star(Some(CEILING), 1.5);
+        let roomier = star(Some(CEILING), 1.5, 1.0);
         assert!(roomier > held * 1.3, "{roomier} vs {held}");
         assert!(roomier < CEILING * 1.5 * 1.3, "{roomier}");
-        assert_eq!(star(Some(CEILING), f32::INFINITY), free);
+        assert_eq!(star(Some(CEILING), f32::INFINITY, 1.0), free);
+        // Slack within the ceiling, still held past it.
+        let slack = star(Some(CEILING), 1.0, 0.0);
+        assert!(slack > held, "{slack} vs {held}");
+        assert!(slack < CEILING * 1.3, "{slack}");
     }
 
     /// However the forces would rather place it.
     #[test]
-    fn layers_follow_the_level() {
+    fn shells_follow_the_level() {
         let mut graph = <ForceGraph>::new(SimulationParameters {
             dag_level_distance: Some(100.0),
             ..Default::default()
@@ -1864,7 +2035,7 @@ mod test {
             .map(|i| {
                 graph.add_node(NodeData {
                     x: i as f32 * 10.0,
-                    // Not the layer's y: the constraint has to place it.
+                    // Not the shell's radius: the constraint has to place it.
                     y: 500.0,
                     level: i as f32,
                     ..Default::default()
@@ -1878,8 +2049,10 @@ mod test {
         for _ in 0..120 {
             graph.update(FIXED_STEP);
         }
-        let layers: Vec<f32> = positions(&graph).iter().map(|p| p[1]).collect();
-        assert_eq!(layers, vec![0.0, 100.0, 200.0, 300.0]);
+        let radii: Vec<f32> = positions(&graph).iter().map(|&p| radius(p)).collect();
+        for (level, r) in radii.iter().enumerate() {
+            assert!((r - level as f32 * 100.0).abs() < 0.1, "{radii:?}");
+        }
     }
 
     /// A settled layout has no damping left, and [`Rest::wake`] hands back only as much as the
@@ -1896,10 +2069,11 @@ mod test {
             }
             panic!("never settled");
         }
-        // Several nodes per layer, so lifting the layering leaves the forces work.
+        // Several nodes per shell, so lifting the layering leaves the forces work. Roomy shells, or
+        // the strain they hold makes even a brief wake travel far.
         fn layered() -> ForceGraph {
             let mut graph = <ForceGraph>::new(SimulationParameters {
-                dag_level_distance: Some(100.0),
+                dag_level_distance: Some(3000.0),
                 ..Default::default()
             });
             let nodes: Vec<_> = (0..24)
@@ -1907,7 +2081,8 @@ mod test {
                     graph.add_node(NodeData {
                         x: (i % 6) as f32 * 30.0,
                         z: (i / 6) as f32 * 30.0,
-                        level: (i / 6) as f32,
+                        // Off the innermost shell, which is a single point.
+                        level: (i / 6 + 1) as f32,
                         ..Default::default()
                     })
                 })

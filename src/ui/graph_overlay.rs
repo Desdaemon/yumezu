@@ -70,13 +70,9 @@ impl Panel {
                     )));
                 }
                 ui.separator();
-                let refocus = egui::Button::new(ICON_CENTER_FOCUS_STRONG).min_size(button_size);
-                if ui
-                    .add_enabled(read.selected.is_some(), refocus)
-                    .on_hover_text(t!("refocus"))
-                    .clicked()
-                {
-                    self.refocus = true;
+                let reset = egui::Button::new(ICON_HOME).min_size(button_size);
+                if ui.add(reset).on_hover_text(t!("reset-camera")).clicked() {
+                    self.reset_camera = true;
                 }
             });
         });

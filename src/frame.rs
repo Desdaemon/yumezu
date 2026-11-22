@@ -58,6 +58,14 @@ impl App {
                 // Squared before rotation locks, or an oblique camera could never straighten.
                 self.statics.face_plane();
             }
+            match data.on_sky() {
+                true => data.resetting_camera = true,
+                false => {
+                    // The orbit closes in by distance, so a view the wheel narrowed is let out.
+                    self.statics.reset_field_of_view();
+                    data.framing = true;
+                }
+            }
         }
         // Ahead of the pan and orbit, which take the left-button motion this leaves.
         data.track_gesture(
@@ -104,30 +112,55 @@ impl App {
                 .statics
                 .pan_by((across, 0.0), frame_input.device_pixel_ratio)
             | self.statics.dolly_by(into, frame_input.device_pixel_ratio);
-        let orbited = self
-            .statics
-            .control
-            .handle_events(&mut self.statics.camera, &mut frame_input.events);
+        // Orbital stands at the Nexus and turns there; every other arrangement orbits.
+        let standing = data.on_sky();
+        let steered = match standing {
+            true => self
+                .statics
+                .turn_in_place(&mut frame_input.events, frame_input.device_pixel_ratio),
+            false => self
+                .statics
+                .control
+                .handle_events(&mut self.statics.camera, &mut frame_input.events),
+        };
         // User camera input cancels framing and row-follow; `panned` includes walk and dolly.
-        if panned || orbited {
+        if panned || steered {
             data.framing = false;
+            data.resetting_camera = false;
             data.row_follow_target = None;
         }
         let orbiting = matches!(data.gesture, Some(Gesture::Orbiting))
             && data.dimensions() == Dimensions::Three;
         self.statics
             .track_cursor(self.ctx.window.as_ref().unwrap(), orbiting);
+        let dimensions = data.dimensions();
+        if data.resetting_camera {
+            let home = match standing {
+                true => data.nexus_bounds(),
+                false => data.opening_bounds(),
+            };
+            data.resetting_camera = match home {
+                Some(home) => {
+                    let moving = self
+                        .statics
+                        .reset_view(&home, standing, dimensions, seconds);
+                    // What it frames is still settling.
+                    moving || !data.graph.is_settled()
+                }
+                None => false,
+            };
+        }
         if data.framing {
             // Every frame: the layout is still moving. Arrivals first, then the selection.
             data.framing = match data.arrival_bounds() {
                 Some(bounds) => {
                     // Held after the camera catches up: the arrival is still moving.
-                    self.statics.ease_to_frame(&bounds, seconds);
+                    self.statics.bring_into_view(&bounds, standing, seconds);
                     true
                 }
                 None => match data.framing_bounds() {
                     Some(bounds) => {
-                        let easing = self.statics.ease_to_frame(&bounds, seconds);
+                        let easing = self.statics.bring_into_view(&bounds, standing, seconds);
                         // The tree is still spreading.
                         easing || (data.selected.is_none() && !data.graph.is_settled())
                     }
@@ -141,16 +174,19 @@ impl App {
             data.row_follow_target = Some(world);
         }
         // A framing move owns the camera while it runs.
-        let following_row = self.statics.follow_hovered_row(
-            (self.overlay.as_ref().unwrap().row_follow && !data.framing)
+        let row_world =
+            (self.overlay.as_ref().unwrap().row_follow && !data.framing && !data.resetting_camera)
                 .then(|| {
                     data.row_follow_target
                         .and_then(|world| data.world_at(world))
                 })
-                .flatten(),
-            data.dimensions(),
-            seconds,
-        );
+                .flatten();
+        let following_row = match standing {
+            true => row_world.is_some_and(|at| self.statics.turn_toward(at, seconds)),
+            false => self
+                .statics
+                .follow_hovered_row(row_world, dimensions, seconds),
+        };
 
         data.pull_grabbed_node(&self.statics.camera);
         data.receive_atlas(seconds, ctx, self.overlay.as_ref().unwrap().gui.context());
@@ -185,6 +221,7 @@ impl App {
             data.aim_glow(&self.statics.camera);
         }
 
+        data.aim_horizon_marker(&self.statics.camera);
         if let Some(texture) = data.backdrop.texture.as_mut() {
             texture.transformation = panorama_transform(
                 frame_input.viewport,
@@ -209,7 +246,8 @@ impl App {
             render_counted(&screen, camera, pictures.chain(data.detail.drawn()))
         });
         self.stats.timed("lines", ctx, || {
-            render_counted(&screen, camera, data.edges.into_iter().chain(&data.dashes))
+            let lines = data.edges.into_iter().chain(&data.dashes);
+            render_counted(&screen, camera, lines.chain(data.drawn_horizon_marker()))
         });
         // Nothing while nothing is selected, the clear included.
         self.stats.timed("lit", ctx, || {
@@ -238,13 +276,14 @@ impl App {
         // Row-follow keeps easing after its rotation is too small to invalidate the billboards.
         let moving = moved
             || panned
-            || orbited
+            || steered
             // The switch needs the frame it moves in.
             || dollied
             || walking
             || following_row
             || self.veil > 0.0
             || data.framing
+            || data.resetting_camera
             || data.gesture.is_some()
             || !data.graph.is_settled();
         self.still_seconds = match moving {

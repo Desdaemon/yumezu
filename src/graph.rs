@@ -164,23 +164,48 @@ impl AppEntities {
         self.graph.parameters().dimensions
     }
 
-    /// Masses and reaches together because the knob means one thing: a hub that pushes its
-    /// neighbours harder needs the room to push them into. See [`node_mass`] and [`edge_reach`].
+    /// Whether every world but the Nexus is laid out on the 3D sky.
+    pub(super) fn on_sky(&self) -> bool {
+        self.arrangement == Arrangement::Orbital
+    }
+
+    /// Masses and leads together because the hub-push knob means one thing: a hub that pushes its
+    /// neighbours harder needs the room to push them into. Levels and leads also follow the
+    /// arrangement, and on the 3D sky the push and lead shrink with how small a
+    /// world looks from the Nexus. See [`node_mass`], [`shell_level`], [`sky_distance`] and
+    /// [`edge_lead`].
     ///
     /// The visit runs in slot order, which is world order: the nodes were added one per world and
     /// none is ever removed.
-    pub(super) fn apply_hub_push(&mut self) {
+    pub(super) fn set_masses_and_leads(&mut self) {
         let (radii, hub_repulsion) = (&self.node_radii, self.hub_repulsion);
+        let arrangement = self.arrangement;
+        let radial = arrangement.radial();
+        let branches = &self.branches;
+        let depths = match arrangement {
+            Arrangement::Tree | Arrangement::FlatTree => &self.start_depths,
+            _ => &self.shell_depths,
+        };
+        let distances = &mut self.sky_distances;
+        for (distance, &depth) in distances.iter_mut().zip(depths) {
+            *distance = sky_distance(depth, arrangement);
+        }
         let mut world = 0;
         self.graph.visit_nodes_mut(|mut node| {
-            node.set_mass(node_mass(radii[world], hub_repulsion));
+            node.set_mass(node_mass(radii[world], hub_repulsion) / distances[world]);
+            node.set_level(shell_level(depths[world], arrangement));
             world += 1;
         });
         self.graph.visit_edges_mut(|from, to, edge| {
-            edge.reach = edge_reach(
+            let (from, to) = (from.index(), to.index());
+            (edge.reach, edge.stiffness) = edge_lead(
                 edge.user_data,
-                radii[from.index()].max(radii[to.index()]),
+                crosses_branches(branches, from, to),
+                radii[from].max(radii[to]),
                 hub_repulsion,
+                radial,
+                shell_gap(depths[from], arrangement).min(shell_gap(depths[to], arrangement))
+                    / (distances[from] * distances[to]).sqrt(),
             );
         });
     }
@@ -328,21 +353,15 @@ impl AppEntities {
         let across = camera.right_direction().normalize();
         let mut nearest: Option<Grab> = None;
         self.graph.visit_nodes(|node| {
-            let position = world_pos(node.position());
+            let world = node.index().index();
+            let position = world_pos(node.position(), self.sky_distances[world]);
             let depth = (position - origin).dot(direction);
             if depth <= 0.0 || nearest.as_ref().is_some_and(|near| near.depth <= depth) {
                 return;
             }
             let pixel = camera.pixel_at_position(position);
-            let tolerance = GRAB_TOLERANCE_PIXELS.max(
-                0.5 * drawn_width(
-                    camera,
-                    across,
-                    self.node_radii[node.index().index()],
-                    position,
-                    pixel,
-                ),
-            );
+            let tolerance = GRAB_TOLERANCE_PIXELS
+                .max(0.5 * drawn_width(camera, across, self.node_radii[world], position, pixel));
             if pixel_distance(pixel, cursor) < tolerance {
                 nearest = Some(Grab {
                     node: node.index(),
@@ -364,7 +383,8 @@ impl AppEntities {
         };
         let target = camera.position_at_pixel(grab.cursor)
             + camera.view_direction_at_pixel(grab.cursor) * grab.depth;
-        let offset = sim_pos(target) - sim_pos(world_pos(position));
+        let distance = self.sky_distances[grab.node.index()];
+        let offset = sim_pos(target, distance) - Vec3::from(position);
         let force = offset * GRAB_STIFFNESS;
         let force = force * (GRAB_FORCE_MAX / force.magnitude().max(GRAB_FORCE_MAX));
         self.graph.apply_force(grab.node, force.into());
@@ -474,13 +494,22 @@ impl AppEntities {
         match self.selected {
             Some(Highlight::Route(world)) if !self.frame_route => vec![world],
             // Read only while framing, so clearing a selection keeps the view.
-            None => self
-                .opening
-                .map_or_else(Vec::new, |root| self.routes.subtree(root)),
+            None => self.opened_on(),
             // The chain home, not the subtree; directions fall through to be framed whole.
             Some(Highlight::Route(_)) => self.route(),
             _ => self.highlighted(),
         }
+    }
+
+    /// Every world the run's opening view frames: whatever the opening world leads to.
+    fn opened_on(&self) -> Vec<usize> {
+        self.opening
+            .map_or_else(Vec::new, |root| self.routes.subtree(root))
+    }
+
+    /// The sphere the opening view frames, whatever is selected. See [`Self::opened_on`].
+    pub(super) fn opening_bounds(&self) -> Option<Bounds> {
+        self.bounds_of(&world_mask(self.titles.len(), self.opened_on()))
     }
 
     /// `None` for a run with nothing selected and no world to open on.
@@ -519,6 +548,12 @@ impl AppEntities {
         self.bounds_of(&world_mask(self.titles.len(), arriving))
     }
 
+    /// `None` in a dump with no Nexus. See [`opening_room`].
+    pub(super) fn nexus_bounds(&self) -> Option<Bounds> {
+        let nexus = self.opening?;
+        self.bounds_of(&world_mask(self.titles.len(), [nexus]))
+    }
+
     pub(super) fn world_at(&self, world: usize) -> Option<Vec3> {
         let mut wanted = vec![false; self.titles.len()];
         *wanted.get_mut(world)? = true;
@@ -531,7 +566,8 @@ impl AppEntities {
         self.graph.visit_nodes(|node| {
             let world = node.index().index();
             if wanted[world] {
-                positions.push((world_pos(node.position()), self.node_radii[world]));
+                let position = world_pos(node.position(), self.sky_distances[world]);
+                positions.push((position, self.node_radii[world]));
             }
         });
 
@@ -612,7 +648,6 @@ impl AppEntities {
                 node.position(),
             );
         });
-        let parameters = self.graph.parameters();
         Before {
             unvisited: self
                 .unvisited
@@ -621,8 +656,7 @@ impl AppEntities {
                 .collect(),
             standing,
             layout: Layout {
-                dimensions: parameters.dimensions,
-                layered: parameters.dag_level_distance.is_some(),
+                arrangement: self.arrangement,
                 hub_repulsion: self.hub_repulsion,
                 link_reach: self.link_reach,
             },
