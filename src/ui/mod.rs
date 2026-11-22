@@ -155,8 +155,8 @@ pub(super) struct Overlay {
     /// What the running surface was built for. Kept because a surface is given its samples
     /// once, as it is built, so this is a choice only the next start can honour.
     antialias_running: bool,
-    /// Whether the view leans onto the world a row is pointing at. See [`leaning_remembered`].
-    pub(super) leaning: bool,
+    /// Whether the camera follows the world under a hovered row. See [`load_row_follow_setting`].
+    pub(super) row_follow: bool,
     skin: Skin,
 }
 
@@ -206,14 +206,13 @@ struct Panel {
     /// tab can say when the two have parted. See [`Overlay::antialias_running`].
     antialias: bool,
     antialias_running: bool,
-    /// What the switch was left set to. See [`leaning_remembered`].
-    leaning: bool,
+    /// Current switch value. See [`load_row_follow_setting`].
+    row_follow: bool,
     skin: Skin,
     /// A world picked out of one of the lists, to be routed to.
     chosen: Option<usize>,
-    /// A world a list row is pointing at, to be brightened where it sits in the graph. At most one:
-    /// the pointer is over one row or none.
-    pointed: Option<usize>,
+    /// World of the hovered list row, highlighted in the graph. At most one.
+    hovered_row: Option<usize>,
     /// What the menu, a link, or the rocker chose to light, if any of them chose at all. The inner
     /// `None` is the rocker's off position, which lights nothing.
     lit: Option<Option<Highlight>>,
@@ -322,7 +321,7 @@ impl Overlay {
         skin::install_font(gui.context());
         skin::apply_skin(gui.context(), skin);
         let scale = remembered_scale();
-        let remembered = antialias_remembered();
+        let remembered = load_antialias_setting();
         Self {
             gui,
             counted: Counted::default(),
@@ -337,7 +336,7 @@ impl Overlay {
             layout: Layout::remembered(),
             antialias: remembered,
             antialias_running: remembered,
-            leaning: leaning_remembered(),
+            row_follow: load_row_follow_setting(),
             skin,
         }
     }
@@ -377,10 +376,10 @@ impl Overlay {
             layered: parameters.dag_level_distance.is_some(),
             antialias: self.antialias,
             antialias_running: self.antialias_running,
-            leaning: self.leaning,
+            row_follow: self.row_follow,
             skin: self.skin,
             chosen: None,
-            pointed: None,
+            hovered_row: None,
             lit: None,
             menu_taken: false,
             wants_pointer: false,
@@ -497,7 +496,7 @@ impl Overlay {
             data.select(Some(Highlight::Route(world)));
         }
         // Every frame: unhovering clears it.
-        data.pointed = panel.pointed;
+        data.hovered_row = panel.hovered_row;
         // The English name is the join key with the account.
         if let Some(world) = panel.revealed {
             account.pretend(data.titles[world].en.clone());
@@ -529,16 +528,16 @@ impl Overlay {
 
         if panel.antialias != self.antialias {
             self.antialias = panel.antialias;
-            antialias_remember(self.antialias);
+            save_antialias_setting(self.antialias);
         }
         if panel.skin != self.skin {
             self.skin = panel.skin;
             skin::apply_skin(self.gui.context(), self.skin);
             self.skin.remember();
         }
-        if panel.leaning != self.leaning {
-            self.leaning = panel.leaning;
-            leaning_remember(self.leaning);
+        if panel.row_follow != self.row_follow {
+            self.row_follow = panel.row_follow;
+            save_row_follow_setting(self.row_follow);
         }
         // Stored only once the drag ends.
         self.ui_scale = panel.ui_scale;

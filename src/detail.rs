@@ -69,7 +69,7 @@ struct Unvisited {
     /// their bare nodes.
     quads: Option<Gm<RefilledMesh, ColorMaterial>>,
     /// The same picture again on the subset a selection lights, for the overlay -- see
-    /// [`Detail::drawn_lit`].
+    /// [`Detail::drawn_highlighted`].
     lit: Option<Gm<RefilledMesh, ColorMaterial>>,
 }
 
@@ -189,11 +189,14 @@ impl Detail {
     /// The overlay clears the depth [`Detail::drawn`] wrote, so a lit world it does not draw again
     /// falls back to the atlas quad underneath. Only the lit ones: a magnified world outside the
     /// selection belongs under the overlay.
-    pub fn drawn_lit<'a>(&'a self, lit: &'a [usize]) -> impl Iterator<Item = &'a dyn Object> {
+    pub fn drawn_highlighted<'a>(
+        &'a self,
+        lit: &'a [usize],
+    ) -> impl Iterator<Item = &'a dyn Object> {
         self.unvisited
             .lit
             .iter()
-            // An empty mesh would still answer [`Detail::drawn_lit`], costing a depth clear.
+            // Skip empty meshes, which would still trigger the overlay's depth clear.
             .filter(|quads| quads.instance_count() > 0)
             .map(|quads| quads as &dyn Object)
             .chain(

@@ -1,34 +1,30 @@
-# Everything this app says, in English.
+# English UI strings, loaded by `src/i18n.rs`.
 #
-# One message per thing said, named for what is said rather than for where it is said: a hint and
-# a label that happen to read alike are still two messages, because the next language is not
-# obliged to agree that they read alike. See `src/i18n.rs`, which is what reads this.
+# Message IDs name the meaning, not the location: a label and a hint with the same English text are
+# still two messages, since another language may word them differently.
 #
-# English is also the fallback: a message left out of another language is read from here instead,
-# so nothing here may be deleted while another file still leans on it.
+# English is the fallback for messages missing from other languages, so do not delete a message
+# another locale still relies on.
 
-# What this language calls itself, which is what the picker offers it as. Every language names
-# itself, so the picker reads the same whichever one is being spoken.
+# The language's name in itself (endonym), shown in the language picker.
 language-name = English
 language = Language
 
-# The look the windows are drawn in: the default, or one of the game's own skins.
-system-theme = System Theme
+# Window theme picker: the default theme, or one of the game's skins.
+system-theme = Theme
 system-theme-painted = Default
 
-## The frame before the graph: what is said while the world dump is on its way in, and what is
-## said if it never arrives. See `world::load`.
+## Loading screen, while the world data downloads. See `world::load`.
 
 dump-loading = Loading worlds…
-dump-failed = The worlds could not be loaded.
+dump-failed = Could not load worlds.
 
-# What the server says it is doing, for a run that arrived while it was still building its first
-# dump and has to wait it out. Named for the stage rather than for the server's own word for it:
-# see `world::building`, which is what maps the one onto the other.
-dump-task-changes = Querying for wiki updates...
-dump-task-worlds = Loading worlds...
-dump-task-connections = Loading connections...
-dump-task-assembling = Finalizing the graph...
+# Server progress while it builds its first data dump. IDs name the stage; `world::building` maps
+# the server's status to these.
+dump-task-changes = Querying for wiki updates…
+dump-task-worlds = Loading worlds…
+dump-task-connections = Loading connections…
+dump-task-assembling = Finalizing the graph…
 
 ## The browse window and its tabs.
 
@@ -36,26 +32,25 @@ tab-worlds = Worlds
 tab-authors = Authors
 tab-versions = Versions
 
-## The graph tab: what is on screen, and how it is laid out.
+## The graph tab: statistics and layout options.
 
 fps = { $fps } fps
 graph-size = { $worlds } worlds, { $connections } connections
 dimensions-2d = 2D
 dimensions-3d = 3D
-layered = layered
+layered = Layered
 layered-hint = Separates worlds into layers by depth
 search-worlds = Search worlds
 search-authors = Search authors
 search-versions = Search versions
 
-# How many worlds, said so that one of them does not read as a bug.
+# World count, with a singular form.
 worlds = { $count ->
         [one] 1 world
        *[other] { $count } worlds
     }
 
-# How much of a list is being shown. The plain form is for a list nothing has been typed into;
-# the cut form is what a search narrows it to.
+# List counts. The plain form is the unfiltered list; the `-cut` form is a search result.
 showing-authors = { $total ->
         [one] 1 author
        *[other] { $total } authors
@@ -89,36 +84,36 @@ junction = junction
 nothing-selected =
     Click a world to trace its route to the origin, or right-click it for more.
 
-## Where there is still somewhere to go, offered with nothing selected while a frontier is drawn.
+## Exploration hints, shown with nothing selected in frontier mode.
 
 untaken-worlds = Get hints
 untaken-worlds-hint = Revisit these worlds that connect to places you haven't been.
 
-## The route home.
+## The route to the origin world.
 
 route-length = { $count ->
         [one] 1 connection from the origin
        *[other] { $count } connections from the origin
     }
-# Directions between two worlds, which start somewhere other than the origin.
+# Directions between two worlds, starting somewhere other than the origin.
 path-length = { $count ->
         [one] 1 connection from { $origin }
        *[other] { $count } connections from { $origin }
     }
-no-path = No way there from here.
-# The ways a set of directions can be walked, by how much of the game the player already has.
+no-path = No path between these worlds.
+# Length of one alternative path in the directions window.
 way-length = { $count ->
         [one] 1 connection
        *[other] { $count } connections
     }
-# The window offering the ways between two worlds, which only opens where there are several.
+# Directions window title; the window opens only when there are several paths.
 directions-title = { $origin } → { $destination }
 way-via = via { $world }
 zoom-in-world = Zoom in on world
 zoom-out-route = Zoom out to route
 trace-route = Trace the route to this world
 
-## Ways on from a world.
+## Forward connections of a world.
 
 no-forward-connections = No forward connections.
 forward-connections = { $count ->
@@ -126,36 +121,35 @@ forward-connections = { $count ->
        *[other] { $count } forward connections
     }
 
-## What hangs off a world.
+## Descendants of a world.
 
 no-notable-descendants = No notable descendants.
 notable-descendants = Notable descendants:
-# One of those, with what makes it worth naming: whether it is a junction or a dead end, and how
-# many worlds it touches.
+# A notable descendant: `$kind` is junction or dead end, `$degree` its connection count.
 notable-world = { $title }  ({ $kind }, { $degree })
 
 ## The catalogs.
 
 author-row = { $name }  ({ $worlds })
-# A release, and what it brought. The dated form is the usual one; the wiki does not date a
-# handful of releases, and those are named without a date rather than with an empty one.
+# A game version and the worlds it added. A few versions have no release date on the wiki and use
+# the undated form.
 version-row = { $name }  ({ $worlds })
 version-row-dated = { $name }  ({ $worlds }, { $released })
 version-released = released { $released }
 version-added = { $worlds } added
 layer-depth = Depth { $depth }
 
-## The menu a right-click opens.
+## Context menu (right click).
 
 menu-descendants = Highlight descendants
-# Offered only while another world is lit, which is the far end of the directions.
+# Shown only while another world is selected; that world is the other end of the directions.
 menu-directions-to = Directions to here
 menu-directions-to-hint = Show the way here from { $world }.
 menu-directions-from = Directions from here
 menu-directions-from-hint = Show the way from here to { $world }.
 menu-open-wiki = Open on yume.wiki
 
-## The rocker in the corner.
+## The depth stepper ("rocker") in the corner.
 
 rocker-shallower = Shallower
 rocker-deeper = Deeper
@@ -163,36 +157,35 @@ refocus = Refocus on the selection
 
 ## The settings tab.
 
-hub-push = hub push
-hub-push-hint = Higher values push bigger worlds further from their neighbours
-link-reach = link reach
-link-reach-hint = How far apart two connected worlds may settle, in layers. One-way connections are not held to it
+hub-push = Hub repulsion
+hub-push-hint = How strongly larger worlds repel their neighbors
+link-reach = Max connection length
+link-reach-hint = How far apart connected worlds settle, in layers. One-way connections are exempt
 ui-scale = UI scale
-ui-scale-hint = How large the panel and its text are
-antialias = Smooth edges
-antialias-hint = Softens the edges of the graph. Turn this off first when the frame rate falls
-    short of your display.
-antialias-restart = Takes effect the next time yumezu starts.
+antialias = Anti-aliasing
+antialias-hint = Smooths jagged edges. Turn off first if the frame rate drops below your display's
+    refresh rate.
+antialias-restart = Restart yumezu to apply.
 
-leaning = lean onto pointed worlds
-leaning-hint = Pointing at a world in a list carries the view onto it, slowly. Turn it off to hold the view still.
+leaning = Follow worlds hovered in lists
+leaning-hint = Hovering a world in a list slowly centers the view on it.
 show-controls = Show controls
-clear-cache = Clear downloads
-clear-cache-hint = Deletes the world pictures kept between runs. The next look at a world fetches it again
-clear-cache-clearing = Clearing...
-clear-cache-done = Downloads cleared
-clear-cache-failed = The downloads could not be cleared
+clear-cache = Clear cache
+clear-cache-hint = Deletes cached world images. They are downloaded again when needed
+clear-cache-clearing = Clearing…
+clear-cache-done = Cache cleared
+clear-cache-failed = Could not clear the cache
 update-check = Check for updates
 update-check-hint = Checks GitHub for a release newer than this build
-update-checking = Checking...
-update-current = This is the newest release
+update-checking = Checking…
+update-current = Up to date
 update-ready = { $version } is available
-update-install = Install it
-update-installing = Downloading...
-update-installed = Installed. It takes effect the next time yumezu starts.
-update-failed = The update could not be fetched
-# A date and a time, in the reader's own zone. The parts arrive separately, each already padded to
-# the width it is always written at, because the order and the separators are the language's.
+update-install = Install update
+update-installing = Downloading…
+update-installed = Installed. Restart yumezu to apply.
+update-failed = Update failed
+# Local date and time. The parts arrive zero-padded and separate, so each language sets the order
+# and separators.
 stamp = { $year }-{ $month }-{ $day } { $hour }:{ $minute }
 
 last-update = Updated { $when }
@@ -200,16 +193,16 @@ last-update-hint = When this copy of the wiki data was built
 last-full-update = Last reset { $when }
 last-full-update-hint = Full resets read fresh data from the wiki and remove gaps left by renamed worlds.
 
-## The player's own game: signing in to YNOproject, and drawing only what that account has seen.
+## YNOproject sign-in and exploration progress.
 
 yno = Exploration progress
-yno-loading = Loading visited worlds...
+yno-loading = Loading visited worlds…
 yno-hint = Sign in to YNOproject to track your exploration progress.
 yno-user = Username
 yno-password = Password
 yno-sign-in = Sign in
 yno-sign-out = Sign out
-yno-working = Signing in...
+yno-working = Signing in…
 yno-signed-out = That session has expired. Sign in again.
 yno-signed-in = Signed in.
 yno-completion = { $seen } / { $worlds } ({ $percent }%)
@@ -220,13 +213,13 @@ yno-promise = Your username and password are used only to read your exploration 
 yno-source = Audit the YNOproject connection
 menu-reveal = [Debug] Reveal
 menu-reveal-hint = Mimics adding a new world from the Refresh button.
-frontier = Frontier Mode
+frontier = Frontier mode
 frontier-hint = Shows only worlds you've visited. Worlds one step beyond them appear as unvisited locations.
-unvisited-location = Unvisited Location
-github-link = yumezu on github
+unvisited-location = Unvisited location
+github-link = yumezu on GitHub
 download-for = Download for {$platform}
 
-## The controls, named on the first run.
+## Controls guide, shown on first run.
 
 guide-title = Controls
 guide-inputs = Inputs
@@ -252,21 +245,19 @@ guide-rocker-body =
 guide-got-it = Got it
 dont-show-again = Don't show this again
 
-## The app, offered to a page whose browser has a package to install.
+## Web build: link to the native app for the visitor's platform.
 
 download-app = Get the {$platform} app
 
 ## The wiki's maps.
 
-map-none = The wiki draws no map of this world.
+map-none = The wiki has no map of this world.
 map-missing = Map image not available.
-map-fit = Fit the whole map in the window
-map-maximize = Fill the screen with the window
-map-restore = Put the window back where it was
+map-fit = Fit map to window
+map-maximize = Maximize
+map-restore = Restore
 
-## What a connection demands of a player walking it.
-##
-## The bare name of the condition, for the connections the wiki writes no words of its own about.
+## Connection requirements. The bare form is for connections with no wiki detail text.
 
 gate-effect = needs an effect
 gate-chance = by chance
@@ -277,10 +268,8 @@ gate-exit-point = back out through a shortcut
 gate-dead-end = only from isolated section
 gate-isolated = leads to isolated section
 
-# And the same conditions where the wiki does write words. The effects are listed as the wiki
-# lists them, comma separated, rather than joined into a sentence: the wiki does not say whether
-# one of them is enough or all of them are needed, and an "and" or an "or" here would be this app
-# saying which.
+# The same requirements with wiki detail. Effects stay a comma-separated list: the wiki does not
+# say whether any or all are needed, so do not join them with "and" or "or".
 gate-effect-detail = needs { $effects }
 gate-chance-detail = { $chance } chance
 gate-seasonal-detail = { $season ->
@@ -291,9 +280,8 @@ gate-seasonal-detail = { $season ->
        *[other] in { $season }
     }
 
-## The game's thirty-five effects, in the order it gives them. The wiki writes a condition in
-## English alone, so these are what it already says; they are messages all the same, because a
-## language that names them differently has nowhere else to say so.
+## The game's 35 effects, in game order. The English values match the wiki's names; they are
+## messages so other languages can translate them.
 
 effect-separator = {", "}
 effect-bike = Bike
@@ -332,10 +320,8 @@ effect-crossing = Crossing
 effect-bunny-ears = Bunny Ears
 effect-dice = Dice
 
-## Which ways round a connection can be walked, in a sentence.
-##
-## The two directions are named apart, because a connection can be free one way and locked the
-## other, and a reader deciding whether to walk it needs the way they are about to walk.
+## Connection direction. The two directions are worded separately, since a connection can be
+## open one way and locked the other.
 
 walk-freely = freely
 walk-free-both = No restrictions.

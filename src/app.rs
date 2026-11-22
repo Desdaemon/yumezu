@@ -1,6 +1,5 @@
-//! The app the event loop drives: the window and the context everything else is built on, and the
-//! state a frame reads. See [`App::draw`] in [`frame`] for the main flow, [`loading`] for the
-//! frames before there is a graph, and [`pacing`] for when the next one is wanted.
+//! The winit application: window, GL context and per-frame state. See [`App::draw`] in [`frame`]
+//! for the main loop, [`loading`] for the loading screen, and [`pacing`] for redraw scheduling.
 
 use egui::special_emojis::GITHUB;
 use egui_material_icons::icons::*;
@@ -60,51 +59,44 @@ use world::{Conditions, Gate};
 
 use crate::i18n::speaking_japanese;
 
-/// Handed to `android_main` once, and the only way to reach anything the framework owns. Kept for
-/// [`thumbnails`]' assets and [`Overlay`]'s safe area and soft keyboard, which both want it later.
+/// The `AndroidApp` from `android_main`, needed later by [`thumbnails`] (assets) and [`Overlay`]
+/// (safe area, soft keyboard).
 #[cfg(target_os = "android")]
 static ANDROID: std::sync::OnceLock<winit::platform::android::activity::AndroidApp> =
     std::sync::OnceLock::new();
 
-/// Everything that wants the handle runs too late to be given it directly.
 #[cfg(target_os = "android")]
 pub(crate) fn use_android_app(app: winit::platform::android::activity::AndroidApp) {
     let _ = ANDROID.set(app);
 }
 
-/// Samples the surface is built with when the edges are being smoothed, and the frame's largest
-/// cost by a distance -- measured, by turning it off.
-///
-/// No setting exposes it: wasm ignores the count, WebGL taking a boolean and the browser choosing.
+/// MSAA sample count when antialiasing is on; by far the largest per-frame GPU cost (measured).
+/// Not user-configurable: WebGL only takes on/off, and the browser picks the count.
 const MULTISAMPLES: u8 = 4;
 
-/// Whether the surface smooths the edges, which is settled as it is built.
-///
-/// Multisampling rather than a pass over the finished frame: the graph is mostly thin
-/// high-contrast lines, and post-processing measured no cheaper on a desktop and dearer on
-/// the page.
-fn antialias_remembered() -> bool {
+/// Whether MSAA is on; read only when the surface is created. MSAA over post-process AA: the
+/// graph is thin high-contrast lines, and post-process AA measured no cheaper on desktop and slower
+/// on the web build.
+fn load_antialias_setting() -> bool {
     store::read_switch(ANTIALIAS).unwrap_or(true)
 }
 
-fn antialias_remember(on: bool) {
+fn save_antialias_setting(on: bool) {
     store::write_switch(ANTIALIAS, on);
 }
 
-/// Whether the view leans onto a world a list row is pointing at, which the panel's switch sets.
-/// Defaults to what the platform already says about motion. See [`AppStatics::lean_toward`].
-fn leaning_remembered() -> bool {
-    store::read_switch(LEANING).unwrap_or_else(|| !reduced_motion())
+/// Whether the camera follows the world under a hovered list row. Defaults to off when the user
+/// prefers reduced motion. See [`AppStatics::follow_hovered_row`].
+fn load_row_follow_setting() -> bool {
+    store::read_switch(ROW_FOLLOW).unwrap_or_else(|| !reduced_motion())
 }
 
-fn leaning_remember(on: bool) {
-    store::write_switch(LEANING, on);
+fn save_row_follow_setting(on: bool) {
+    store::write_switch(ROW_FOLLOW, on);
 }
 
-/// Whether the person prefers less movement than an app would otherwise make.
-///
-/// Only the page can answer: winit carries no such preference, and the APIs behind it are one per
-/// platform. Everywhere else the switch is the only answer, and it opens on.
+/// The `prefers-reduced-motion` media query. Web only: winit does not expose the OS setting, so
+/// native builds return false.
 fn reduced_motion() -> bool {
     #[cfg(target_family = "wasm")]
     {
@@ -127,40 +119,32 @@ pub(super) struct App {
     ctx: AppContext,
     data: Option<AppEntities>,
     statics: AppStatics,
-    /// Built with the graphics context, so it cannot exist before the window does.
+    /// Needs the GL context, so `None` until the window exists.
     overlay: Option<Overlay>,
-    /// What everything in [`AppEntities`] is built out of. See [`Dump`].
+    /// Source data for [`AppEntities`]. See [`Dump`].
     dump: Dump,
-    /// Whose game is being drawn: the whole of it, or as much as one player has seen. Kept beside
-    /// the dump because it is the other thing the entities are built out of. See [`App::build`].
+    /// The YNO account; its progress filters the graph while the frontier switch is on. See
+    /// [`App::build`].
     yno: yno::Account,
-    /// How far into the code the keys typed at the graph have got. See [`world::Code`].
+    /// Progress through the secret key code. See [`world::Code`].
     code: world::Code,
-    /// Whether it has been typed, which every dump fetched after it is read under: a retry must
-    /// not read those worlds back out again.
+    /// Whether the code was entered; later dump fetches, retries included, keep its worlds.
     revealed: bool,
-    /// What the graph being replaced was, held between the frame that throws it away and the one
-    /// that builds the next out of it. `None` at every other moment. See [`Before`].
+    /// The previous graph, kept only between teardown and the rebuild that animates from it. See
+    /// [`Before`].
     before: Option<Before>,
     building: Building,
-    /// What was lit when the drawing surface was last given back, to light again once there is a
-    /// graph to light it in.
-    ///
-    /// Kept outside [`AppEntities`], which a phone drops every time the app leaves the screen --
-    /// see [`App::release`]. The layout is built afresh, so the camera is sent to it again.
+    /// Selection saved across an Android suspend, which drops [`AppEntities`] (see
+    /// [`App::release`]). Restored on rebuild, and the camera re-frames it.
     selected: Option<Highlight>,
-    /// The world the link opens on, until there is a graph to find it in. Taken by the first
-    /// [`App::build`], which turns it into a selection like any other.
+    /// World named in the URL; the first [`App::build`] turns it into a selection.
     opening_on: Option<String>,
-    /// The line the loading frame was last showing, held so the fade does not change it on the
-    /// way out. See [`App::veil`].
+    /// Last loading-screen message, kept so it does not change during the fade-out. See
+    /// [`App::veil`].
     said: String,
-    /// How much of the loading frame is still on screen, 1 for all of it and 0 for none.
-    ///
-    /// Written back to 1 by every [`App::draw_loading`], so a run that waits again fades again.
+    /// Loading-screen opacity, 1 to 0. Reset to 1 by every [`App::draw_loading`].
     veil: f32,
-    /// When the frame just drawn wants the next one. Read by the event loop, which is where the
-    /// request is turned into a wait. See [`Wanted`].
+    /// When the next frame is due; the event loop turns it into a wait. See [`Wanted`].
     wanted: Wanted,
     frame_requested: bool,
     still_seconds: f32,
@@ -169,149 +153,123 @@ pub(super) struct App {
 
 struct AppEntities {
     graph: Graph,
-    /// Held here rather than beside the camera, so rebuilding the graph drops the gesture along
-    /// with the node index it names.
+    /// Here, not in [`AppStatics`], so a rebuild drops it with the node index it refers to.
     gesture: Option<Gesture>,
-    /// Kept so a restart can carry on drawing from the same sequence.
+    /// Kept so a layout restart continues the same random sequence.
     rng: Rng,
     routes: world::Routes,
-    /// Indexed like the nodes. Only the overlay reads them. See [`world::Title`].
+    /// Indexed by node; UI only. See [`world::Title`].
     titles: Vec<world::Title>,
-    /// Per world, in the order the wiki lists them and empty for the worlds it draws none of. Only
-    /// the overlay reads them.
+    /// Per world, in wiki order; empty when the wiki has no map. UI only.
     maps: Vec<Vec<world::Map>>,
-    /// Busiest first, which is also what [`Highlight::Author`] indexes. See
-    /// [`world::Dump::authors`].
+    /// Most worlds first; indexed by [`Highlight::Author`]. See [`world::Dump::authors`].
     authors: Vec<world::Author>,
     author_of: Vec<usize>,
-    /// Newest first, each carrying what it added. What [`Highlight::Version`] indexes, and what
-    /// the catalog lists.
+    /// Game versions, newest first, with the worlds each added. Indexed by
+    /// [`Highlight::Version`].
     versions: Vec<world::Version>,
-    /// What is lit. Everything off the highlight is dimmed.
+    /// The current highlight; everything else is dimmed.
     selected: Option<Highlight>,
-    /// The ways [`Highlight::Path`] found, freest first and never two the same. Empty for every
-    /// other selection, and for a pair with no way between them.
+    /// Distinct paths for [`Highlight::Path`], least restricted first. Empty otherwise or when
+    /// no path exists.
     ways: Vec<world::Way>,
-    /// Which of `ways` is drawn and read out. See [`AppEntities::take_way`].
+    /// Index of the displayed path in `ways`. See [`AppEntities::take_way`].
     way: usize,
-    /// The world the Eyeball Bomb effect gets a player back to from anywhere, which the ways
-    /// between two worlds are walked with. See [`world::hub_world`].
+    /// Where the Eyeball Bomb effect teleports the player; used by pathfinding. See
+    /// [`world::hub_world`].
     hub: Option<usize>,
-    /// The depth of the furthest world the origin can reach, which is the last layer the rocker
-    /// can step to.
+    /// Maximum depth reachable from the origin; the depth stepper's upper bound.
     deepest: u32,
-    /// Where the right button went down, while it is still down. The button both pans and opens
-    /// the menu, and only the travel between press and release tells those apart.
+    /// Right-button press position while held. Right drag pans and right click opens the menu;
+    /// drag distance tells them apart.
     right_press: Option<PhysicalPoint>,
-    /// Drawn by the overlay, which also closes it once one of its entries is taken.
+    /// Open context menu; the UI closes it when an entry is chosen.
     menu: Option<ContextMenu>,
-    /// Where the pointer last was with nothing pressed, in physical pixels, and what the hover
-    /// test found there. `None` off the window or over the panel, and always on a touch screen: a
-    /// finger never moves without pressing.
+    /// Unpressed cursor position in physical pixels, and the node hit-tested under it. `None`
+    /// outside the window, over the panel, and always on touch screens.
     cursor: Option<PhysicalPoint>,
     hover: Option<usize>,
-    /// The world a list row is pointing at, brightened where it sits in the graph and
-    /// cleared as soon as the pointer leaves the row. Only ever one: see `Panel::pointed`.
-    pointed: Option<usize>,
-    /// The world the view is leaning onto, which outlives the pointing that set it. `None`
-    /// once the person has taken the camera back. See [`AppStatics::lean_toward`].
-    leaning_at: Option<usize>,
-    /// Per world, every connection it has and which ways round it can be walked. The lines are
-    /// built from it, and the panel reads a world's ways on out of it.
+    /// World of the hovered list row, highlighted in the graph. See `Panel::hovered_row`.
+    hovered_row: Option<usize>,
+    /// The world row-follow moves toward; kept after the hover ends, cleared when the user moves
+    /// the camera. See [`AppStatics::follow_hovered_row`].
+    row_follow_target: Option<usize>,
+    /// Per world, its connections and their directions. Feeds the edge meshes and the panel.
     connections: Vec<Vec<world::Step>>,
-    /// Per world, how many other worlds it connects to: the degree of the graph as drawn, which is
-    /// what tells a junction from a dead end. Only the overlay reads it.
+    /// Node degree in the drawn graph. UI only.
     degrees: Vec<usize>,
-    /// At most `UNTAKEN_WORLDS` worlds, the ones with the most ways out nobody has taken first.
-    /// Empty in a run drawing the whole game, which is what settles whether the panel offers the
-    /// list. See [`Highlight::Untaken`].
+    /// Up to `UNTAKEN_WORLDS` worlds with the most unexplored exits, most first. Empty without a
+    /// frontier filter, which hides the list. See [`Highlight::Untaken`].
     untaken: Vec<usize>,
-    /// The world a run opens framed on, with everything behind it: `None` in a dump that does not
-    /// hold it, which opens on the camera's own pose instead. See [`opening_room`].
+    /// World the camera frames at startup, with its subtree; `None` if the dump lacks it, which
+    /// keeps the default camera pose. See [`opening_room`].
     opening: Option<usize>,
-    /// Cleared once the camera arrives at the selected route, or as soon as the person takes the
-    /// camera back.
+    /// Whether the camera is moving to frame the selection; cleared on arrival or user input.
     framing: bool,
-    /// Whether a framed route is framed whole rather than on the world at its end. Held across
-    /// selections, being a way of looking rather than a fact about one route.
+    /// Frame the whole route instead of its last world. Persists across selections.
     frame_route: bool,
     /// Connection colors before a selection dims them, so clearing one restores the distance ramp.
     edge_colors: Vec<Srgba>,
     /// Per node, the half-height of its quad, from how much of the graph hangs off it.
     node_radii: Vec<f32>,
     arrivals: Arrivals,
-    /// The panel's setting for how much of a world's size goes into how hard it pushes. See
-    /// [`node_mass`].
+    /// UI setting: how much subtree size adds to a node's repulsion. See [`node_mass`].
     hub_repulsion: f32,
-    /// The panel's setting for how far a connection may stretch, in layers. Held here because the
-    /// simulation knows it only as the distance the layer spacing turns it into. See
-    /// `LINK_REACH_DEFAULT`.
+    /// UI setting: maximum edge length in layers. The simulation only stores it converted to
+    /// distance. See `LINK_REACH_DEFAULT`.
     link_reach: f32,
     descendant_counts: Vec<u32>,
-    /// Drawn as a screen-filling quad before the graph. Not a [`Gm`] like the rest: it has no
-    /// geometry of its own, only the material [`apply_screen_material`] stretches over the window.
+    /// Full-screen background, drawn first via [`apply_screen_material`]; a material, not a [`Gm`].
     backdrop: ColorMaterial,
-    /// The worlds: a picture of each on a camera-facing quad. Drawn only once the atlas they
-    /// sample has arrived, there being nothing to sample until then.
+    /// World thumbnails on billboard quads. Drawn once the atlas has loaded.
     thumbnails: Gm<RefilledMesh, ColorMaterial>,
-    /// One world's thumbnail again, blended over the node it is already drawn on to brighten it.
-    /// Drawn only while something is [`AppEntities::pointed`] at. See [`AppEntities::aim_glow`].
+    /// Additive copy of the hovered row's thumbnail, drawn over its node while
+    /// [`AppEntities::hovered_row`] is set. See [`AppEntities::aim_glow`].
     glow: Gm<Mesh, ColorMaterial>,
     edges: Gm<RefilledMesh, ColorMaterial>,
-    /// `EDGE_DASHES` per one-way connection, standing in for a solid line. See
-    /// [`AppEntities::march_dashes`].
+    /// One-way edges, drawn as animated dashes. See [`AppEntities::march_dashes`].
     dashes: Gm<RefilledMesh, DashMaterial>,
-    /// The CPU copy, which [`AppEntities::gather_lit`] copies the lit slots out of.
+    /// CPU-side instances; source for [`AppEntities::copy_highlighted_instances`].
     thumbnail_instances: Instances,
-    /// Only the two-way connections: the one-way ones are in `dash_instances` instead. Both are
-    /// filled in the graph's own edge order, so an edge always reaches the same slot.
+    /// Two-way edges only; one-way edges are in `dash_instances`. Both are in graph edge order, so
+    /// an edge's slot is stable.
     edge_instances: Instances,
     dash_instances: Instances,
-    /// What a selection lights, drawn again over the finished scene so the layout cannot bury it.
-    /// See [`AppEntities::gather_lit`].
-    lit_thumbnails: Gm<RefilledMesh, ColorMaterial>,
-    lit_edges: Gm<RefilledMesh, ColorMaterial>,
-    /// Apart from `lit_edges` so a lit one-way connection still reads as one-way: the overlay's
-    /// solid lines carry no dash material.
-    lit_dashes: Gm<RefilledMesh, DashMaterial>,
-    /// Compacted copies of the lit slots of the buffers above, rather than world-indexed as those
-    /// are: nothing but the overlay's own draw reads them.
-    lit_thumbnail_instances: Instances,
-    lit_edge_instances: Instances,
-    lit_dash_instances: Instances,
-    /// Which slots the overlay copies, decided where the lighting itself is decided. See
-    /// [`AppEntities::repaint`].
-    lit_nodes: Vec<usize>,
-    lit_lines: Vec<usize>,
-    lit_dashed: Vec<usize>,
-    /// Whether [`AppEntities::repaint`] has changed an instance colour since the last frame was
-    /// built. A highlight moves no node, so nothing else in a settled graph would say so.
+    /// Highlighted instances, redrawn on top of the scene so nothing occludes them. See
+    /// [`AppEntities::copy_highlighted_instances`].
+    highlight_thumbnails: Gm<RefilledMesh, ColorMaterial>,
+    highlight_edges: Gm<RefilledMesh, ColorMaterial>,
+    /// Separate from `highlight_edges` so highlighted one-way edges stay dashed.
+    highlight_dashes: Gm<RefilledMesh, DashMaterial>,
+    /// Compacted copies of the highlighted slots, not indexed by world.
+    highlight_thumbnail_instances: Instances,
+    highlight_edge_instances: Instances,
+    highlight_dash_instances: Instances,
+    /// Highlighted slot indices, set by [`AppEntities::repaint`].
+    highlight_nodes: Vec<usize>,
+    highlight_lines: Vec<usize>,
+    highlight_dashed: Vec<usize>,
+    /// Set when [`AppEntities::repaint`] changed a color, which forces a redraw of a settled graph.
     recolored: bool,
-    /// The world [`AppEntities::aim_glow`] last stood the glow quad over, which tells a pointer
-    /// that moved between rows from one that did not move at all.
+    /// World the glow quad was last placed on by [`AppEntities::aim_glow`]; detects hover changes.
     glowing: Option<usize>,
-    /// The thumbnail atlas, from the request through to the pictures being on screen. See
-    /// [`Atlas`].
+    /// Thumbnail atlas loading state. See [`Atlas`].
     atlas: Atlas,
-    /// The same atlas as the versions tab's catalog draws out of. `None` until it resolves, and forever
-    /// if it cannot be had.
+    /// The atlas as the versions tab uses it; `None` until loaded, or if loading failed.
     sheet: Option<thumbnails::Sheet>,
-    /// `None` for a world the player has not been to, which wears the placeholder instead. See
+    /// Atlas cell per world; `None` for unvisited worlds, which use the placeholder. See
     /// [`thumbnails::cells`].
     cells: Vec<Option<usize>>,
-    /// The worlds drawn from the whole placeholder picture rather than from their cell of the
-    /// atlas. Empty in a run drawing the whole game. See [`AppEntities::place_unvisited`].
+    /// Worlds drawn with the placeholder image. Empty without a frontier filter. See
+    /// [`AppEntities::place_unvisited`].
     unvisited: Vec<usize>,
-    /// The quads those are drawn on: the nodes' own, lifted toward the camera. Kept rather than
-    /// built each frame, being one allocation the size of the frontier.
+    /// Their quads, offset toward the camera. Reused across frames to avoid reallocating.
     unvisited_quads: Instances,
-    lit_unvisited_quads: Instances,
+    highlight_unvisited_quads: Instances,
     detail: detail::Detail,
-    /// How far the dashes have marched, in world units. Wrapped rather than
-    /// counted up, so it stays exact however long the app runs.
+    /// Dash animation offset in world units; wrapped so it keeps f32 precision.
     dash_phase: f32,
-    /// The rotation that stood the quads square to the camera when their transformations were
-    /// last built: a turned camera rebuilds them even though nothing in the layout has moved.
+    /// Billboard rotation at the last rebuild; a camera rotation triggers a rebuild.
     billboard: Mat4,
 }
 #[derive(Default)]
@@ -321,16 +279,13 @@ struct AppContext {
     fig: Option<FrameInputGenerator>,
 }
 
-/// Whether the edges are smoothed. See [`antialias_remembered`].
+/// Settings key. See [`load_antialias_setting`].
 const ANTIALIAS: &str = "antialias";
-/// Whether the view leans onto a pointed world. See [`leaning_remembered`].
-const LEANING: &str = "leaning";
+/// Settings key for row-follow; the old name is kept so saved settings survive.
+const ROW_FOLLOW: &str = "leaning";
 impl ApplicationHandler for App {
-    /// Makes a timed wake-up one-shot.
-    ///
-    /// winit re-arms a `WaitUntil` whose deadline has passed rather than dropping it, so the loop
-    /// spins on it until a frame replaces it -- and a hidden tab is served no animation frames, so
-    /// that frame can be a long way off.
+    /// Turns a timed wake-up into a one-shot. winit re-arms an expired `WaitUntil`, which would
+    /// busy-loop until the next frame, and a hidden tab gets no animation frames.
     fn new_events(
         &mut self,
         event_loop: &winit::event_loop::ActiveEventLoop,
@@ -375,16 +330,14 @@ impl ApplicationHandler for App {
             event_loop.create_window(window_builder).unwrap(),
         );
     }
-    /// Only a phone ever calls this. See [`App::release`].
+    /// Android only. See [`App::release`].
     fn suspended(&mut self, _: &winit::event_loop::ActiveEventLoop) {
         self.release();
     }
-    /// The last call the loop makes, and the only point at which two things can still be dropped
-    /// safely: the meshes and the overlay's painter free buffers of a graphics context that is
-    /// gone after it, and the clipboard's Wayland connection would otherwise be torn down against
-    /// a freed display, taking the process with it.
+    /// The last safe point to drop GL resources and the clipboard: afterwards the GL context is
+    /// gone, and dropping the clipboard against a freed Wayland display crashes.
     fn exiting(&mut self, _: &winit::event_loop::ActiveEventLoop) {
-        self.call_the_camera_out();
+        self.log_camera_pose();
         self.release();
     }
     fn window_event(
@@ -393,14 +346,14 @@ impl ApplicationHandler for App {
         _: winit::window::WindowId,
         event: WindowEvent,
     ) {
-        // The loop keeps delivering events between a suspend and the next resume.
+        // Events still arrive between suspend and resume.
         let Some(fig) = self.ctx.fig.as_mut() else {
             return;
         };
         // See [`App::request_a_frame`].
         let wants_a_frame = !matches!(event, WindowEvent::RedrawRequested);
         fig.handle_winit_window_event(&event);
-        // What the panel took is settled in `Overlay::run`.
+        // Whether egui consumed the event is decided in `Overlay::run`.
         if let Some(overlay) = self.overlay.as_mut() {
             overlay
                 .gui
@@ -417,7 +370,7 @@ impl ApplicationHandler for App {
                 let rebuilt = self.draw();
                 // Before the swap, which waits for the display.
                 self.stats.frame(began.elapsed(), rebuilt);
-                // After the frame, so the page always shows one or the other.
+                // After drawing, so the page is never blank between placeholder and canvas.
                 #[cfg(target_family = "wasm")]
                 take_placeholder();
                 self.ctx.wctx.as_ref().unwrap().swap_buffers().unwrap();
@@ -426,14 +379,14 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
-            // A key held while focus leaves never comes back up.
+            // A key held while focus is lost never gets a release event.
             WindowEvent::Focused(false) => {
                 self.statics.walk = Walk::default();
                 self.statics.focused = false;
             }
             WindowEvent::Focused(true) => self.statics.focused = true,
             WindowEvent::Touch(touch) => {
-                // A second finger makes it a pinch.
+                // A second finger turns the gesture into a pinch.
                 if self.statics.touches.track(&touch)
                     && let Some(data) = self.data.as_mut()
                 {
@@ -449,17 +402,13 @@ impl ApplicationHandler for App {
 }
 
 impl App {
-    /// Lets go of everything built on the window, innermost first: buffers have to be freed while
-    /// the context still holds them, and the context before the window it was made against.
-    ///
-    /// Also called by [`App::suspended`], Android taking the surface back whenever the app leaves
-    /// the screen. [`App::resumed`] then rebuilds by the same path a first start takes, so the
-    /// layout is fresh.
+    /// Drops everything built on the window, innermost first: buffers before the GL context,
+    /// the context before the window. On Android, [`App::resumed`] rebuilds from scratch.
     fn release(&mut self) {
         // See [`App::selected`].
         self.selected = self.data.as_ref().and_then(|data| data.selected);
         self.data = None;
-        // A dropped `gui::Gui` leaks the context's buffers.
+        // Dropping `gui::Gui` without `destroy` leaks GL buffers.
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.gui.destroy();
         }
@@ -468,10 +417,9 @@ impl App {
         self.ctx.wctx = None;
         self.ctx.window = None;
     }
-    /// Says where the camera was left, in the syntax of the literal in [`App::new`]: the opening
-    /// angle is picked by turning the graph and copying this line out of the log. The layout is
-    /// the same every run -- see `scatter` -- but only within the dimensions it was read in.
-    fn call_the_camera_out(&self) {
+    /// Logs the camera pose as the `vec3` literals in [`App::new`], for picking the startup view.
+    /// The layout is deterministic (see `scatter`), but only per dimension count.
+    fn log_camera_pose(&self) {
         let (eye, at) = (self.statics.camera.position(), self.statics.camera.target());
         let dimensions = self
             .data
@@ -503,12 +451,12 @@ impl App {
         // Read before the control moves into place.
         let centre = camera.target();
         let control = OrbitControl::new(centre, 1.0, 800.0);
-        // It publishes where the app reads it.
+        // Fire and forget: the task stores its result where the app reads it.
         drop(fetch::spawn(world::load_pages()));
 
         Self {
             ctx: AppContext::default(),
-            // Started now: the fetch is a run's longest wait and needs no window.
+            // Start now: the fetch is the longest wait and does not need the window.
             dump: Dump::Loading(fetch::spawn(world::load(false))),
             yno: yno::Account::new(),
             code: world::Code::default(),
@@ -521,7 +469,7 @@ impl App {
                 cursor: CursorIcon::Default,
                 touches: Touches::default(),
                 walk: Walk::default(),
-                lean_aim: centre,
+                row_follow_aim: centre,
                 focused: true,
             },
             data: None,
@@ -543,7 +491,7 @@ impl App {
         let surface = SurfaceSettings {
             vsync: !profile::unlocked(),
             // One read for both surface and overlay. See [`Overlay::antialias_running`].
-            multisamples: match antialias_remembered() {
+            multisamples: match load_antialias_setting() {
                 true => MULTISAMPLES,
                 false => 0,
             },
@@ -559,20 +507,17 @@ impl App {
         self.request_a_frame();
     }
 
-    /// Builds the graph, and does nothing until there is a dump to build it out of: [`App::draw`]
-    /// calls this again once one has landed.
-    ///
-    /// On a phone it is also called by every [`App::reset`], the entities all being built on a
-    /// graphics context the framework takes back whenever the app leaves the screen.
+    /// Builds the graph once the dump has loaded; [`App::draw`] retries until then. On Android,
+    /// every [`App::reset`] calls it, since a suspend drops the GL context.
     fn build(&mut self) {
         let Dump::Ready(dump) = &self.dump else {
             return;
         };
-        // Otherwise the whole game flashes on screen. See `yno::Account::settled`.
+        // Wait for the YNO account, or the unfiltered graph flashes. See `yno::Account::settled`.
         if !self.yno.settled() {
             return;
         }
-        // The frontier drops worlds, renumbering the connections.
+        // Filtering to the frontier removes worlds and renumbers the connections.
         let frontier;
         let dump = match self.yno.frontier() {
             Some(visited) => {
@@ -582,15 +527,15 @@ impl App {
             None => dump,
         };
         let ctx = self.ctx.wctx.as_ref().unwrap();
-        // An opening graph's camera is not yet the person's.
+        // On the first build the user has not touched the camera yet.
         let opening = self.before.is_none();
         let mut data = entities(dump, self.before.take().as_ref(), ctx);
-        // A run opening in two dimensions never passes through the switch that squares the camera.
+        // Starting in 2D skips the toggle that would face the camera at the plane.
         if opening && data.dimensions() == Dimensions::Two {
             self.statics.face_plane();
         }
 
-        // A stale link opens on the tree.
+        // An unknown world in the URL falls back to the default view.
         if let Some(name) = self.opening_on.take()
             && self.selected.is_none()
         {
@@ -599,11 +544,11 @@ impl App {
                 log::warn!("no world is named {name}");
             }
         }
-        // A new layout, so the old camera aim means nothing.
+        // Reselect in the new layout; the old camera aim no longer applies.
         if self.selected.is_some() {
             data.select(self.selected);
         }
-        // Snapped: there is no view yet to travel from.
+        // Snap: there is no previous view to animate from.
         if let Some(bounds) = (opening && data.selected.is_none())
             .then(|| data.framing_bounds())
             .flatten()
@@ -615,8 +560,7 @@ impl App {
     }
 }
 
-/// What [`profile`] is where it is not compiled: the same surface, doing nothing, so no caller
-/// branches on the build.
+/// No-op [`profile`] when the feature is off, so callers need no `cfg`.
 #[cfg(not(feature = "profile"))]
 mod profile {
     use three_d::Context;
@@ -662,8 +606,7 @@ mod profile {
     }
 }
 
-/// What [`update`] is on the two targets that do not install packages: the page reloads and the
-/// apk goes through the store, so neither has anything to replace.
+/// No-op [`update`] on web and Android, which update through a reload and the app store.
 #[cfg(any(target_family = "wasm", target_os = "android"))]
 mod update {
     pub(super) fn controls(_ui: &mut egui::Ui) {}

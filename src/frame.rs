@@ -108,10 +108,10 @@ impl App {
             .statics
             .control
             .handle_events(&mut self.statics.camera, &mut frame_input.events);
-        // A hand on the camera abandons framing and lean; `panned` includes walk and dolly.
+        // User camera input cancels framing and row-follow; `panned` includes walk and dolly.
         if panned || orbited {
             data.framing = false;
-            data.leaning_at = None;
+            data.row_follow_target = None;
         }
         let orbiting = matches!(data.gesture, Some(Gesture::Orbiting))
             && data.dimensions() == Dimensions::Three;
@@ -136,14 +136,17 @@ impl App {
             };
         }
 
-        // Latched: a lean outlives the hover, and only taking the camera stops it.
-        if let Some(world) = data.pointed {
-            data.leaning_at = Some(world);
+        // Latched: row-follow continues after the hover ends, until the user moves the camera.
+        if let Some(world) = data.hovered_row {
+            data.row_follow_target = Some(world);
         }
         // A framing move owns the camera while it runs.
-        let leaning = self.statics.lean_toward(
-            (self.overlay.as_ref().unwrap().leaning && !data.framing)
-                .then(|| data.leaning_at.and_then(|world| data.world_at(world)))
+        let following_row = self.statics.follow_hovered_row(
+            (self.overlay.as_ref().unwrap().row_follow && !data.framing)
+                .then(|| {
+                    data.row_follow_target
+                        .and_then(|world| data.world_at(world))
+                })
                 .flatten(),
             data.dimensions(),
             seconds,
@@ -177,8 +180,8 @@ impl App {
             data.place_unvisited(ctx, &self.statics.camera);
         }
         // The pointer can move the glow between rows while nothing else moves.
-        if moved || data.glowing != data.pointed {
-            data.glowing = data.pointed;
+        if moved || data.glowing != data.hovered_row {
+            data.glowing = data.hovered_row;
             data.aim_glow(&self.statics.camera);
         }
 
@@ -210,12 +213,12 @@ impl App {
         });
         // Nothing while nothing is selected, the clear included.
         self.stats.timed("lit", ctx, || {
-            if !data.lit_anything() {
+            if !data.has_highlight_overlay() {
                 return 0;
             }
             // Clearing depth lets the overlay depth-test its own worlds; a TBDR pays little.
             screen.clear(ClearState::depth(1.0));
-            render_counted(&screen, camera, data.drawn_lit())
+            render_counted(&screen, camera, data.drawn_highlighted())
         });
         // Last of the scene: it brightens whichever pass drew its world.
         self.stats.timed("glow", ctx, || {
@@ -232,14 +235,14 @@ impl App {
 
         // Last, after everything that can start motion.
         let data = self.data.as_ref().unwrap();
-        // A lean keeps easing after its turn is too small to date a billboard.
+        // Row-follow keeps easing after its rotation is too small to invalidate the billboards.
         let moving = moved
             || panned
             || orbited
             // The switch needs the frame it moves in.
             || dollied
             || walking
-            || leaning
+            || following_row
             || self.veil > 0.0
             || data.framing
             || data.gesture.is_some()

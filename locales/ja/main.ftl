@@ -1,11 +1,7 @@
-# Everything this app says, in Japanese.
+# Japanese UI strings. Most world names already come in Japanese from the wiki: see
+# `World::title_jp`.
 #
-# Yume 2kki is a Japanese game and the wiki publishes a Japanese name for nearly every world, so
-# this is the language most of the graph is already written in: see `World::title_jp`.
-#
-# A message left out here is read from `en-US` instead, so this file may be short of that one
-# without anything going blank. What it may not do is disagree with it about what a message is
-# named or which values it takes.
+# Missing messages fall back to `en-US`. Message IDs and variables must match `en-US`.
 
 language-name = 日本語
 language = 言語
@@ -13,7 +9,7 @@ language = 言語
 system-theme = システムテーマ
 system-theme-painted = 標準
 
-## The frame before the graph.
+## Loading screen.
 
 dump-loading = 読み込み中...
 dump-failed = 世界のデータを読み込めませんでした。
@@ -63,7 +59,7 @@ nothing-selected = マップをクリックすると原点までの経路をた�
 untaken-worlds = ヒントを見る
 untaken-worlds-hint = まだ訪れていない場所につながるマップを、もう一度訪れてみましょう。
 
-## The route home.
+## The route to the origin world.
 
 route-length = 原点から { $count } 接続
 path-length = { $origin } から { $count } 接続
@@ -75,12 +71,12 @@ zoom-in-world = マップを中心に
 zoom-out-route = 経路全体を表示
 trace-route = このマップへの経路をたどる
 
-## Ways on from a world.
+## Forward connections of a world.
 
 no-forward-connections = 降下接続はありません。
 forward-connections = 降下接続 { $count }本
 
-## What hangs off a world.
+## Descendants of a world.
 
 no-notable-descendants = 主要な後続マップはありません。
 notable-descendants = 主要な後続マップ:
@@ -95,7 +91,7 @@ version-released = { $released } 実装
 version-added = { $worlds } 追加
 layer-depth = 深さ { $depth }
 
-## The menu a right-click opens.
+## Context menu (right click).
 
 menu-descendants = 後続マップを強調
 menu-directions-to = ここへの経路
@@ -104,7 +100,7 @@ menu-directions-from = ここからの経路
 menu-directions-from-hint = ここから { $world } までの経路を表示
 menu-open-wiki = wikiで見る
 
-## The rocker in the corner.
+## The depth stepper ("rocker") in the corner.
 
 rocker-shallower = 浅く
 rocker-deeper = 深く
@@ -117,7 +113,6 @@ hub-push-hint = 値が大きいほど、接続の多いマップが周囲から�
 link-reach = 接続の長さ
 link-reach-hint = つながった2つのマップが離れられる距離を階層数で表します。一方通行の接続はこの制限を受けません
 ui-scale = UIの大きさ
-ui-scale-hint = パネルと文字の大きさ
 antialias = 輪郭をなめらかに
 antialias-hint = グラフの輪郭をなめらかにします。フレームレートがディスプレイに届かないときは、
     まずこれを切ってください。
@@ -173,7 +168,7 @@ unvisited-location = 未訪問の場所
 github-link = GitHubで見る
 download-for = {$platform}版をダウンロード
 
-## The controls, named on the first run.
+## Controls guide, shown on first run.
 
 guide-title = 操作方法
 guide-inputs = 入力
@@ -196,7 +191,7 @@ guide-rocker-body = 右下の2つの矢印は、グラフの層をまとめて�
 guide-got-it = わかった
 dont-show-again = 今後は表示しない
 
-## The app, offered to a page whose browser has a package to install.
+## Web build: link to the native app for the visitor's platform.
 
 download-app = {$platform}アプリを入手
 
@@ -208,7 +203,7 @@ map-fit = マップ全体をウィンドウに収める
 map-maximize = ウィンドウを画面いっぱいに広げる
 map-restore = ウィンドウを元の大きさに戻す
 
-## What a connection demands of a player walking it.
+## Connection requirements.
 
 gate-effect = エフェクトが必要
 gate-chance = 確率あり
@@ -229,8 +224,8 @@ gate-seasonal-detail = { $season ->
        *[other] { $season } のみ
     }
 
-## エフェクト. The game's own names, in the order it gives them. A list is separated the way a
-## Japanese list is, rather than with the comma the wiki writes.
+## エフェクト: the game's names, in game order. Lists use the Japanese separator, not the
+## wiki's comma.
 
 effect-separator = 、
 effect-bike = バイク
@@ -269,7 +264,7 @@ effect-crossing = ふみきり
 effect-bunny-ears = うさみみ
 effect-dice = サイコロ
 
-## Which ways round a connection can be walked.
+## Connection direction.
 
 walk-freely = 自由に通行
 walk-free-both = 両方通行です。

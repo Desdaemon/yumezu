@@ -79,7 +79,7 @@ impl Panel {
                     .hover(walk_of(step)),
             );
             if row.hovered() {
-                self.pointed = Some(step.world);
+                self.hovered_row = Some(step.world);
             }
             if row.clicked() {
                 if read.selected == Some(lit) {
@@ -160,7 +160,7 @@ impl Panel {
     /// Every list of worlds in the panel is drawn through here, so all of them point alike. The
     /// exception is [`Self::forward_connections`], whose rows are connections.
     ///
-    /// [`Self::pointed`] is written rather than merged: egui hovers at most one row at a time.
+    /// [`Self::hovered_row`] is written rather than merged: egui hovers at most one row at a time.
     pub(super) fn world_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -169,7 +169,7 @@ impl Panel {
     ) -> egui::Response {
         let row = ui.add(tile);
         if row.hovered() {
-            self.pointed = Some(world);
+            self.hovered_row = Some(world);
         }
         if row.clicked() {
             self.chosen = Some(world);
@@ -259,7 +259,7 @@ impl Panel {
                     }
                     Rows::Pointed => {
                         if ui.add(tile).contains_pointer() {
-                            self.pointed = Some(world);
+                            self.hovered_row = Some(world);
                         }
                     }
                 }

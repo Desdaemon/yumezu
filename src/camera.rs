@@ -17,12 +17,12 @@ const FRAMING_MARGIN: f32 = 1.1;
 /// and of the framing distance. The ease is asymptotic, so it needs a floor to stop at.
 const FRAMING_ARRIVAL_TOLERANCE: f32 = 0.01;
 
-/// Time constant of each of the lean's two eases, in milliseconds. Far longer than
-/// [`FRAMING_WINDOW_MS`]: a lean is only a row under the pointer, and should barely register.
-const LEAN_WINDOW_MS: f32 = 1200.0;
-/// How near its goal the lean has to be to stop, as a fraction of how far the camera stands off
-/// its centre, which keeps the floor the same size on screen however far out the view is.
-const LEAN_ARRIVAL_TOLERANCE: f32 = 0.001;
+/// Time constant of each of row-follow's two eases, in milliseconds. Much slower than
+/// [`FRAMING_WINDOW_MS`], so hovering a row barely moves the camera.
+const ROW_FOLLOW_WINDOW_MS: f32 = 1200.0;
+/// Stop distance for row-follow, as a fraction of the camera's distance from its target, so the
+/// threshold is constant in screen space.
+const ROW_FOLLOW_ARRIVAL_TOLERANCE: f32 = 0.001;
 pub(super) struct AppStatics {
     pub(super) control: OrbitControl,
     pub(super) camera: Camera,
@@ -33,9 +33,9 @@ pub(super) struct AppStatics {
     pub(super) cursor: CursorIcon,
     pub(super) touches: Touches,
     pub(super) walk: Walk,
-    /// What the orbit centre is easing onto, itself easing onto where the pointed world is. Two
-    /// eases in series, a single one being at its fastest the instant it starts.
-    pub(super) lean_aim: Vec3,
+    /// Intermediate target between the orbit centre and the hovered row's world. Two eases in
+    /// series start smoothly; a single ease is fastest at its first frame.
+    pub(super) row_follow_aim: Vec3,
     /// Whether the window is the one being typed at, which lets a settled layout stop being drawn
     /// rather than go on at [`pacing::IDLE_REDRAW_HZ`] for as long as the app is open.
     ///
@@ -304,22 +304,19 @@ impl AppStatics {
         self.stand_off(bounds.center, self.framing_distance(bounds.radius));
     }
 
-    /// Returns whether it still has ground to cover.
+    /// Eases the orbit centre toward the hovered row's world. Returns true while still moving.
     ///
-    /// In three dimensions the eye stays put and turns onto the world; a flat view is held square
-    /// to the plane and has no such turn to make, so there the eye travels with what it looks at.
-    ///
-    /// Nothing is given back when the pointing stops -- that would be the app moving the camera
-    /// at the one moment the person has taken it over.
-    pub(super) fn lean_toward(
+    /// In 3D the eye stays put and turns; in 2D the eye pans with the target. The camera does not
+    /// return when the hover ends, since the user may have taken control by then.
+    pub(super) fn follow_hovered_row(
         &mut self,
         at: Option<Vec3>,
         dimensions: Dimensions,
         dt: f32,
     ) -> bool {
         let Some(at) = at else {
-            // Primed, so the next lean starts from rest.
-            self.lean_aim = self.control.target;
+            // Reset so the next row-follow starts from rest.
+            self.row_follow_aim = self.control.target;
             return false;
         };
         let goal = match dimensions {
@@ -329,15 +326,15 @@ impl AppStatics {
         };
         // Against the goal: the first ease starts level with the centre and would read as arrived.
         if goal.distance(self.control.target)
-            < self.control.target.distance(self.camera.position()) * LEAN_ARRIVAL_TOLERANCE
+            < self.control.target.distance(self.camera.position()) * ROW_FOLLOW_ARRIVAL_TOLERANCE
         {
             return false;
         }
 
-        // Applied twice over: see [`Self::lean_aim`].
-        let step = fraction_covered(dt, LEAN_WINDOW_MS);
-        self.lean_aim += (goal - self.lean_aim) * step;
-        let travel = (self.lean_aim - self.control.target) * step;
+        // Applied twice over: see [`Self::row_follow_aim`].
+        let step = fraction_covered(dt, ROW_FOLLOW_WINDOW_MS);
+        self.row_follow_aim += (goal - self.row_follow_aim) * step;
+        let travel = (self.row_follow_aim - self.control.target) * step;
         match dimensions {
             Dimensions::Two => self.shift_view(travel),
             Dimensions::Three => {

@@ -1,82 +1,62 @@
-//! The graph as something drawn: the worlds, their connections, the dashes that march along the
-//! one-way ones, and the backdrop behind all of it. See [`entities`] and [`AppEntities`].
+//! Scene construction and per-frame GPU buffers: world thumbnails, edges, animated dashes on
+//! one-way edges, and the background. See [`entities`] and [`AppEntities`].
 
 use super::*;
 
 const EDGE_RADIUS: f32 = 0.05;
-/// World units rather than a share of the connection, which `layout::edge_reach` lets stretch as
-/// far as the layout wants. Against `NODE_LEAF_RADIUS` for scale.
+/// In world units, not a fraction of the edge, since `layout::edge_reach` lets edges stretch.
+/// Compare `NODE_LEAF_RADIUS` for scale.
 const EDGE_DASH_LENGTH: f32 = 1.0;
-/// Start of one dash to the start of the next; the gap is what is left over.
+/// Distance from one dash start to the next; the gap is the remainder.
 const EDGE_DASH_PERIOD: f32 = 3.0;
-/// Wider than a solid line because it is so much shorter: a dash as thin as the line it stands in
-/// for reads as a worn-away line rather than a mark travelling along one.
+/// Dash width relative to a solid edge; dashes as thin as the edge read as a broken line.
 const EDGE_DASH_WIDTH: f32 = 1.6;
-/// Slots a second: at `1.0` a dash takes a second to reach where the dash ahead of it started. The
-/// marching carries the direction, so nothing about a still frame points anywhere.
+/// Dash speed in world units per second. The animation is the only cue for edge direction.
 const EDGE_DASH_SPEED: f32 = 3.0;
-/// sRGB, which is what both the clear and [`panorama_texture`]'s glows over it want.
+/// sRGB, as both the clear color and [`panorama_tile`] expect.
 pub(super) const BACKGROUND_COLOR: [f32; 3] = [0.03, 0.03, 0.05];
-/// Side of the backdrop's repeating tile in texels, and the spacing of the lattice of glows inside
-/// it. Four glows lie across the tile, each with its own brightness, so it does not read as one
-/// cell stamped over and over. Its size on screen is [`PANORAMA_TILE_PIXELS`].
+/// Background tile size and glow spacing in texels: a 4×4 grid of glows with varied brightness,
+/// so the repetition is not obvious. Screen size is [`PANORAMA_TILE_PIXELS`].
 const PANORAMA_TILE_TEXELS: usize = 256;
 const PANORAMA_CELL_TEXELS: usize = 64;
-/// How far a glow reaches, in texels, and how sharply it fades over that reach. Most of a cell, so
-/// neighbouring glows almost meet.
+/// Glow radius in texels and falloff exponent; the radius almost reaches the neighbouring glows.
 const PANORAMA_GLOW_RADIUS_TEXELS: f32 = 52.0;
 const PANORAMA_GLOW_FALLOFF: f32 = 2.2;
-/// Which norm measures the distance to a glow's centre. Between the diamond a norm of 1 draws and
-/// the circle a norm of 2 draws, which is the rounded square of the reference backdrop.
+/// Lp norm for glow distance: 1.5 gives the rounded-square shape of the game's panoramas.
 const PANORAMA_GLOW_NORM: f32 = 1.5;
-/// Blue and dim on purpose: it has to stay visible past a graph whose own edges are only a little
-/// brighter, without competing with them.
+/// Dim blue, so it stays visible without competing with the edges.
 const PANORAMA_GLOW_COLOR: [f32; 3] = [3.0 / 255.0, 6.0 / 255.0, 42.0 / 255.0];
-/// Peak brightness per cell, as a fraction of [`PANORAMA_GLOW_COLOR`]. Irregular, and belonging to
-/// the tile rather than the screen, so the pattern repeats seamlessly.
+/// Peak brightness per cell as a fraction of [`PANORAMA_GLOW_COLOR`]; irregular but tileable.
 const PANORAMA_CELL_PEAKS: [[f32; 4]; 4] = [
     [0.55, 0.30, 0.85, 0.40],
     [0.35, 1.00, 0.45, 0.65],
     [0.90, 0.50, 0.70, 0.30],
     [0.40, 0.75, 0.35, 0.95],
 ];
-/// Side of the tile on screen, in logical pixels: independent of the texel size, so the backdrop
-/// keeps its scale on a high-density display rather than shrinking to half of it.
+/// Tile size on screen in logical pixels, so the background keeps its scale on HiDPI displays.
 const PANORAMA_TILE_PIXELS: f32 = 260.0;
-/// How far the backdrop slides, in tiles, per unit of the view direction's horizontal or vertical
-/// component.
-///
-/// Small on purpose: a panorama sits far enough away that a turn barely shifts it, and that faint
-/// drift is what makes the graph read as turning in front of a scene rather than a decal.
+/// Background parallax in tiles per unit of view direction x/y. Small, so the background reads as
+/// distant scenery rather than a decal.
 const PANORAMA_PARALLAX: f32 = 0.12;
-/// Brightness of the connection into a world with nothing behind it, against the one into the
-/// world the whole game is behind: the range the depth ramp is drawn over. See [`edge_colors`].
+/// Brightness of an edge into a leaf world; an edge into the world with the most descendants is
+/// 1.0. See [`edge_colors`].
 const EDGE_LEAF_BRIGHTNESS: f32 = 0.6;
-/// How far the connection colors move toward even apparent brightness: at 0 the ramp keeps its own
-/// stops, at 1 every stop takes the brightness of the dimmest.
-///
-/// The ramp is picked for hue, and hue drags brightness with it -- most of what the eye reads as
-/// brightness is the green channel, so the green stop looks glaring beside the magenta. Levelled
-/// far enough that no stop shouts, not so far that the ramp flattens.
+/// How far edge colors are equalized for luma: 0 keeps the ramp, 1 darkens every stop to the
+/// dimmest. At equal ramp weight the green stop reads much brighter than magenta.
 const EDGE_LUMINANCE_EVENNESS: f32 = 0.5;
-/// Warm and bright, for the edges of the route back to the origin world.
+/// Edges on the route back to the origin world.
 const ROUTE_COLOR: Srgba = Srgba::new(255, 242, 194, 255);
-/// The steps home from the world that was picked, told apart from the steps on into what hangs
-/// off it. Red rather than a second pale one: the two have to be read apart across a whole graph.
+/// Edges on the walked route home from the selected world; red to contrast with [`ROUTE_COLOR`].
 const ROUTE_HOME_COLOR: Srgba = Srgba::new(255, 58, 74, 255);
-/// Brightness left to everything off the highlighted route. Low enough to set the surrounding
-/// graph behind the route, high enough that it stays readable as context.
+/// Brightness of everything outside the highlight.
 const DIMMED_BRIGHTNESS: f32 = 0.25;
-/// How much of its own picture is added back over a world's node while a list row points at it.
-///
-/// Added rather than multiplied, a lit node already being painted white. High enough to pick the
-/// node out of a crowd, low enough that the screenshot is still a screenshot.
-const POINTED_BRIGHTNESS: f32 = 0.85;
-/// Deliberately off the distance ramp: the worlds the origin cannot reach are at no distance at
-/// all rather than at a large one, and reading them as the far end of the ramp would be a lie.
+/// Strength of the additive glow on the world of a hovered list row. Additive because a
+/// highlighted node is already full white.
+const HOVERED_ROW_BRIGHTNESS: f32 = 0.85;
+/// Gray, off the distance ramp: unreachable worlds have no distance, not a large one.
 const UNREACHED_COLOR: Srgba = Srgba::new(110, 110, 120, 255);
-/// Cuts the dashes out of a solid line as it is drawn, so one instance is a whole connection
-/// whatever its length and however many dashes fit along it.
+/// Material whose fragment shader, `dash.frag`, cuts dashes out of a ribbon, so one instance
+/// covers a whole edge.
 pub(super) struct DashMaterial {
     /// World units.
     phase: f32,
@@ -84,8 +64,8 @@ pub(super) struct DashMaterial {
 }
 
 impl Material for DashMaterial {
-    /// Borrowed: `EffectMaterialId` has no slot for a material from outside three-d, and it keys
-    /// the shader program cache. A second such material has to take a different one.
+    /// Borrowed ID: `EffectMaterialId` has no variant for custom materials and keys the shader
+    /// cache, so another custom material must borrow a different one.
     fn id(&self) -> EffectMaterialId {
         EffectMaterialId::WireframeMaterial
     }
@@ -114,24 +94,21 @@ impl Material for DashMaterial {
     }
 }
 
-/// How long the app waits before fetching the thumbnail atlas again, after a try that could not be
-/// had. Longer than the dump's retries because nothing waits on it: the graph draws without the
-/// pictures. See [`Atlas`].
+/// Atlas retry delay; longer than the dump's because the graph renders without thumbnails. See
+/// [`Atlas`].
 const ATLAS_RETRIED_AFTER_SECONDS: f32 = 10.0;
 
-/// Where the thumbnail atlas has got to: a state rather than a handle because a try that fails is
-/// retried. Modelled on [`Dump`], which waits the same way.
+/// Thumbnail atlas loading state machine, with retry; mirrors [`Dump`].
 pub(super) enum Atlas {
     Loading(fetch::Pending<Option<CpuTexture>>),
     /// Seconds until the next try.
     Waiting(f32),
-    /// On screen, or wrong-shaped and therefore never going to be: a mismatch between the atlas and
-    /// the dump is not something trying again can mend.
+    /// Loaded, or permanently mismatched with the dump (a retry cannot fix that).
     Settled,
 }
 
-/// A free function rather than a method: it reads the dump the app holds and hands back what the
-/// app is about to hold beside it, two borrows of one [`App`] a method could not take.
+/// Builds the scene from the dump. A free function because a method on [`App`] would need to
+/// borrow `App::dump` while assigning `App::data`.
 pub(super) fn entities(
     dump: &world::Dump,
     before: Option<&Before>,
@@ -141,11 +118,11 @@ pub(super) fn entities(
 
     let worlds = &dump.worlds;
     let connections = world::connections(worlds);
-    // One depth for the colors and the layered pins, so the two agree.
+    // One depth computation for both edge colors and DAG levels.
     let routes = world::routes_from(&connections, world::origin_world(worlds));
     let deepest = routes.depth.iter().flatten().copied().max().unwrap_or(0);
     let furthest = deepest.max(1) as f32;
-    // Logarithmic, so a deep world with a handful behind it nears a shallow one with a hundred.
+    // Node radius grows with log(descendant count).
     let descendants = routes.descendant_counts();
     let node_radii: Vec<_> = descendants
         .iter()
@@ -177,7 +154,7 @@ pub(super) fn entities(
         settle_after: Some(SETTLE_AFTER),
         ..Default::default()
     });
-    // Positions come from `scatter`, so the initial layout and a restart agree.
+    // Positions come from `scatter`, so the initial layout and a restart match.
     let nodes: Vec<_> = routes
         .depth
         .iter()
@@ -191,17 +168,17 @@ pub(super) fn entities(
             })
         })
         .collect();
-    // Counted off the edges' connections, so the panel's junctions match the drawn lines.
+    // Degrees counted from the drawn edges, so the panel matches the graph.
     let mut degrees = vec![0; worlds.len()];
     let mut dashed = 0;
     for (from, steps) in connections.iter().enumerate() {
         for step in steps {
-            // Once per connection: two springs on one pair would pull twice as hard.
+            // One edge per pair; two springs would double the pull.
             if step.world <= from {
                 continue;
             }
             let to = step.world;
-            // From the leavable end, so the dashes march the walkable way.
+            // Orient one-way edges in their walkable direction, so the dashes move that way.
             let (from, to) = if step.out.is_none() && step.back.is_some() {
                 (to, from)
             } else {
@@ -225,7 +202,7 @@ pub(super) fn entities(
         }
     }
 
-    // The connections wear the depth; the worlds carry pictures.
+    // Depth colors go on the edges; nodes show thumbnails.
     let depth_colors: Vec<_> = routes
         .depth
         .iter()
@@ -235,7 +212,7 @@ pub(super) fn entities(
         })
         .collect();
     let edge_colors = edge_colors(&graph, &routes, &descendants, &depth_colors);
-    // Read off the same source as the atlas cells.
+    // Same source as the atlas cells.
     let unvisited: Vec<usize> = worlds
         .iter()
         .enumerate()
@@ -243,22 +220,22 @@ pub(super) fn entities(
         .collect();
     let titles: Vec<world::Title> = worlds.iter().map(world::World::titles).collect();
     let maps: Vec<Vec<world::Map>> = worlds.iter().map(world::World::maps).collect();
-    // Both group every world, too costly per frame.
+    // Computed once: both iterate every world.
     let (authors, author_of) = dump.authors();
     let versions = dump.versions();
     let thumbnail_instances = white_instances(worlds.len());
-    // Colors are left to the first `repaint`, which owns the same fan-out.
+    // Colors are set by the first `repaint`.
     let solid = edge_colors.len() - dashed;
     let edge_instances = white_instances(solid);
     let dash_instances = Instances {
-        // Not a texture: each line's length, for `dash.frag`.
+        // Repurposed: carries each edge's length to `dash.frag`.
         texture_transformations: Some(vec![Mat3::identity(); dashed]),
         ..white_instances(dashed)
     };
     let backdrop = ColorMaterial {
         color: Srgba::WHITE,
         texture: Some(Texture2DRef::from_cpu_texture(ctx, &panorama_tile())),
-        // Colour only, no depth test: the quad stands in for the cleared background.
+        // Color only, no depth test: the quad replaces the clear color.
         render_states: RenderStates {
             write_mask: WriteMask::COLOR,
             depth_test: DepthTest::Always,
@@ -266,20 +243,20 @@ pub(super) fn entities(
         },
         is_transparent: false,
     };
-    // Billboarded quads: a cube's uvs spread the image across six faces.
+    // Billboarded quads, not cubes: cube UVs would spread the image over six faces.
     let thumbnails = Gm::new(
         RefilledMesh::new(ctx, &thumbnail_instances, &CpuMesh::square()),
         ColorMaterial::default(),
     );
-    // Additive, since a lit node is already white.
+    // Additive, since a highlighted node is already white.
     let glow = Gm::new(
         Mesh::new(ctx, &CpuMesh::square()),
         ColorMaterial {
-            color: scaled(Srgba::WHITE, POINTED_BRIGHTNESS),
+            color: scale_brightness(Srgba::WHITE, HOVERED_ROW_BRIGHTNESS),
             texture: None,
             render_states: RenderStates {
                 write_mask: WriteMask::COLOR,
-                // Equal passes: the lift toward the camera is under one depth step here.
+                // LessOrEqual: the offset toward the camera is smaller than one depth step.
                 depth_test: DepthTest::LessOrEqual,
                 blend: Blend::ADD,
                 ..Default::default()
@@ -299,23 +276,23 @@ pub(super) fn entities(
         RefilledMesh::ribbon(ctx, &dash_instances, true),
         dash_material(),
     );
-    // The overlay comes first by a depth clear, not by skipping the depth test.
-    let (lit_thumbnail_instances, lit_edge_instances) =
+    // The highlight overlay draws on top via a depth clear, not by disabling the depth test.
+    let (highlight_thumbnail_instances, highlight_edge_instances) =
         (Instances::default(), Instances::default());
-    let lit_thumbnails = Gm::new(
-        RefilledMesh::new(ctx, &lit_thumbnail_instances, &CpuMesh::square()),
+    let highlight_thumbnails = Gm::new(
+        RefilledMesh::new(ctx, &highlight_thumbnail_instances, &CpuMesh::square()),
         ColorMaterial::default(),
     );
-    let lit_edges = Gm::new(
-        RefilledMesh::ribbon(ctx, &lit_edge_instances, false),
+    let highlight_edges = Gm::new(
+        RefilledMesh::ribbon(ctx, &highlight_edge_instances, false),
         ColorMaterial::default(),
     );
-    let lit_dash_instances = Instances {
+    let highlight_dash_instances = Instances {
         texture_transformations: Some(Vec::new()),
         ..Default::default()
     };
-    let lit_dashes = Gm::new(
-        RefilledMesh::ribbon(ctx, &lit_dash_instances, true),
+    let highlight_dashes = Gm::new(
+        RefilledMesh::ribbon(ctx, &highlight_dash_instances, true),
         dash_material(),
     );
 
@@ -349,8 +326,8 @@ pub(super) fn entities(
         menu: None,
         cursor: None,
         hover: None,
-        pointed: None,
-        leaning_at: None,
+        hovered_row: None,
+        row_follow_target: None,
         framing: arriving,
         frame_route: false,
         ways: Vec::new(),
@@ -372,15 +349,15 @@ pub(super) fn entities(
         thumbnail_instances,
         edge_instances,
         dash_instances,
-        lit_thumbnails,
-        lit_edges,
-        lit_dashes,
-        lit_thumbnail_instances,
-        lit_edge_instances,
-        lit_dash_instances,
-        lit_nodes: Vec::new(),
-        lit_lines: Vec::new(),
-        lit_dashed: Vec::new(),
+        highlight_thumbnails,
+        highlight_edges,
+        highlight_dashes,
+        highlight_thumbnail_instances,
+        highlight_edge_instances,
+        highlight_dash_instances,
+        highlight_nodes: Vec::new(),
+        highlight_lines: Vec::new(),
+        highlight_dashed: Vec::new(),
 
         recolored: true,
         glowing: None,
@@ -389,13 +366,13 @@ pub(super) fn entities(
         cells: worlds.iter().map(world::World::cell).collect(),
         unvisited: unvisited.clone(),
         unvisited_quads: white_instances(unvisited.len()),
-        lit_unvisited_quads: Instances {
+        highlight_unvisited_quads: Instances {
             colors: Some(Vec::new()),
             ..Default::default()
         },
         detail: detail::Detail::new(
             worlds.iter().map(|world| world.image.clone()).collect(),
-            // Or one shrinking out from under a placeholder.
+            // Also needed when an arriving world's placeholder is shrinking away.
             !unvisited.is_empty() || arrivals.turning(),
         ),
         dash_phase: 0.0,
@@ -404,23 +381,20 @@ pub(super) fn entities(
     };
     data.repaint();
     scatter(&mut data);
-    // A replacement graph carries on from where the previous one stood.
+    // A rebuilt graph starts from the previous graph's positions.
     if let Some(before) = before {
         resume_from(&mut data, &before.standing);
     }
     data
 }
 impl AppEntities {
-    /// Rewrites the instance colors for the current selection: the steps between the lit worlds
-    /// are lit brighter still, and everything else is dimmed.
-    ///
-    /// Uploads on its own rather than waiting for [`Self::rebuild_instances`], which a settled
-    /// graph never reaches.
+    /// Recolors instances for the current selection: route edges brightest, everything else
+    /// dimmed. Uploads directly, since a settled graph never calls [`Self::rebuild_instances`].
     pub(super) fn repaint(&mut self) {
         self.recolored = true;
         let on_route = world_mask(self.titles.len(), self.highlighted());
-        let lit = self.selected.is_some();
-        // Per world on the walk, the world it is stepped to from.
+        let highlighting = self.selected.is_some();
+        // Per world on the walked route, the next world.
         let mut walked = vec![None; self.titles.len()];
         if matches!(
             self.selected,
@@ -434,15 +408,15 @@ impl AppEntities {
 
         let colors = self.thumbnail_instances.colors.as_mut().unwrap();
         for (color, &on_route) in colors.iter_mut().zip(&on_route) {
-            *color = if !lit || on_route {
+            *color = if !highlighting || on_route {
                 Srgba::WHITE
             } else {
                 dim(Srgba::WHITE)
             };
         }
-        self.lit_nodes.clear();
-        if lit {
-            self.lit_nodes.extend(
+        self.highlight_nodes.clear();
+        if highlighting {
+            self.highlight_nodes.extend(
                 on_route
                     .iter()
                     .enumerate()
@@ -456,9 +430,10 @@ impl AppEntities {
             self.dash_instances.colors.as_mut().unwrap(),
             &self.edge_colors,
         );
-        let (lit_lines, lit_dashed) = (&mut self.lit_lines, &mut self.lit_dashed);
-        lit_lines.clear();
-        lit_dashed.clear();
+        let (highlight_lines, highlight_dashed) =
+            (&mut self.highlight_lines, &mut self.highlight_dashed);
+        highlight_lines.clear();
+        highlight_dashed.clear();
         // Same order and split as [`Self::rebuild_instances`] and [`Self::march_dashes`].
         let (mut edge, mut line, mut dash) = (0, 0, 0);
         self.graph.visit_edges(|a, b, data| {
@@ -466,7 +441,7 @@ impl AppEntities {
             let step = routes[a] == Some(b) || routes[b] == Some(a);
             let (color, shown) = match self.selected {
                 None => (base[edge], false),
-                // Only the line itself, not the step home from either end.
+                // Only this edge, not the route home from either end.
                 Some(Highlight::Connection(at, far)) => {
                     if (a, b) == (at, far) || (a, b) == (far, at) {
                         (ROUTE_COLOR, true)
@@ -474,11 +449,11 @@ impl AppEntities {
                         (dim(base[edge]), false)
                     }
                 }
-                // Never a canonical step, so it keeps its distance color.
+                // Edges within a layer are never tree edges, so they keep their depth color.
                 Some(Highlight::Layer(_)) if on_route[a] && on_route[b] => (base[edge], true),
-                // Or a shortcut across the route would light up.
+                // Checked before the tree-edge case, or a shortcut across the route would light up.
                 Some(_) if walked[a] == Some(b) || walked[b] == Some(a) => (ROUTE_HOME_COLOR, true),
-                // Directions do not follow the canonical tree.
+                // Paths do not follow the canonical tree.
                 Some(Highlight::Path(..)) => (dim(base[edge]), false),
                 Some(_) if step && on_route[a] && on_route[b] => (ROUTE_COLOR, true),
                 Some(_) => (dim(base[edge]), false),
@@ -486,13 +461,13 @@ impl AppEntities {
             if data.user_data {
                 dashed[dash] = color;
                 if shown {
-                    lit_dashed.push(dash);
+                    highlight_dashed.push(dash);
                 }
                 dash += 1;
             } else {
                 solid[line] = color;
                 if shown {
-                    lit_lines.push(line);
+                    highlight_lines.push(line);
                 }
                 line += 1;
             }
@@ -504,12 +479,12 @@ impl AppEntities {
         self.edges.set_colors(self.edge_instances.colors.as_deref());
         self.dashes
             .set_colors(self.dash_instances.colors.as_deref());
-        self.gather_lit();
+        self.copy_highlighted_instances();
     }
 
-    /// Called wherever the scene's own buffers are written, this being a copy of their lit slots
-    /// and nothing more.
-    fn gather_lit(&mut self) {
+    /// Copies the highlighted slots into the overlay buffers; call after any write to the main
+    /// buffers.
+    fn copy_highlighted_instances(&mut self) {
         let gather = |instances: &mut Instances, from: &[&Instances], at: &[&[usize]]| {
             instances.transformations.clear();
             let colors = instances.colors.get_or_insert_default();
@@ -526,72 +501,71 @@ impl AppEntities {
             }
         };
         gather(
-            &mut self.lit_edge_instances,
+            &mut self.highlight_edge_instances,
             &[&self.edge_instances],
-            &[&self.lit_lines],
+            &[&self.highlight_lines],
         );
         gather(
-            &mut self.lit_dash_instances,
+            &mut self.highlight_dash_instances,
             &[&self.dash_instances],
-            &[&self.lit_dashed],
+            &[&self.highlight_dashed],
         );
         gather(
-            &mut self.lit_thumbnail_instances,
+            &mut self.highlight_thumbnail_instances,
             &[&self.thumbnail_instances],
-            &[&self.lit_nodes],
+            &[&self.highlight_nodes],
         );
         let picked = |from: Option<&Vec<Mat3>>, at: &[usize]| {
             from.map(|from| at.iter().map(|&at| from[at]).collect())
         };
-        self.lit_thumbnail_instances.texture_transformations = picked(
+        self.highlight_thumbnail_instances.texture_transformations = picked(
             self.thumbnail_instances.texture_transformations.as_ref(),
-            &self.lit_nodes,
+            &self.highlight_nodes,
         );
-        self.lit_dash_instances.texture_transformations = picked(
+        self.highlight_dash_instances.texture_transformations = picked(
             self.dash_instances.texture_transformations.as_ref(),
-            &self.lit_dashed,
+            &self.highlight_dashed,
         );
-        self.lit_edges.set_instances(&self.lit_edge_instances);
-        self.lit_dashes.set_instances(&self.lit_dash_instances);
-        self.lit_thumbnails
-            .set_instances(&self.lit_thumbnail_instances);
+        self.highlight_edges
+            .set_instances(&self.highlight_edge_instances);
+        self.highlight_dashes
+            .set_instances(&self.highlight_dash_instances);
+        self.highlight_thumbnails
+            .set_instances(&self.highlight_thumbnail_instances);
     }
 
-    /// The overlay, pictures before lines for the reason the scene's own passes are in that order:
-    /// the depth a picture writes drops the lines behind it unshaded.
-    ///
-    /// Empty while nothing is selected, and the pictures wait for the atlas as
-    /// [`Self::drawn_thumbnails`] does.
-    pub(super) fn drawn_lit(&self) -> impl Iterator<Item = &dyn Object> {
-        let pictures = self.lit_thumbnails.material.texture.is_some();
+    /// Highlight overlay objects, thumbnails before edges so their depth culls hidden edge
+    /// fragments. Empty without a selection; thumbnails wait for the atlas.
+    pub(super) fn drawn_highlighted(&self) -> impl Iterator<Item = &dyn Object> {
+        let pictures = self.highlight_thumbnails.material.texture.is_some();
         [
-            (pictures && !self.lit_nodes.is_empty()).then_some(&self.lit_thumbnails as &dyn Object),
-            (!self.lit_lines.is_empty()).then_some(&self.lit_edges as &dyn Object),
-            (!self.lit_dashed.is_empty()).then_some(&self.lit_dashes as &dyn Object),
+            (pictures && !self.highlight_nodes.is_empty())
+                .then_some(&self.highlight_thumbnails as &dyn Object),
+            (!self.highlight_lines.is_empty()).then_some(&self.highlight_edges as &dyn Object),
+            (!self.highlight_dashed.is_empty()).then_some(&self.highlight_dashes as &dyn Object),
         ]
         .into_iter()
         .flatten()
-        .chain(self.detail.drawn_lit(&self.lit_nodes))
+        .chain(self.detail.drawn_highlighted(&self.highlight_nodes))
     }
 
-    /// Whether the overlay has anything at all to draw, and so whether the depth it wants out of
-    /// the way is worth clearing.
-    pub(super) fn lit_anything(&self) -> bool {
-        self.drawn_lit().next().is_some()
+    /// Whether the overlay draws anything, i.e. whether its depth clear is needed.
+    pub(super) fn has_highlight_overlay(&self) -> bool {
+        self.drawn_highlighted().next().is_some()
     }
 
     fn edge_radius(&self) -> f32 {
         EDGE_RADIUS
     }
 
-    /// `laid_out` is whether the layout itself moved. The node quads face the camera, so a turn
-    /// dates them alone: the lines are only where the worlds are.
+    /// `laid_out`: whether node positions changed. Billboards depend on camera rotation, edges only
+    /// on positions.
     pub(super) fn rebuild_instances(&mut self, camera: &Camera, laid_out: bool) {
         self.rebuild_nodes(camera);
         if laid_out {
             self.rebuild_edges();
         }
-        self.gather_lit();
+        self.copy_highlighted_instances();
     }
 
     fn rebuild_nodes(&mut self, camera: &Camera) {
@@ -601,7 +575,7 @@ impl AppEntities {
         let arrivals = &self.arrivals;
         self.graph.visit_nodes(|node| {
             let world = node.index().index();
-            // Everything hung off the node quads copies this size.
+            // Placeholder, glow and detail quads all copy this size.
             let radius = self.node_radii[world] * arrivals.grown(world);
             thumbnails.push(node_quad(world_pos(node.position()), billboard, radius));
         });
@@ -610,8 +584,8 @@ impl AppEntities {
         self.billboard = billboard;
     }
 
-    /// The dash lines are laid here with the solid ones rather than once a frame: `DashMaterial`
-    /// cuts the dashes out as it draws, so nothing about them moves unless the layout does.
+    /// Dash ribbons are rebuilt with the solid edges, not per frame: `DashMaterial` animates them
+    /// in the shader.
     fn rebuild_edges(&mut self) {
         let radius = self.edge_radius();
         let arrivals = &self.arrivals;
@@ -636,14 +610,14 @@ impl AppEntities {
                 .min(arrivals.grown(b.index().index()));
             let one_way = data.user_data;
             let radius = grown * if one_way { dash_radius } else { radius };
-            // World to world: the opaque pictures write depth first and hide the line inside them.
+            // Center to center: the opaque thumbnails draw first and hide the edge ends.
             let placed = match span > 0.0 {
                 true => {
                     Mat4::from_translation(from)
                         * rotation_matrix_from_dir_to_dir(vec3(1.0, 0.0, 0.0), dir / span)
                         * Mat4::from_nonuniform_scale(span, radius, radius)
                 }
-                // Coincident worlds would make a NaN.
+                // Coincident nodes would divide by zero.
                 false => Mat4::from_scale(0.0),
             };
             match one_way {
@@ -662,14 +636,8 @@ impl AppEntities {
             .set_texture_transformations(self.dash_instances.texture_transformations.as_deref());
     }
 
-    /// Stands the placeholder over every world the player has not been to.
-    ///
-    /// Taken from the nodes' own quads rather than worked out again, so a placeholder is exactly
-    /// where and how big its world is, and dims with it. Lifted toward the camera as a magnified
-    /// picture is, coplanar quads otherwise leaving the depth test to pick per pixel.
-    ///
-    /// Every frame, like the magnified pictures: what it copies is rebuilt whenever the layout
-    /// moves, the camera turns, or a selection repaints.
+    /// Places the placeholder over every unvisited world, every frame. Copies the node quads, so it
+    /// matches their position, size and dimming, offset toward the camera to avoid z-fighting.
     pub(super) fn place_unvisited(&mut self, context: &Context, camera: &Camera) {
         if self.unvisited.is_empty() && !self.arrivals.turning() {
             return;
@@ -682,15 +650,15 @@ impl AppEntities {
             &mut self.unvisited_quads.transformations,
             self.unvisited_quads.colors.as_mut().unwrap(),
         );
-        let (lit_transformations, lit_colors) = (
-            &mut self.lit_unvisited_quads.transformations,
-            self.lit_unvisited_quads.colors.as_mut().unwrap(),
+        let (highlight_transformations, highlight_colors) = (
+            &mut self.highlight_unvisited_quads.transformations,
+            self.highlight_unvisited_quads.colors.as_mut().unwrap(),
         );
-        let lit_nodes = &self.lit_nodes;
+        let highlight_nodes = &self.highlight_nodes;
         transformations.clear();
         colors.clear();
-        lit_transformations.clear();
-        lit_colors.clear();
+        highlight_transformations.clear();
+        highlight_colors.clear();
         for world in wearing {
             let Some(node) = nodes.transformations.get(world) else {
                 continue;
@@ -698,33 +666,32 @@ impl AppEntities {
             let placed =
                 Mat4::from_translation(-forward * (self.node_radii[world] * detail::LIFT)) * node;
             let color = painted.map_or(Srgba::WHITE, |painted| painted[world]);
-            // `lit_nodes` is in world order.
-            if lit_nodes.binary_search(&world).is_ok() {
-                lit_transformations.push(placed);
-                lit_colors.push(color);
+            // `highlight_nodes` is in world order.
+            if highlight_nodes.binary_search(&world).is_ok() {
+                highlight_transformations.push(placed);
+                highlight_colors.push(color);
             }
             transformations.push(placed);
             colors.push(color);
         }
-        self.detail
-            .place_unvisited(context, &self.unvisited_quads, &self.lit_unvisited_quads);
+        self.detail.place_unvisited(
+            context,
+            &self.unvisited_quads,
+            &self.highlight_unvisited_quads,
+        );
     }
 
-    /// Every frame, unlike the rest of the geometry: the marching is the whole point of the
-    /// dashes, and a settled layout is exactly when it has to carry on regardless.
+    /// Advances the dash animation; runs every frame, even when the layout is settled.
     pub(super) fn march_dashes(&mut self, dt: f32) {
-        // Wrapped at one period so the phase keeps its precision.
+        // Wrapped at one period to keep f32 precision.
         self.dash_phase = (self.dash_phase + dt * EDGE_DASH_SPEED).rem_euclid(EDGE_DASH_PERIOD);
         self.dashes.material.phase = self.dash_phase;
-        self.lit_dashes.material.phase = self.dash_phase;
+        self.highlight_dashes.material.phase = self.dash_phase;
     }
 
-    /// Points the thumbnail quads at their own cells of the atlas once it has arrived, and hands
-    /// egui a copy for the catalog. Nothing is drawn until then.
-    ///
-    /// An atlas that could not be had is fetched again after [`ATLAS_RETRIED_AFTER_SECONDS`].
-    /// `seconds` is the frame's own, so the wait runs on frames the app was drawing anyway and a
-    /// run left alone defers its next try until something touches it.
+    /// Once the atlas loads, sets each thumbnail's UVs and gives egui a copy for the catalog.
+    /// A failed load retries after [`ATLAS_RETRIED_AFTER_SECONDS`] of frame time, so an idle app
+    /// does not retry.
     pub(super) fn receive_atlas(&mut self, seconds: f32, context: &Context, egui: &egui::Context) {
         let loaded = match &mut self.atlas {
             Atlas::Settled => return,
@@ -751,17 +718,16 @@ impl AppEntities {
         };
         self.thumbnails.set_texture_transformations(Some(&cells));
         self.thumbnail_instances.texture_transformations = Some(cells);
-        // One upload: a [`Texture2DRef`] clone is a Mat3 and an atomic.
+        // One upload; cloning a [`Texture2DRef`] is cheap (an `Arc` and a `Mat3`).
         let atlas = Texture2DRef::from_cpu_texture(context, &atlas);
         self.glow.material.texture = Some(atlas.clone());
-        self.lit_thumbnails.material.texture = Some(atlas.clone());
-        // Last: [`Self::drawn_thumbnails`] reads it to decide the quads are drawable.
+        self.highlight_thumbnails.material.texture = Some(atlas.clone());
+        // Last: [`Self::drawn_thumbnails`] treats this texture as the ready signal.
         self.thumbnails.material.texture = Some(atlas);
-        self.gather_lit();
+        self.copy_highlighted_instances();
     }
 
-    /// `None` before there is an atlas to sample: an untextured [`ColorMaterial`] would paint its
-    /// base color flat over every world.
+    /// `None` until the atlas loads; an untextured [`ColorMaterial`] would draw flat white quads.
     pub(super) fn drawn_thumbnails(&self) -> Option<&dyn Object> {
         self.thumbnails
             .material
@@ -770,16 +736,13 @@ impl AppEntities {
             .then_some(&self.thumbnails as &dyn Object)
     }
 
-    /// Stands the glow quad over the node a list row is pointing at, on that world's cell.
-    ///
-    /// The node's own quad is taken rather than worked out again, so the glow brightens exactly
-    /// the shape on screen. Only the lift is added, twice [`detail::LIFT`] because a magnified
-    /// world already sits one lift in front.
-    ///
-    /// That lift is too small to clear the depth buffer's rounding; the quad's `depth_test` is
-    /// what makes that harmless.
+    /// Places the glow quad on the hovered row's world: its node quad offset by twice
+    /// [`detail::LIFT`], since a detail quad already sits one lift in front. The offset is below
+    /// depth precision; the `LessOrEqual` depth test covers that.
     pub(super) fn aim_glow(&mut self, camera: &Camera) {
-        let Some(world) = self.pointed else { return };
+        let Some(world) = self.hovered_row else {
+            return;
+        };
         let Some(cells) = self.thumbnail_instances.texture_transformations.as_ref() else {
             return;
         };
@@ -794,21 +757,15 @@ impl AppEntities {
         }
     }
 
-    /// `None` without a world to brighten or an atlas to brighten it out of.
+    /// `None` without a hovered row or a loaded atlas.
     pub(super) fn drawn_glow(&self) -> Option<&dyn Object> {
-        let ready = self.pointed.is_some() && self.glow.material.texture.is_some();
+        let ready = self.hovered_row.is_some() && self.glow.material.texture.is_some();
         ready.then_some(&self.glow as &dyn Object)
     }
 
-    /// Every world the view needs more of than the atlas holds, nearest the camera first.
-    ///
-    /// What [`detail`] is driven from, and the reason it needs no view of its own: a world is here
-    /// because its node is on screen and drawn wider than [`detail::LEAVE_PIXELS`], carrying the
-    /// quad it would have been drawn on. The whole hysteresis band, which end applies being known
-    /// only to [`detail::Detail::track`].
-    ///
-    /// A world in the middle of becoming itself is measured at the size it is about to be, so what
-    /// grows back is the world's own picture from the first frame.
+    /// On-screen worlds drawn wider than [`detail::LEAVE_PIXELS`], nearest first, with their
+    /// quads: the input to [`detail::Detail::track`], which applies the hysteresis. Arriving
+    /// worlds are measured at full size, so the high-res image is ready from the first frame.
     pub(super) fn magnified(&self, camera: &Camera, viewport: Viewport) -> Vec<detail::Magnified> {
         let billboard = billboard(camera);
         let forward = camera.view_direction();
@@ -831,7 +788,7 @@ impl AppEntities {
             }
             let full = self.node_radii[world];
             let grown = self.arrivals.grown(world);
-            // Ranked at the settling size, drawn at the current one.
+            // Measured at full size, drawn at the current one.
             let width = drawn_width(camera, across, full, position, center);
             if width < detail::LEAVE_PIXELS {
                 return;
@@ -851,21 +808,19 @@ impl AppEntities {
                 },
             ));
         });
-        // Not drawn width: perspective inflates a node a third in the corner.
+        // Sorted by distance, not width: perspective makes corner nodes up to a third wider.
         magnified.sort_by(|(a, _), (b, _)| a.total_cmp(b));
         magnified.into_iter().map(|(_, it)| it).collect()
     }
 }
-/// A lattice of soft blue glows on the background color, in the style of the game's own panoramas.
-///
-/// Held in linear color, which the shader's sRGB encoding expects, and at half precision: eight
-/// bits of linear bands at these brightnesses, and dithering trades the bands for grain.
+/// Background tile: a grid of soft blue glows, in the style of the game's panoramas. Linear f16:
+/// 8-bit linear bands at these brightnesses, and dithering would only trade bands for grain.
 fn panorama_tile() -> CpuTexture {
     let cells = PANORAMA_TILE_TEXELS / PANORAMA_CELL_TEXELS;
     let mut data = Vec::with_capacity(PANORAMA_TILE_TEXELS * PANORAMA_TILE_TEXELS);
     for y in 0..PANORAMA_TILE_TEXELS {
         for x in 0..PANORAMA_TILE_TEXELS {
-            // Neighbours included, so glows straddling an edge match when the tile repeats.
+            // Include neighbouring cells so glows crossing the tile edge wrap seamlessly.
             let mut glow: f32 = 0.0;
             for cell_y in -1..=1 {
                 for cell_x in -1..=1 {
@@ -910,8 +865,7 @@ fn panorama_tile() -> CpuTexture {
     }
 }
 
-/// The shader applies sRGB again on the way to the screen, so what a texel means is what it is
-/// worth once this has been taken off it.
+/// Inverse of the shader's output sRGB encoding.
 fn srgb_to_linear(channel: f32) -> f32 {
     if channel <= 0.04045 {
         channel / 12.92
@@ -920,25 +874,17 @@ fn srgb_to_linear(channel: f32) -> f32 {
     }
 }
 
-/// Scaled so a tile keeps a fixed size in logical pixels whatever the window and the display
-/// density, and slid by [`PANORAMA_PARALLAX`] as the camera turns. Where the camera *is* does not
-/// enter, or the backdrop would read as a plane the graph slides over.
-///
-/// The offset is taken straight from the view direction rather than from a yaw and a pitch, so it
-/// stays continuous all the way around instead of snapping where an angle wraps.
+/// Background UV transform: fixed tile size in logical pixels, offset by [`PANORAMA_PARALLAX`]
+/// from the view direction (not position; not yaw/pitch, which would jump at wraparound).
 pub(super) fn panorama_transform(viewport: Viewport, device_pixel_ratio: f32, view: Vec3) -> Mat3 {
     let tile = PANORAMA_TILE_PIXELS * device_pixel_ratio;
     let drift = vec2(view.x, view.y) * PANORAMA_PARALLAX;
     Mat3::from_translation(drift)
         * Mat3::from_nonuniform_scale(viewport.width as f32 / tile, viewport.height as f32 / tile)
 }
-/// A normalized distance from the origin around the hues. Blue at the origin and on through cyan,
-/// green, yellow and red to magenta: five sixths of a turn, so the deepest connection is not
-/// painted the shallowest's blue.
-///
-/// Written as the corners themselves rather than as a hue swept through: neighbouring corners
-/// share a channel at the full, so interpolating between two stays as saturated as both. The blue
-/// is lifted off a pure one, which against [`BACKGROUND_COLOR`] would read as unlit.
+/// Color ramp for normalized depth: blue, cyan, green, yellow, red, magenta (5/6 of the hue
+/// wheel, so the ends differ). Explicit RGB stops keep interpolation saturated; the blue is
+/// lightened, since pure blue disappears against [`BACKGROUND_COLOR`].
 fn distance_color(distance: f32) -> Srgba {
     const STOPS: [[f32; 3]; 6] = [
         [0.25, 0.35, 1.00],
@@ -956,38 +902,32 @@ fn distance_color(distance: f32) -> Srgba {
     Srgba::new(channel(0), channel(1), channel(2), 255)
 }
 
-/// Pushes a color back toward the background, for everything off the highlighted route.
+/// Darkens a color outside the highlight.
 fn dim(color: Srgba) -> Srgba {
-    scaled(color, DIMMED_BRIGHTNESS)
+    scale_brightness(color, DIMMED_BRIGHTNESS)
 }
 
-/// The eye's own weighting of the channels, which is what [`EDGE_LUMINANCE_EVENNESS`] levels the
-/// distance ramp by.
+/// Luma (Rec. 709 weights on sRGB values), used by [`EDGE_LUMINANCE_EVENNESS`].
 fn luminance(color: Srgba) -> f32 {
     (0.2126 * color.r as f32 + 0.7152 * color.g as f32 + 0.0722 * color.b as f32) / 255.0
 }
 
-/// Keeps the hue and the alpha.
-fn scaled(color: Srgba, brightness: f32) -> Srgba {
+/// Scales RGB, keeping alpha.
+fn scale_brightness(color: Srgba, brightness: f32) -> Srgba {
     let scale = |channel: u8| (channel as f32 * brightness) as u8;
     Srgba::new(scale(color.r), scale(color.g), scale(color.b), color.a)
 }
 
-/// Per connection, the color it carries when nothing is selected.
-///
-/// The depth ramp lives on the connections rather than the worlds, which carry pictures: a
-/// connection wears the color of the world it is walked *from*. Its brightness says how much of
-/// the game lies through it, through a logarithm as the node sizes are.
-///
-/// Which end is walked from is the canonical routes' answer where they have one. A shortcut across
-/// the tree is taken as walked from its shallower end, which a player meets it from anyway.
+/// Unselected edge colors: the depth color of the edge's source world, brightened by
+/// log(descendants of the target). The source is the tree parent, or for non-tree edges the
+/// shallower end.
 fn edge_colors(
     graph: &Graph,
     routes: &world::Routes,
     descendants: &[u32],
     depth_colors: &[Srgba],
 ) -> Vec<Srgba> {
-    // Against the busiest world, which the whole game hangs off.
+    // Normalized against the world with the most descendants.
     let busiest = (descendants.iter().copied().max().unwrap_or(0) as f32).ln_1p();
     // The ramp's floor, so the correction only darkens; [`distance_color`] defines the ramp.
     const SAMPLES: u32 = 64;
@@ -1009,7 +949,7 @@ fn edge_colors(
         let reach = (descendants[to] as f32).ln_1p() / busiest.max(f32::MIN_POSITIVE);
         // Never above 1: [`UNREACHED_COLOR`] is off the ramp and stays as it is.
         let even = (floor / luminance(depth_colors[from]).max(f32::MIN_POSITIVE)).min(1.0);
-        colors.push(scaled(
+        colors.push(scale_brightness(
             depth_colors[from],
             (EDGE_LEAF_BRIGHTNESS + (1.0 - EDGE_LEAF_BRIGHTNESS) * reach)
                 * (1.0 - EDGE_LUMINANCE_EVENNESS * (1.0 - even)),
@@ -1018,7 +958,7 @@ fn edge_colors(
     colors
 }
 
-/// `count` untransformed instances, white so a picture shows as itself.
+/// `count` identity instances, white so textures show unmodified.
 fn white_instances(count: usize) -> Instances {
     Instances {
         transformations: vec![Mat4::identity(); count],
@@ -1027,8 +967,7 @@ fn white_instances(count: usize) -> Instances {
     }
 }
 
-/// A world's picture quad: at `position`, facing the camera, in the pictures' aspect so none are
-/// cropped or stretched.
+/// A world's billboard quad at `position`, in the thumbnail aspect ratio.
 fn node_quad(position: Vec3, billboard: Mat4, radius: f32) -> Mat4 {
     Mat4::from_translation(position)
         * billboard

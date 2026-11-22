@@ -69,10 +69,9 @@ impl Panel {
         .on_hover_text(t!("hub-push-hint"));
         ui.add(egui::Slider::new(&mut self.link_reach, LINK_REACH_RANGE).text(t!("link-reach")))
             .on_hover_text(t!("link-reach-hint"));
-        ui.add(egui::Slider::new(&mut self.ui_scale, UI_SCALE_RANGE).text(t!("ui-scale")))
-            .on_hover_text(t!("ui-scale-hint"));
+        ui.add(egui::Slider::new(&mut self.ui_scale, UI_SCALE_RANGE).text(t!("ui-scale")));
         self.antialiasing(ui);
-        self.leaning(ui);
+        self.row_follow_switch(ui);
         profile::controls(ui);
         // Restores a guide dismissed for good.
         self.guide |= ui.button(t!("show-controls")).clicked();
@@ -269,10 +268,9 @@ impl Panel {
         }
     }
 
-    /// The motion a person is most likely to want stopped, being the one nothing called for: see
-    /// [`AppStatics::lean_toward`].
-    fn leaning(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(&mut self.leaning, t!("leaning"))
+    /// The row-follow switch. See [`AppStatics::follow_hovered_row`].
+    fn row_follow_switch(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.row_follow, t!("leaning"))
             .on_hover_text(t!("leaning-hint"));
     }
 
