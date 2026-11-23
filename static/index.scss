@@ -11,32 +11,61 @@ body {
   height: 100% !important;
 }
 
-// Stands in for the app's loading frame until the app runs.
+@font-face {
+  font-family: "DotGothic16";
+  src: url("DotGothic16-Latin.ttf") format("truetype");
+  font-display: swap;
+}
+
+// Stands in for the app's loading frame until the app runs, in the default skin.
 #loading {
   position: fixed;
   inset: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 0.55em;
   pointer-events: none;
-  font: 16px system-ui, sans-serif;
-  // egui's dark theme.
-  color: #8c8c8c;
 }
 
-#loading::before {
-  content: "";
-  width: 1em;
-  height: 1em;
-  border: 2px solid currentColor;
-  border-top-color: transparent;
-  border-radius: 50%;
-  animation: loading-spin 1s linear infinite;
+// Keep in sync with `painted_window_shape` and `loading_frame` in `src/ui/`.
+#loading-window {
+  box-sizing: border-box;
+  width: min(560px, 100vw - 24px);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border: 2px solid #d8dcf4;
+  border-radius: 3px;
+  box-shadow:
+    inset 0 0 0 1px #4a5aa8,
+    inset 0 0 0 2px #0a0f36;
+  background: linear-gradient(
+    rgba(43, 63, 158, 0.8),
+    rgba(22, 34, 106, 0.8) 55%,
+    rgba(12, 20, 70, 0.8)
+  );
+  font: 12.5px "DotGothic16", system-ui, sans-serif;
+  color: #fff;
 }
 
-@keyframes loading-spin {
+// `urowalk.png`: four 24×32 frames, drawn at twice their size.
+#loading-walk {
+  flex: none;
+  width: 48px;
+  height: 64px;
+  background: url("urowalk.png") 0 0 / 192px 64px;
+  image-rendering: pixelated;
+  animation: loading-walk 0.6s steps(4) infinite;
+}
+
+// Nothing left to wait for: the walk stops on its standing frame.
+#loading.failed #loading-walk {
+  animation: none;
+}
+
+@keyframes loading-walk {
   to {
-    transform: rotate(1turn);
+    background-position-x: -192px;
   }
 }

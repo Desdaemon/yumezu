@@ -514,7 +514,19 @@ impl App {
             },
             ..Default::default()
         };
-        self.ctx.wctx = Some(WindowedContext::from_winit_window(window, surface).unwrap());
+        let wctx = match WindowedContext::from_winit_window(window, surface) {
+            Ok(wctx) => wctx,
+            // The browser blocks WebGL after its GPU process crashes, until it restarts.
+            #[cfg(target_family = "wasm")]
+            Err(error @ three_d::WindowError::WebGL2NotSupported(_)) => {
+                log::error!("{error}");
+                ui::say_in_placeholder(&t!("webgl-refused"));
+                event_loop.exit();
+                return;
+            }
+            Err(error) => panic!("no GL context: {error}"),
+        };
+        self.ctx.wctx = Some(wctx);
         let ctx = self.ctx.wctx.as_ref().unwrap();
         self.ctx.fig = Some(FrameInputGenerator::from_winit_window(window));
         self.overlay = Some(Overlay::new(event_loop, window, ctx));

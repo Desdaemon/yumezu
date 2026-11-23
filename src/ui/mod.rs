@@ -738,6 +738,21 @@ pub(super) fn take_placeholder() {
     }
 }
 
+/// Puts `says` in the page's own loading line and stops its walk, for a failure before the app
+/// can draw.
+#[cfg(target_family = "wasm")]
+pub(super) fn say_in_placeholder(says: &str) {
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    if let Some(line) = document.get_element_by_id("loading-text") {
+        line.set_text_content(Some(says));
+    }
+    if let Some(placeholder) = document.get_element_by_id("loading") {
+        placeholder.set_class_name("failed");
+    }
+}
+
 /// Drawn at `opacity` rather than always whole: [`App::draw_loading`] draws it whole over a cleared
 /// screen, and [`Overlay::panel`] draws what is left over the graph that replaced it. See
 /// [`App::veil`].

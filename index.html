@@ -7,11 +7,14 @@
     <link data-trunk rel="icon" href="icons/favicon.png"/>
     <link data-trunk rel="scss" href="static/index.scss"/>
     <link data-trunk rel="rust" data-target-name="yumezu"/>
+    <!-- For the placeholder below; the app embeds its own copies. -->
+    <link data-trunk rel="copy-file" href="assets/urowalk.png"/>
+    <link data-trunk rel="copy-file" href="assets/DotGothic16-Latin.ttf"/>
   </head>
   <body>
     <canvas id="canvas"></canvas>
     <!-- Shown until the app's first frame replaces it. -->
-    <div id="loading"><span id="loading-text">Loading worlds…</span></div>
+    <div id="loading"><div id="loading-window"><span id="loading-walk"></span><span id="loading-text">Loading worlds…</span></div></div>
     <script>
       // Mirrors `src/i18n.rs` and `dump-loading` in `locales/`, before the app can read either.
       const named = new URLSearchParams(location.search).get("lang");

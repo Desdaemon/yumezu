@@ -13,6 +13,7 @@ system-theme-painted = 標準
 
 dump-loading = 読み込み中...
 dump-failed = 世界のデータを読み込めませんでした。
+webgl-refused = ブラウザがこのページの3D表示を止めています。ブラウザを完全に終了して開き直し、再読み込みしてください。
 
 # 世界のデータを組み立てているサーバーが、いま何をしているか。`world::building` を参照。
 dump-task-changes = wikiの更新を確認しています…

@@ -18,6 +18,8 @@ system-theme-painted = Default
 
 dump-loading = Loading worlds…
 dump-failed = Could not load worlds.
+# The browser refused WebGL2, usually until it restarts after its graphics process crashed.
+webgl-refused = Your browser has turned off 3D graphics for this page. Quit the browser completely, open it again, and reload.
 
 # Server progress while it builds its first data dump. IDs name the stage; `world::building` maps
 # the server's status to these.
