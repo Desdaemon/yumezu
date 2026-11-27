@@ -1,15 +1,5 @@
-//! The thumbnail atlas: one image carrying a picture of every world, packed by `dreamweaver`.
-//!
-//! One image rather than a texture per world, because the nodes are drawn as a single instanced
-//! mesh: fifteen hundred textures would be fifteen hundred draw calls.
-//!
-//! Fetched from the same host as the dump rather than shipped beside the binary, so a package does
-//! not freeze the pictures at release time. See [`read`].
-//!
-//! A world's cell is the one the dump gives it, which the server hands out once and never moves,
-//! so an atlas stays right however far the dump has moved on. A world past the end of the atlas
-//! was packed after it and draws the placeholder, which is itself the grid's last cell. Both sides
-//! have to agree on [`CELL`], which [`grid`] checks rather than trusts.
+//! The thumbnail atlas from `dreamweaver`, one image so every node is one instanced draw call. A
+//! world's cell is fixed by the dump; one past the atlas draws the placeholder, the last cell.
 
 use three_d::renderer::*;
 
@@ -22,24 +12,17 @@ const UNKNOWN: &str = "static/unknown_location.png";
 /// Size of one thumbnail in texels. Must match `dreamweaver`, which packs the atlas.
 pub const CELL: [u32; 2] = [64, 48];
 pub const ASPECT: f32 = CELL[0] as f32 / CELL[1] as f32;
-/// Mipmapped because nodes are only a few pixels wide until the view comes in, and minifying that
-/// far unmipmapped makes the thumbnails crawl as the layout moves.
-///
-/// Capped because a mip texel averages a square of the atlas without knowing where one world's
-/// picture stops. At this level a texel spans 16, which still divides both sides of a cell.
+/// Mipmapped, so nodes a few pixels wide do not crawl as the layout moves. Capped, since a mip
+/// texel averages across cell borders: at this level a texel spans 16, dividing both cell sides.
 const MIP_LEVELS: u32 = 5;
 
-/// `None` is not fatal: the graph draws without pictures until one resolves, and the caller tries
-/// again after a wait -- see [`super::Atlas`].
+/// `None` is not fatal: the graph draws without pictures and [`super::Atlas`] retries later.
 pub fn load() -> fetch::Pending<Option<CpuTexture>> {
     picture(PATH, Some(MIP_LEVELS))
 }
 
-/// Its own file as well as its own cell of the atlas: the graph draws it at every size, and the
-/// atlas is a jpeg, the worst thing to put hard white edges on black through. The catalog draws
-/// the cell, at about the size it is packed at.
-///
-/// `None` is not fatal: an unvisited world keeps its bare node.
+/// A separate file from the atlas cell: the graph draws the placeholder at every size, and JPEG
+/// ruins hard white edges on black. `None` is not fatal: an unvisited world keeps a bare node.
 pub fn placeholder() -> fetch::Pending<Option<CpuTexture>> {
     // Mipmapped, unlike the atlas: one picture has no neighbour to bleed in from.
     picture(UNKNOWN, None)
@@ -72,11 +55,8 @@ fn picture(path: &'static str, mip_levels: Option<u32>) -> fetch::Pending<Option
     })
 }
 
-/// Off the host the dump comes from, so the pictures stay as current as the worlds they belong to
-/// and no package carries a copy that ages.
-///
-/// One implementation for every target: [`super::world::server`] is the page's own origin on wasm,
-/// so the same relative path is the same URL there.
+/// Fetched from the dump's host, so pictures stay as current as the worlds. One implementation for
+/// every target: on wasm [`super::world::server`] is the web build's origin.
 async fn read(path: &str) -> Result<Vec<u8>, String> {
     let url = format!("{}/{path}", super::world::server());
     fetch::client()
@@ -86,11 +66,8 @@ async fn read(path: &str) -> Result<Vec<u8>, String> {
         .map_err(|error| error.to_string())
 }
 
-/// Per world, the uv transform landing its quad on its cell. `of` holds `None` for a world the
-/// player has not been to, which draws the placeholder.
-///
-/// `None` for an atlas that is not whole cells of [`CELL`], which is one packed against a
-/// different cell size: sampling it would give every world a picture of somewhere else.
+/// Per world, the UV transform onto the world's cell; an unvisited world (`None` in `of`) gets the
+/// placeholder. `None` for an atlas that is not whole cells of [`CELL`].
 pub fn cells(of: &[Option<usize>], atlas: &CpuTexture) -> Option<Vec<Mat3>> {
     let (columns, rows) = grid(atlas)?;
     Some(
@@ -109,11 +86,8 @@ fn uv(cell: usize, columns: u32, rows: u32) -> Mat3 {
         * Mat3::from_nonuniform_scale(size.x, size.y)
 }
 
-/// `cell` where this atlas holds one, and the placeholder where it does not -- a world packed
-/// into no atlas this old, or one the player has not been to.
-///
-/// The placeholder is the last cell of the grid rather than one counted off the worlds, so neither
-/// side carries a number the other could get wrong.
+/// `cell` if this atlas holds the cell, else the placeholder: a world absent from an older atlas,
+/// or one not visited. The placeholder is the grid's last cell, so neither side counts worlds.
 fn held(cell: Option<usize>, columns: u32, rows: u32) -> usize {
     let unknown = (columns * rows) as usize - 1;
     cell.filter(|cell| *cell < unknown).unwrap_or(unknown)
@@ -149,8 +123,8 @@ pub fn color_image(picture: &CpuTexture) -> Option<egui::ColorImage> {
     }
 }
 
-/// A second upload of the same image: egui hands out its own ids and there is no seam between it
-/// and the renderer's [`Texture2DRef`] to share one.
+/// A second upload of the atlas: egui assigns separate texture ids, which cannot share the
+/// renderer's [`Texture2DRef`].
 pub struct Sheet {
     texture: egui::TextureHandle,
     columns: u32,

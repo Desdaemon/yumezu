@@ -1,8 +1,5 @@
-//! Full-size world pictures, for the few worlds the view has come close enough to.
-//!
-//! Past [`SWITCH_PIXELS`] the screen needs more texels than the atlas cell has, so the wiki's own
-//! copy is fetched and drawn over the world's atlas quad. Only [`HELD`] at once, each costing a
-//! texture and a draw call where the atlas costs one of each for the whole graph.
+//! Level of detail for world pictures: the atlas cell is the low LoD, and up to [`MAX_HI_LOD`]
+//! worlds drawn wider than [`HI_LOD_ENTER_PIXELS`] get the full-size wiki picture as the high LoD.
 
 use std::collections::{HashMap, HashSet};
 
@@ -14,84 +11,73 @@ use super::instanced::RefilledMesh;
 use super::prelude::*;
 use super::thumbnails;
 
-/// Node width on screen, in physical pixels, at which the full picture becomes worth fetching.
-///
-/// Well past the [`super::thumbnails::CELL`] width where magnification begins: a thumbnail
-/// stretched a little is not visibly soft, and switching sooner spends a download on a node
-/// nobody is looking at yet.
-pub const SWITCH_PIXELS: f32 = 160.0;
-/// Node width at which a world gives its own picture back. Under [`SWITCH_PIXELS`] so a node
-/// sitting on the switch does not trade picture for atlas cell every other frame.
-pub const LEAVE_PIXELS: f32 = SWITCH_PIXELS * 0.75;
-/// A ceiling on cost, not on the view: the nearest nodes are served first, so coming in on a crowd
-/// sharpens the ones the view has come in on and leaves the rest on the atlas.
-const HELD: usize = 8;
-/// The wiki's edge answers a request with no `Origin` with a challenge page rather than the
-/// picture. Only the native build sets it: the browser sets its own and will not be overridden.
+/// Node width on screen, in physical pixels, at which the high LoD is fetched. Well past the
+/// [`super::thumbnails::CELL`] width, since a slightly stretched thumbnail is not visibly soft.
+pub const HI_LOD_ENTER_PIXELS: f32 = 160.0;
+/// Node width below which a world drops to the low LoD. Under [`HI_LOD_ENTER_PIXELS`] so a node
+/// at the threshold does not flicker between LoDs.
+pub const HI_LOD_EXIT_PIXELS: f32 = HI_LOD_ENTER_PIXELS * 0.75;
+/// The most worlds at the high LoD at once, given to the nearest nodes first.
+const MAX_HI_LOD: usize = 8;
+/// The wiki's edge answers a request with no `Origin` with a challenge page. The web build sends
+/// the browser's own `Origin` instead.
 const ORIGIN: &str = "https://explorer.yume.wiki";
-/// How far toward the eye a full picture is drawn in front of its own atlas quad, as a share of
-/// its distance: coplanar, the depth test would pick between them per pixel.
+/// How far toward the camera a high-LoD quad is drawn in front of the atlas quad, as a fraction of
+/// the distance, to avoid z-fighting.
 pub const LIFT: f32 = 0.01;
-/// What the art is drawn at.
-///
-/// The wiki calls for this and enforces nothing: four in five uploads are the same art at exactly
-/// 2x, 3x, 4x or 6x, which [`sieve`] takes back down. An odd size is left as it came, a filter
-/// being the only way down from one and costing more on the page than the memory it saves.
+/// The art's native size. Four in five wiki uploads are exactly 2x, 3x, 4x or 6x this size, which
+/// [`sieve`] scales back down; other sizes are kept as uploaded.
 const NATIVE: [u32; 2] = [320, 240];
 
-enum Held {
+/// One world's high LoD, from fetch to upload.
+enum HiLod {
     Loading(fetch::Pending<Option<CpuTexture>>),
-    /// Boxed because it dwarfs [`Held::Loading`], which every entry passes through.
+    /// Boxed: far larger than [`HiLod::Loading`], which every entry passes through.
     Ready(Box<Gm<Mesh, ColorMaterial>>),
 }
 
-pub struct Detail {
-    /// Per world, where the wiki serves its picture from. Empty for a world the player has not
-    /// been to, which has no picture of its own to fetch.
+pub struct LodPictures {
+    /// Per world, the wiki URL of the picture; empty for an unvisited world, which has none.
     images: Vec<String>,
-    held: HashMap<usize, Held>,
-    /// Kept so the wiki is not fetched from again every time the view comes back.
+    hi_lod: HashMap<usize, HiLod>,
+    /// Worlds whose picture failed to load, so the wiki is not asked again.
     missing: HashSet<usize>,
-    /// Nearest the camera first, which is the order the budget is spent in.
-    wanted: Vec<usize>,
+    /// The worlds within the [`MAX_HI_LOD`] budget, nearest the camera first.
+    hi_lod_worlds: Vec<usize>,
     unvisited: Unvisited,
 }
 
-/// The picture every world the player has not been to is drawn as. Held once and drawn as a single
-/// instanced mesh, a frontier putting hundreds on screen at once.
-///
-/// Not a level of detail, unlike everything else here: it is the world's only picture, so it is
-/// drawn at every size and spends none of the [`HELD`] budget.
+/// The placeholder picture of every unvisited world, drawn as one instanced mesh. The only picture
+/// those worlds have, so drawn at every size and outside the [`MAX_HI_LOD`] budget.
 #[derive(Default)]
 struct Unvisited {
     loading: Option<fetch::Pending<Option<CpuTexture>>>,
-    /// `None` until the picture resolves, and forever if it cannot be had, which leaves these worlds
-    /// their bare nodes.
+    /// `None` until the picture loads, and for good if the load fails, leaving bare nodes.
     quads: Option<Gm<RefilledMesh, ColorMaterial>>,
-    /// The same picture again on the subset a selection lights, for the overlay -- see
-    /// [`Detail::drawn_highlighted`].
+    /// The same picture on the highlighted subset, for the overlay; see
+    /// [`LodPictures::drawn_highlighted`].
     lit: Option<Gm<RefilledMesh, ColorMaterial>>,
 }
 
-pub struct Magnified {
+/// A world drawn wider than [`HI_LOD_EXIT_PIXELS`], up for the high LoD.
+pub struct LodCandidate {
     pub world: usize,
-    /// How wide the node comes out on screen, in physical pixels. What admits it, not what ranks
-    /// it -- see [`Detail::wanted`].
+    /// Width of the node on screen, in physical pixels. Admits the world; distance ranks it.
     pub width: f32,
-    /// Taken from the world's own atlas quad, so the switch changes the detail and nothing else.
+    /// Copied from the atlas quad, so switching LoD changes only the texture.
     pub transformation: Mat4,
     /// The atlas quad's tint, so a picture dims along with the graph around it.
     pub color: Srgba,
 }
 
-impl Detail {
+impl LodPictures {
     /// `unvisited` is whether the placeholder is worth fetching at all.
     pub fn new(images: Vec<String>, unvisited: bool) -> Self {
         Self {
             images,
-            held: HashMap::new(),
+            hi_lod: HashMap::new(),
             missing: HashSet::new(),
-            wanted: Vec::new(),
+            hi_lod_worlds: Vec::new(),
             unvisited: Unvisited {
                 loading: unvisited.then(thumbnails::placeholder),
                 quads: None,
@@ -100,17 +86,17 @@ impl Detail {
         }
     }
 
-    /// What keeps the window drawing while a world sharpens.
-    pub fn pending(&self) -> bool {
+    /// Whether a picture is still loading, which keeps the window redrawing.
+    pub fn has_pending_fetch(&self) -> bool {
         self.unvisited.loading.is_some()
             || self
-                .held
+                .hi_lod
                 .values()
-                .any(|held| matches!(held, Held::Loading(_)))
+                .any(|hi_lod| matches!(hi_lod, HiLod::Loading(_)))
     }
 
-    /// Stands the placeholder on the quads it was handed. Every frame: the layout moves the nodes,
-    /// the camera turns them, and a selection dims them.
+    /// Places the placeholder on `quads` and `lit`, every frame: the layout moves the nodes, the
+    /// camera turns them, and a selection dims them.
     pub fn place_unvisited(&mut self, context: &Context, quads: &Instances, lit: &Instances) {
         if let Some(loading) = &self.unvisited.loading
             && let Some(loaded) = loading.take()
@@ -137,41 +123,42 @@ impl Detail {
         }
     }
 
-    /// `magnified` is every world drawn wider than [`LEAVE_PIXELS`], nearest first. Anything past
-    /// [`HELD`] is left on the atlas, and anything held but no longer wanted is dropped.
-    pub fn track(&mut self, context: &Context, magnified: &[Magnified]) {
+    /// Spends the [`MAX_HI_LOD`] budget on `candidates`, nearest first, and drops every other
+    /// world to the low LoD.
+    pub fn select_hi_lod(&mut self, context: &Context, candidates: &[LodCandidate]) {
         // Filtered before the budget, so a world with no picture takes no slot.
-        let magnified: Vec<&Magnified> = magnified
+        let selected: Vec<&LodCandidate> = candidates
             .iter()
             .filter(|it| !self.images[it.world].is_empty() && !self.missing.contains(&it.world))
-            // Held worlds stay down to [`LEAVE_PIXELS`]; dropping a loading one strands its fetch.
-            .filter(|it| it.width >= SWITCH_PIXELS || self.held.contains_key(&it.world))
-            .take(HELD)
+            // A high-LoD world stays down to [`HI_LOD_EXIT_PIXELS`]; dropping a loading world
+            // wastes the fetch.
+            .filter(|it| it.width >= HI_LOD_ENTER_PIXELS || self.hi_lod.contains_key(&it.world))
+            .take(MAX_HI_LOD)
             .collect();
-        let wanted: Vec<usize> = magnified.iter().map(|it| it.world).collect();
+        let hi_lod_worlds: Vec<usize> = selected.iter().map(|it| it.world).collect();
         // Frees slots in the same frame.
-        self.held.retain(|world, _| wanted.contains(world));
-        self.wanted = wanted;
+        self.hi_lod.retain(|world, _| hi_lod_worlds.contains(world));
+        self.hi_lod_worlds = hi_lod_worlds;
 
-        for it in magnified {
-            let mut held = match self.held.remove(&it.world) {
-                None => Held::Loading(load(self.images[it.world].clone())),
-                Some(Held::Loading(pending)) => match pending.take() {
-                    Some(Some(picture)) => Held::Ready(Box::new(quad(context, &picture))),
+        for it in selected {
+            let mut hi_lod = match self.hi_lod.remove(&it.world) {
+                None => HiLod::Loading(fetch_picture(self.images[it.world].clone())),
+                Some(HiLod::Loading(pending)) => match pending.take() {
+                    Some(Some(picture)) => HiLod::Ready(Box::new(hi_lod_quad(context, &picture))),
                     Some(None) => {
                         self.missing.insert(it.world);
                         continue;
                     }
-                    None => Held::Loading(pending),
+                    None => HiLod::Loading(pending),
                 },
-                Some(held) => held,
+                Some(hi_lod) => hi_lod,
             };
             // Every frame: the quad follows the atlas quad as the layout and camera move.
-            if let Held::Ready(quad) = &mut held {
+            if let HiLod::Ready(quad) = &mut hi_lod {
                 quad.set_transformation(it.transformation);
                 quad.material.color = it.color;
             }
-            self.held.insert(it.world, held);
+            self.hi_lod.insert(it.world, hi_lod);
         }
     }
 
@@ -181,14 +168,11 @@ impl Detail {
             .quads
             .iter()
             .map(|quads| quads as &dyn Object)
-            .chain(self.pictures().map(|(_, quad)| quad))
+            .chain(self.ready_hi_lod().map(|(_, quad)| quad))
     }
 
-    /// The pictures of the worlds a selection lights.
-    ///
-    /// The overlay clears the depth [`Detail::drawn`] wrote, so a lit world it does not draw again
-    /// falls back to the atlas quad underneath. Only the lit ones: a magnified world outside the
-    /// selection belongs under the overlay.
+    /// The pictures of the highlighted worlds, drawn again because the overlay clears the depth
+    /// [`LodPictures::drawn`] wrote.
     pub fn drawn_highlighted<'a>(
         &'a self,
         lit: &'a [usize],
@@ -200,35 +184,35 @@ impl Detail {
             .filter(|quads| quads.instance_count() > 0)
             .map(|quads| quads as &dyn Object)
             .chain(
-                self.pictures()
+                self.ready_hi_lod()
                     .filter_map(|(world, quad)| lit.contains(&world).then_some(quad)),
             )
     }
 
-    fn pictures(&self) -> impl Iterator<Item = (usize, &dyn Object)> {
-        self.wanted
+    fn ready_hi_lod(&self) -> impl Iterator<Item = (usize, &dyn Object)> {
+        self.hi_lod_worlds
             .iter()
-            .filter_map(|&world| match self.held.get(&world) {
-                Some(Held::Ready(quad)) => Some((world, quad.as_ref() as &dyn Object)),
+            .filter_map(|&world| match self.hi_lod.get(&world) {
+                Some(HiLod::Ready(quad)) => Some((world, quad.as_ref() as &dyn Object)),
                 _ => None,
             })
     }
 }
 
-/// Cropping is what makes the switch invisible: `dreamweaver` centre-crops every picture to
-/// [`thumbnails::ASPECT`], which the node's quad also has, so a full picture shown whole would
-/// jump to a different framing.
-fn quad(context: &Context, picture: &CpuTexture) -> Gm<Mesh, ColorMaterial> {
+/// Centre-cropped to [`thumbnails::ASPECT`], as `dreamweaver` crops every atlas cell, so switching
+/// LoD keeps the framing.
+fn hi_lod_quad(context: &Context, picture: &CpuTexture) -> Gm<Mesh, ColorMaterial> {
     Gm::new(
         Mesh::new(context, &CpuMesh::square()),
         quad_material(context, picture),
     )
 }
 
-/// Apart from [`quad`] because the placeholder wears the same paint on an instanced mesh.
+/// Separate from [`hi_lod_quad`] because the placeholder uses the same material on an instanced
+/// mesh.
 fn quad_material(context: &Context, picture: &CpuTexture) -> ColorMaterial {
     let (width, height) = (picture.width as f32, picture.height as f32);
-    // Symmetric, so the uv origin, unlike the atlas', does not matter.
+    // A centred crop, so the uv origin does not matter.
     let visible = if width > height * thumbnails::ASPECT {
         vec2(height * thumbnails::ASPECT / width, 1.0)
     } else {
@@ -237,7 +221,7 @@ fn quad_material(context: &Context, picture: &CpuTexture) -> ColorMaterial {
     let mut texture = Texture2DRef::from_cpu_texture(
         context,
         &CpuTexture {
-            // Minified until the switch, which happens where the atlas runs out.
+            // Minified until the switch to the high LoD, where the atlas runs out.
             mipmap: Some(Mipmap::default()),
             wrap_s: Wrapping::ClampToEdge,
             wrap_t: Wrapping::ClampToEdge,
@@ -254,19 +238,19 @@ fn quad_material(context: &Context, picture: &CpuTexture) -> ColorMaterial {
     }
 }
 
-/// `None` for anything that cannot be had or read, which is fatal nowhere this is called from: a
-/// world keeps its slightly soft atlas cell, and a map says it has no picture.
-pub fn load(url: String) -> fetch::Pending<Option<CpuTexture>> {
+/// A wiki picture, for the high LoD or a map. `None` when the picture cannot be fetched or
+/// decoded: the world stays at the low LoD, and a map shows no picture.
+pub fn fetch_picture(url: String) -> fetch::Pending<Option<CpuTexture>> {
     fetch::spawn(async move {
         let request = fetch::client().get(&url).header("origin", ORIGIN);
         let bytes = match request.fetch_bytes().await {
             Ok(bytes) => bytes,
             Err(error) => {
-                log::warn!("no full picture from {url}: {error}");
+                log::warn!("no picture from {url}: {error}");
                 return None;
             }
         };
-        // Not `three_d_asset`, whose texels are already arranged and cannot be decimated.
+        // Decoded with `image`, whose raw texels [`sieve`] can decimate.
         match image::load_from_memory(&bytes) {
             Ok(picture) => Some(texture(picture)),
             Err(error) => {
@@ -277,8 +261,7 @@ pub fn load(url: String) -> fetch::Pending<Option<CpuTexture>> {
     })
 }
 
-/// RGB is kept as RGB, a JPEG being three quarters the size that way of the RGBA everything else
-/// widens to.
+/// RGB stays RGB, three quarters the size of the RGBA every other format widens to.
 fn texture(picture: DynamicImage) -> CpuTexture {
     let (width, height) = (picture.width(), picture.height());
     let by = whole_multiple(width, height);
@@ -309,10 +292,8 @@ fn whole_multiple(width: u32, height: u32) -> u32 {
     if whole { by } else { 1 }
 }
 
-/// Every `by`th texel of every `by`th row, and the whole picture at a `by` of 1.
-///
-/// Sound only where `by` divides both sides: the texels it steps over are copies of the one it
-/// keeps, the upload being the same art at a whole scale.
+/// Every `by`th texel of every `by`th row; the whole picture when `by` is 1. Sound only on art
+/// upscaled by exactly `by`, where each skipped texel copies a kept one.
 fn sieve<T: Copy>(texels: &[T], width: u32, by: u32) -> Vec<T> {
     if by == 1 {
         return texels.to_vec();

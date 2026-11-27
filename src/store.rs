@@ -1,10 +1,7 @@
-//! The few choices that outlive the run that made them: one string per key, a localStorage entry
-//! on the page and a file of that name everywhere else.
-//!
-//! Every failure here is dropped rather than reported, so a page with no storage has no memory.
+//! Settings that outlive the session, one string per key: localStorage on the web build, a file per
+//! key elsewhere. Failures are dropped.
 
-/// The empty string is a value like any other: a key whose presence is the whole answer is written
-/// with one.
+/// The empty string is a value: a flag key is written with one.
 pub(super) fn read(key: &str) -> Option<String> {
     #[cfg(target_family = "wasm")]
     {
@@ -29,7 +26,7 @@ pub(super) fn write_switch(key: &str, on: bool) {
     write(key, Some(if on { "on" } else { "off" }));
 }
 
-/// A key whose presence is the whole answer.
+/// Whether the flag key is present.
 pub(super) fn read_flag(key: &str) -> bool {
     read(key).is_some()
 }
@@ -38,14 +35,13 @@ pub(super) fn write_flag(key: &str, set: bool) {
     write(key, set.then_some(""));
 }
 
-/// A value written by a version that allowed a different range is brought back inside this one
-/// rather than thrown away.
+/// Clamps a value written by a version with a different range.
 pub(super) fn read_clamped(key: &str, range: std::ops::RangeInclusive<f32>) -> Option<f32> {
     let value: f32 = read(key)?.parse().ok()?;
     Some(value.clamp(*range.start(), *range.end()))
 }
 
-/// `None` takes the value back.
+/// `None` removes the key.
 pub(super) fn write(key: &str, value: Option<&str>) {
     #[cfg(target_family = "wasm")]
     {
@@ -72,7 +68,7 @@ pub(super) fn write(key: &str, value: Option<&str>) {
     }
 }
 
-/// `None` where the page has no store: served from a file, or storage off.
+/// `None` where the web build has no store: served from a file, or storage off.
 #[cfg(target_family = "wasm")]
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
@@ -87,9 +83,8 @@ fn file(key: &str) -> Option<std::path::PathBuf> {
     Some(directory.join(key))
 }
 
-/// Deliberately not [`file`]'s directory, which holds what a person chose and must survive.
-/// Android may empty this one when the device is short of room, and a desktop `cache` may be
-/// swept -- which is why [`super::fetch`] is allowed to grow here.
+/// Separate from [`file`]'s directory, which holds the user's settings. The OS may clear this
+/// cache when short of room, so [`super::fetch`] may grow here.
 #[cfg(not(target_family = "wasm"))]
 pub(super) fn cache_directory() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "android")]
@@ -100,7 +95,7 @@ pub(super) fn cache_directory() -> Option<std::path::PathBuf> {
     Some(directory)
 }
 
-/// This app's directory under `variable`, or under `home_suffix` in `HOME` where it is unset.
+/// This app's directory under `variable`, or under `home_suffix` in `HOME` without `variable`.
 #[cfg(not(any(target_family = "wasm", target_os = "android")))]
 fn xdg_directory(variable: &str, home_suffix: &str) -> Option<std::path::PathBuf> {
     let base = match std::env::var_os(variable) {
@@ -114,8 +109,8 @@ fn xdg_directory(variable: &str, home_suffix: &str) -> Option<std::path::PathBuf
     Some(std::path::PathBuf::from(base).join(env!("CARGO_PKG_NAME")))
 }
 
-/// Read from Java because the activity glue publishes only `internalDataPath`, the app's *files*
-/// directory, which nothing ever reclaims -- a cache left there would grow until uninstall.
+/// Read from Java: the activity glue publishes only `internalDataPath`, the app's *files*
+/// directory, which is never reclaimed.
 #[cfg(target_os = "android")]
 fn android_cache_directory() -> Option<std::path::PathBuf> {
     use jni::objects::{JObject, JString};

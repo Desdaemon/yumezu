@@ -166,7 +166,11 @@ reset-camera = Reset camera
 hub-push = Hub repulsion
 hub-push-hint = How strongly larger worlds repel their neighbors
 link-reach = Max connection length
-link-reach-hint = How far apart connected worlds settle, in layers. Each arrangement keeps its own. One-way connections are exempt
+link-reach-hint = How far apart connected worlds settle, in layers. Each arrangement keeps its own. One-way connections stretch farther
+pull-across-branches = Pull across branches
+restart-layout = Restart layout
+restart-layout-hint = Scatters the worlds and lets them settle again
+pull-across-branches-hint = In Radial and Orbital, connections between worlds reached through different Nexus doors also pull them together
 ui-scale = UI scale
 antialias = Anti-aliasing
 antialias-hint = Smooths jagged edges. Turn off first if the frame rate drops below your display's
@@ -181,15 +185,15 @@ clear-cache-hint = Deletes cached world images. They are downloaded again when n
 clear-cache-clearing = Clearing…
 clear-cache-done = Cache cleared
 clear-cache-failed = Could not clear the cache
-update-check = Check for updates
-update-check-hint = Checks GitHub for a release newer than this build
-update-checking = Checking…
-update-current = Up to date
-update-ready = { $version } is available
-update-install = Install update
-update-installing = Downloading…
-update-installed = Installed. Restart yumezu to apply.
-update-failed = Update failed
+app-update-check = Check for updates
+app-update-check-hint = Checks GitHub for a release newer than this build
+app-update-checking = Checking…
+app-update-current = Up to date
+app-update-ready = { $version } is available
+app-update-install = Install update
+app-update-installing = Downloading…
+app-update-installed = Installed. Restart yumezu to apply.
+app-update-failed = Update failed
 # Local date and time. The parts arrive zero-padded and separate, so each language sets the order
 # and separators.
 stamp = { $year }-{ $month }-{ $day } { $hour }:{ $minute }
@@ -225,7 +229,7 @@ unvisited-location = Unvisited location
 github-link = yumezu on GitHub
 download-for = Download for {$platform}
 
-## Controls guide, shown on first run.
+## Controls guide, shown the first time the app opens.
 
 guide-title = Controls
 guide-inputs = Inputs
@@ -329,17 +333,17 @@ effect-dice = Dice
 ## Connection direction. The two directions are worded separately, since a connection can be
 ## open one way and locked the other.
 
-walk-freely = freely
-walk-free-both = No restrictions.
-walk-one-way = One-way.
-walk-no-entry = No entry from here.
-walk-none = Currently inaccessible.
-walk-dead-end = Connected via isolated section only.
-walk-isolated = Connects to isolated section.
-walk-locked-out = Unlockable from opposite entrance.
-walk-locked-back = Unlocks access to this area from opposite entrance.
-walk-both =
+passage-freely = freely
+passage-free-both = No restrictions.
+passage-one-way = One-way.
+passage-no-entry = No entry from here.
+passage-none = Currently inaccessible.
+passage-dead-end = Connected via isolated section only.
+passage-isolated = Connects to isolated section.
+passage-locked-out = Unlockable from opposite entrance.
+passage-locked-back = Unlocks access to this area from opposite entrance.
+passage-both =
     From here: { $out }
     To here: { $back }.
-walk-out-only = From here only: { $out }
-walk-back-only = To here only: { $back }
+passage-out-only = From here only: { $out }
+passage-back-only = To here only: { $back }

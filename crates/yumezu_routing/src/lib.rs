@@ -1,36 +1,28 @@
-//! What a player can walk, and where that gets them.
-//!
-//! The wiki writes a connection as a bitfield of independent conditions, and a route is only as
-//! walkable as its strictest one. That becomes a [`Gate`] per direction and a tree of routes over
-//! them, here rather than in either program, so the one publishing the dump and the one drawing it
-//! cannot disagree about what a connection means.
-//!
-//! Saying it is the reader's own business: a [`Gate`] carries the wiki's own words where it wrote
-//! any, and nothing here names a condition in anyone's language.
+//! What a player can traverse: each connection as a [`Gate`] per direction, and route trees over
+//! them; shared, so dreamweaver and the app read a connection the same way.
 
 #[doc(hidden)]
 pub mod fixture;
 mod routes;
 
 pub use routes::{
-    Routes, Way, routes_from, routes_from_passing, routes_toward, step_between, step_conditions,
+    Routes, Way, routes_from, routes_from_unlocked, routes_toward, step_between, step_conditions,
     ways,
 };
 
 use serde::{Deserialize, Serialize};
 
-/// As the wiki's English pages spell it.
+/// The start world's title, in the wiki's English spelling.
 pub const START: &str = "Urotsuki's Room";
 
 bitflags::bitflags! {
-    /// Independent flags rather than a kind: a connection can be locked behind a condition *and*
-    /// seasonal *and* one-way. The numbering is the wiki explorer's own and cannot be renumbered
-    /// -- it is what the dump publishes and what a reader reads back.
+    /// Independent flags: a connection can be locked, seasonal and one-way at once.
+    /// The numbering is the wiki explorer's, published in the dump, and must not change.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
     pub struct ConnType: u16 {
-        /// Walkable from the world that lists it, never back.
+        /// Traversable from the listing world only, never back.
         const ONE_WAY = 1 << 0;
-        /// Walkable only back to the world that lists it, never from it.
+        /// Traversable only into the listing world, never out.
         const NO_ENTRY = 1 << 1;
         /// This side opens a connection the far side reports as [`ConnType::LOCKED`].
         const UNLOCK = 1 << 2;
@@ -42,38 +34,36 @@ bitflags::bitflags! {
         /// Open only to a player wearing particular effects.
         const EFFECT = 1 << 6;
         const CHANCE = 1 << 7;
-        /// Open only once something else has happened, which the wiki writes out as a sentence.
+        /// Open only once a condition is met; the wiki states the condition as a sentence.
         const LOCKED_CONDITION = 1 << 8;
         const SHORTCUT = 1 << 9;
-        /// Where a shortcut comes out, walked backwards into the shortcut.
+        /// A shortcut's exit, traversed backwards into the shortcut.
         const EXIT_POINT = 1 << 10;
         const SEASONAL = 1 << 11;
-        /// Documented but no longer walkable.
+        /// Documented but no longer traversable.
         const INACCESSIBLE = 1 << 12;
         const TRACKED = 1 << 13;
     }
 }
 
-/// One connection as the dump publishes it, from the side of the world that lists it.
+/// One connection as published in the dump, from the listing world's side.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Connection {
     #[serde(rename = "targetId")]
     pub target_id: usize,
-    /// The wiki's own bitfield, as the bare number the dump carries. [`Connection::flags`]
-    /// types it.
+    /// The wiki's bitfield as a bare number; [`Connection::flags`] gives the typed form.
     #[serde(rename = "type")]
     pub bits: u16,
-    /// The wiki's own words for a demand, keyed by the flag making it. Ordered, so two dumps of
-    /// the same wiki compare equal as text.
+    /// The wiki's words for each demand, by flag; ordered, so two dumps of one wiki match as text.
     #[serde(rename = "typeParams", default)]
     pub type_params: std::collections::BTreeMap<u16, TypeParams>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct TypeParams {
-    /// Optional only to be read back: the dump has always written words here.
+    /// Always written in a published dump; optional for deserialization only.
     pub params: Option<String>,
-    /// Only ever the four seasons -- every other condition the wiki writes in English alone.
+    /// Seasons only; the wiki writes every other condition in English alone.
     #[serde(rename = "paramsJP")]
     pub params_jp: Option<String>,
 }
@@ -84,11 +74,11 @@ impl Connection {
     }
 
     fn conditions(&self) -> Conditions {
-        Conditions::of(Gate::all_of(self.flags()).map(|gate| {
+        Conditions::from_demands(Gate::most_restrictive_first(self.flags()).map(|gate| {
             Demand {
                 gate,
                 detail: gate
-                    .worded()
+                    .as_conn_type()
                     .and_then(|flag| self.type_params.get(&flag.bits()))
                     .and_then(|words| words.params.clone())
                     .filter(|words| !words.is_empty()),
@@ -97,15 +87,13 @@ impl Connection {
     }
 }
 
-/// What the walk needs of a world.
-///
-/// A trait rather than a type of this crate's own, so neither program has to hold its worlds twice.
+/// The fields routing reads from a world, implemented by each program's own world type.
 pub trait World {
-    /// The English one, which is what a condition naming a world names it by.
+    /// The English title, which conditions use to name a world.
     fn title(&self) -> &str;
     fn connections(&self) -> &[Connection];
 
-    /// What this world lists as its connection to `target`, if anything.
+    /// The connection this world lists to `target`, if any.
     fn connection_to(&self, target: usize) -> Option<&Connection> {
         self.connections()
             .iter()
@@ -115,44 +103,33 @@ pub trait World {
 
 /// The world the Eyeball Bomb effect returns a player to, from anywhere in the game.
 pub const HUB: &str = "Nexus";
-/// In the wiki's own English, which is the only language it writes an effect's name in.
-pub const ESCAPE: &str = "Eyeball Bomb";
+/// The effect that returns a player to the [`HUB`], by the wiki's English name.
+pub const ESCAPE_EFFECT: &str = "Eyeball Bomb";
 
-/// The world every other one has a way back to, which no world lists as a connection -- every
-/// world would have to. A walk given it takes it as a step out of anywhere, so [`ways`] finds the
-/// routes a player who owns the effect would actually take. `None` for a dump without the [`HUB`].
+/// The [`HUB`]'s index, or `None` for a dump without the hub.
+/// No world lists the escape to the hub, so [`ways`] adds an escape step out of every world.
 pub fn hub_world(worlds: &[impl World]) -> Option<usize> {
     worlds.iter().position(|world| world.title() == HUB)
 }
 
-/// Where the game starts, and so where every canonical route ends.
-///
-/// By name rather than by position. The dump usually lists it first, but only because it was the
-/// first world the reference implementation's database ever held: a dump built from nothing lists
-/// the worlds alphabetically and starts at `3D Structures Path`, and seeding the walk there leaves
-/// nearly every world unreachable -- one flat layer at no depth. The first world if the dump has no
-/// such title, which is not worth failing over.
-pub fn origin_world(worlds: &[impl World]) -> usize {
+/// The start world's index, found by title; the first world when no world has the [`START`] title.
+pub fn origin(worlds: &[impl World]) -> usize {
     worlds
         .iter()
         .position(|world| world.title() == START)
         .unwrap_or(0)
 }
 
-/// One condition of a connection: what it demands, and the wiki's own words for it.
+/// One condition of a connection: the gate and the wiki's words.
 #[derive(Clone)]
 pub struct Demand {
     pub gate: Gate,
-    /// `None` where the wiki wrote no words, and always for a direction that is inferred rather
-    /// than listed. See [`walkable_steps`].
+    /// `None` where the wiki wrote no words, which includes every inferred direction.
     pub detail: Option<String>,
 }
 
-/// Everything a connection demands, harshest first.
-///
-/// The flags are independent and a connection can carry several -- locked *and* wanting an effect
-/// -- so a reader has to be told all of them. A route is ordered by [`Conditions::gate`] alone,
-/// being only as free as the strictest of them.
+/// Every demand of a connection, most restrictive first.
+/// Routes are ordered by [`Conditions::gate`], the most restrictive demand, alone.
 #[derive(Clone)]
 pub struct Conditions {
     pub gate: Gate,
@@ -160,7 +137,7 @@ pub struct Conditions {
 }
 
 impl Conditions {
-    pub(crate) fn of(demands: impl IntoIterator<Item = Demand>) -> Self {
+    pub(crate) fn from_demands(demands: impl IntoIterator<Item = Demand>) -> Self {
         let demands: Vec<_> = demands.into_iter().collect();
         Self {
             gate: demands.first().map_or(Gate::Free, |demand| demand.gate),
@@ -168,31 +145,27 @@ impl Conditions {
         }
     }
 
-    /// The one demand, which the wiki wrote no words for.
-    pub fn just(gate: Gate) -> Self {
-        Self::of((gate != Gate::Free).then_some(Demand { gate, detail: None }))
+    /// A single demand without the wiki's words; no demand at all for [`Gate::Free`].
+    pub fn from_simple(gate: Gate) -> Self {
+        Self::from_demands((gate != Gate::Free).then_some(Demand { gate, detail: None }))
     }
 
     pub fn free() -> Self {
-        Self::just(Gate::Free)
+        Self::from_simple(Gate::Free)
     }
 
-    /// The words for the harshest demand, which is the one [`Conditions::gate`] names.
-    pub fn detail(&self) -> Option<&str> {
+    /// The wiki's words for the most restrictive demand, the one [`Conditions::gate`] names.
+    pub fn most_restrictive_detail(&self) -> Option<&str> {
         self.demands
             .first()
             .and_then(|demand| demand.detail.as_deref())
     }
 
-    /// Prose is all there is to go on: no flag separates the condition on a shortcut back in from
-    /// one a first-time visitor could meet. `destination` is that world's English title, the only
-    /// one the wiki writes these sentences in.
-    ///
-    /// Only where the condition is the harshest demand, so a way that is locked as well stays
-    /// ordered by the lock.
-    fn first_visit(mut self, destination: &str) -> Self {
+    /// A [`Gate::LockedCondition`] leading the demands becomes [`Gate::Revisit`] when the words
+    /// name `destination`; no flag marks a revisit, so the English title is matched.
+    fn with_revisit(mut self, destination: &str) -> Self {
         let names_destination = self
-            .detail()
+            .most_restrictive_detail()
             .is_some_and(|words| words.to_lowercase().contains(&destination.to_lowercase()));
         if self.gate == Gate::LockedCondition && names_destination {
             self.gate = Gate::Revisit;
@@ -202,9 +175,7 @@ impl Conditions {
     }
 }
 
-/// Ordered by how readily a route accepts it: [`Gate::Free`] demands nothing, and the rest follow
-/// in the order the wiki's own path finder falls back through them -- conditional before locked,
-/// and a shortcut's exit only once both of those are already allowed.
+/// Least restrictive first, in the reference implementation's order; `Free` demands nothing.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Gate {
     Free,
@@ -214,22 +185,20 @@ pub enum Gate {
     LockedCondition,
     /// Unlocked from the opposite entrance.
     Locked,
-    /// Where a shortcut comes out, walked backwards into the shortcut.
+    /// A shortcut's exit, traversed backwards into the shortcut.
     ExitPoint,
     /// Leads to an isolated section of the world at the far end.
     DeadEnd,
-    /// The far side of a [`Gate::DeadEnd`]: the way back is reachable only from that isolated
-    /// section.
+    /// The far side of a [`Gate::DeadEnd`], traversable only from the isolated section.
     Isolated,
-    /// A condition naming the world it leads to, which only a player already there can meet.
-    /// Harsher than anything the wiki flags, since it is no way in -- but still a step, so a world
-    /// it is the only way to is reached rather than lost.
+    /// A condition naming the destination, which only a player already there can meet.
+    /// The most restrictive gate; a world with only this way in is still reached.
     Revisit,
 }
 
 impl Gate {
-    /// Every condition the flags carry, strictest first: the enum's order, backwards.
-    pub fn all_of(flags: ConnType) -> impl Iterator<Item = Gate> {
+    /// Every gate in `flags`, most restrictive first.
+    pub fn most_restrictive_first(flags: ConnType) -> impl Iterator<Item = Gate> {
         [
             (ConnType::ISOLATED, Gate::Isolated),
             (ConnType::DEAD_END, Gate::DeadEnd),
@@ -245,21 +214,18 @@ impl Gate {
         .map(|(_, gate)| gate)
     }
 
-    /// Whether a player can meet this where they stand, as against a door opened from its far
-    /// side, which is no way in for anyone who has not already been through it the other way.
-    pub fn in_place(self) -> bool {
+    /// Whether a player can meet this gate in place: [`Gate::LockedCondition`] or less.
+    pub fn passable_without_unlocks(self) -> bool {
         self <= Gate::LockedCondition
     }
 
-    /// Whether a walk can go on from a step of this kind. A dead end lands a player in a part of
-    /// the world with no way out of it but back, so a route can end on one and never pass through
-    /// it. Not a condition: no effect and no unlock opens a way onward that is not there.
-    pub fn onward(self) -> bool {
+    /// Whether a route can continue past a step of this kind; dead-end and isolated steps end one.
+    pub fn passable(self) -> bool {
         !matches!(self, Gate::DeadEnd | Gate::Isolated)
     }
 
-    /// The flag whose words the dump writes for this condition, for the four it writes any for.
-    pub fn worded(self) -> Option<ConnType> {
+    /// The flag the dump keys this gate's words by; `None` for gates without words.
+    pub fn as_conn_type(self) -> Option<ConnType> {
         match self {
             Gate::Effect => Some(ConnType::EFFECT),
             Gate::Chance => Some(ConnType::CHANCE),
@@ -270,47 +236,41 @@ impl Gate {
     }
 }
 
-/// One connection of a world, from that world's side. A direction with no gate is a direction
-/// there is no way to walk, which is what makes a connection one-way.
+/// One connection of a world, from that world's side.
 pub struct Step {
     pub world: usize,
-    pub out: Option<Conditions>,
-    pub back: Option<Conditions>,
+    /// Conditions toward [`Step::world`]; `None` with no way there.
+    pub outgoing: Option<Conditions>,
+    /// Conditions from [`Step::world`] back; `None` with no way back.
+    pub incoming: Option<Conditions>,
 }
 
 impl Step {
-    /// Drawn as marching dashes, and the one thing a line has to know about itself.
+    /// Whether exactly one direction is traversable; drawn as marching dashes.
     pub fn one_way(&self) -> bool {
-        self.out.is_some() != self.back.is_some()
+        self.outgoing.is_some() != self.incoming.is_some()
     }
 }
 
-/// Per world, every world it is joined to, each with what the connection demands in either
-/// direction.
-///
-/// One entry per connection rather than one per listing: a connection is nearly always listed by
-/// both worlds it joins and is still one connection. A world's own listings come first, in the
-/// dump's order, then the connections only the far side lists.
-///
-/// Both the lines a reader draws and the routes walked here come from this, so a line drawn
-/// one-way is one-way on exactly the steps a route is denied.
+/// Per world, one [`Step`] per connected world: own listings first in dump order, then
+/// connections only the far side lists.
 pub fn connections(worlds: &[impl World]) -> Vec<Vec<Step>> {
-    let gates: std::collections::HashMap<_, _> = walkable_steps(worlds)
+    let conditions_by_pair: std::collections::HashMap<_, _> = directed_steps(worlds)
         .into_iter()
         .enumerate()
         .flat_map(|(from, steps)| {
             steps
                 .into_iter()
-                .map(move |(to, terms)| ((from, to), terms))
+                .map(move |(to, conditions)| ((from, to), conditions))
         })
         .collect();
 
-    let mut joined: Vec<Vec<usize>> = vec![Vec::new(); worlds.len()];
+    let mut neighbours: Vec<Vec<usize>> = vec![Vec::new(); worlds.len()];
     for (from, world) in worlds.iter().enumerate() {
         for connection in world.connections() {
             let to = connection.target_id;
-            if to != from && to < worlds.len() && !joined[from].contains(&to) {
-                joined[from].push(to);
+            if to != from && to < worlds.len() && !neighbours[from].contains(&to) {
+                neighbours[from].push(to);
             }
         }
     }
@@ -318,39 +278,32 @@ pub fn connections(worlds: &[impl World]) -> Vec<Vec<Step>> {
     for (from, world) in worlds.iter().enumerate() {
         for connection in world.connections() {
             let to = connection.target_id;
-            if to != from && to < worlds.len() && !joined[to].contains(&from) {
-                joined[to].push(from);
+            if to != from && to < worlds.len() && !neighbours[to].contains(&from) {
+                neighbours[to].push(from);
             }
         }
     }
 
-    joined
+    neighbours
         .into_iter()
         .enumerate()
-        .map(|(from, joined)| {
-            joined
+        .map(|(from, neighbours)| {
+            neighbours
                 .into_iter()
                 .map(|to| Step {
                     world: to,
-                    out: gates.get(&(from, to)).cloned(),
-                    back: gates.get(&(to, from)).cloned(),
+                    outgoing: conditions_by_pair.get(&(from, to)).cloned(),
+                    incoming: conditions_by_pair.get(&(to, from)).cloned(),
                 })
                 .collect()
         })
         .collect()
 }
 
-/// Every step a player can take, as a directed adjacency list carrying what each demands.
-///
-/// Directed and one-sided, unlike [`connections`]: what a world leads to, rather than what it is
-/// joined to.
-///
-/// A connection is nearly always listed by both worlds it joins, and those two listings are the two
-/// directions. Where only one side lists it, the other is inferred the way the wiki's own path
-/// finder infers it: [`ConnType::ONE_WAY`] means there is no way back, [`ConnType::UNLOCK`] means
-/// the way back is [`Gate::Locked`].
-pub fn walkable_steps(worlds: &[impl World]) -> Vec<Vec<(usize, Conditions)>> {
-    let listed: std::collections::HashSet<_> = worlds
+/// Per world, every step out with the step's conditions; unlisted directions are inferred.
+/// [`ConnType::ONE_WAY`] infers no way back; [`ConnType::UNLOCK`] infers a locked way back.
+pub fn directed_steps(worlds: &[impl World]) -> Vec<Vec<(usize, Conditions)>> {
+    let listed_pairs: std::collections::HashSet<_> = worlds
         .iter()
         .enumerate()
         .flat_map(|(from, world)| {
@@ -369,11 +322,11 @@ pub fn walkable_steps(worlds: &[impl World]) -> Vec<Vec<(usize, Conditions)>> {
                 continue;
             }
             if !flags.contains(ConnType::NO_ENTRY) {
-                steps[from].push((to, connection.conditions().first_visit(worlds[to].title())));
+                steps[from].push((to, connection.conditions().with_revisit(worlds[to].title())));
             }
-            if !listed.contains(&(to, from)) && !flags.contains(ConnType::ONE_WAY) {
+            if !listed_pairs.contains(&(to, from)) && !flags.contains(ConnType::ONE_WAY) {
                 // The wiki wrote no words for an unlisted direction.
-                let back = Conditions::just(match flags.contains(ConnType::UNLOCK) {
+                let back = Conditions::from_simple(match flags.contains(ConnType::UNLOCK) {
                     true => Gate::Locked,
                     false => Gate::Free,
                 });
@@ -395,20 +348,20 @@ mod tests {
 
     #[test]
     fn a_connection_lists_every_demand_harshest_first() {
-        let all_of = |flags| Gate::all_of(flags).collect::<Vec<_>>();
-        assert_eq!(all_of(ConnType::empty()), []);
-        assert_eq!(all_of(ConnType::ONE_WAY | ConnType::NO_ENTRY), []);
-        assert_eq!(all_of(ConnType::EFFECT), [Gate::Effect]);
+        let gates = |flags| Gate::most_restrictive_first(flags).collect::<Vec<_>>();
+        assert_eq!(gates(ConnType::empty()), []);
+        assert_eq!(gates(ConnType::ONE_WAY | ConnType::NO_ENTRY), []);
+        assert_eq!(gates(ConnType::EFFECT), [Gate::Effect]);
         assert_eq!(
-            all_of(ConnType::CHANCE | ConnType::LOCKED_CONDITION),
+            gates(ConnType::CHANCE | ConnType::LOCKED_CONDITION),
             [Gate::LockedCondition, Gate::Chance]
         );
         assert_eq!(
-            all_of(ConnType::LOCKED | ConnType::EFFECT),
+            gates(ConnType::LOCKED | ConnType::EFFECT),
             [Gate::Locked, Gate::Effect]
         );
         assert_eq!(
-            all_of(ConnType::LOCKED_CONDITION | ConnType::EXIT_POINT),
+            gates(ConnType::LOCKED_CONDITION | ConnType::EXIT_POINT),
             [Gate::ExitPoint, Gate::LockedCondition]
         );
     }
@@ -443,9 +396,9 @@ mod tests {
         );
     }
 
-    // `dreamweaver`'s `give_up` is the reference for this order.
+    // `dreamweaver`'s `allow_next_restriction` allows conditions in this order.
     #[test]
-    fn a_route_gives_conditions_up_in_the_references_order() {
+    fn a_route_allows_conditions_in_the_references_order() {
         let order = [
             Gate::Free,
             Gate::Effect,
@@ -460,50 +413,56 @@ mod tests {
         assert!(order.is_sorted());
     }
 
-    // The wiki writes no flag for this, only the sentence.
+    // The wiki marks a revisit with a sentence alone.
     #[test]
     fn a_condition_naming_where_it_leads_is_not_a_way_in() {
-        let one = |gate, detail: &str| {
-            Conditions::of([Demand {
+        let with_words = |gate, detail: &str| {
+            Conditions::from_demands([Demand {
                 gate,
                 detail: Some(detail.to_owned()),
             }])
         };
         assert_eq!(
-            one(
+            with_words(
                 Gate::LockedCondition,
                 "If Fluorescent Halls has been visited before"
             )
-            .first_visit("Fluorescent Halls")
+            .with_revisit("Fluorescent Halls")
             .gate,
             Gate::Revisit
         );
         assert_eq!(
-            one(Gate::LockedCondition, "View Ending #1 at least once")
-                .first_visit("Oil Puddle World B")
+            with_words(Gate::LockedCondition, "View Ending #1 at least once")
+                .with_revisit("Oil Puddle World B")
                 .gate,
             Gate::LockedCondition
         );
         assert_eq!(
-            one(Gate::Effect, "Chainsaw the Tree of Life in Blood Cell Sea")
-                .first_visit("Blood Cell Sea")
+            with_words(Gate::Effect, "Chainsaw the Tree of Life in Blood Cell Sea")
+                .with_revisit("Blood Cell Sea")
                 .gate,
             Gate::Effect
         );
     }
 
     #[test]
-    fn a_way_through_a_far_side_lock_never_stands_in_for_one_a_visitor_can_walk() {
+    fn a_way_through_a_far_side_lock_never_replaces_one_a_visitor_can_take() {
         let place = |title, connections| Place { title, connections };
-        let conn = |to, flags| connection(to, flags, None);
+        let without_words = |to, flags| connection(to, flags, None);
         let worlds = [
             place(
                 "Nexus",
-                vec![conn(1, ConnType::empty()), conn(4, ConnType::empty())],
+                vec![
+                    without_words(1, ConnType::empty()),
+                    without_words(4, ConnType::empty()),
+                ],
             ),
-            place("Lantern Causeway", vec![conn(2, ConnType::empty())]),
-            place("Mural Vestibule", vec![conn(3, ConnType::EFFECT)]),
-            place("Ember Terrace", vec![conn(4, ConnType::UNLOCK)]),
+            place(
+                "Lantern Causeway",
+                vec![without_words(2, ConnType::empty())],
+            ),
+            place("Mural Vestibule", vec![without_words(3, ConnType::EFFECT)]),
+            place("Ember Terrace", vec![without_words(4, ConnType::UNLOCK)]),
             place("Chalk Observatory", vec![]),
         ];
         let joined = connections(&worlds);
@@ -511,24 +470,26 @@ mod tests {
         let ways = ways(&joined, 0, 3, 5, Some(0));
 
         assert_eq!(
-            ways.iter().map(|way| way.walk.clone()).collect::<Vec<_>>(),
+            ways.iter()
+                .map(|way| way.worlds.clone())
+                .collect::<Vec<_>>(),
             [vec![0, 1, 2, 3], vec![0, 4, 3]]
         );
-        assert_eq!(ways[0].conditions, Gate::Effect);
-        assert_eq!(ways[1].conditions, Gate::Locked);
+        assert_eq!(ways[0].gate, Gate::Effect);
+        assert_eq!(ways[1].gate, Gate::Locked);
     }
 
     #[test]
-    fn a_connection_listed_once_is_walkable_both_ways() {
+    fn a_connection_listed_once_is_traversable_both_ways() {
         let joined = connections(&chain(&["Nexus", "Sofa Room"], ConnType::empty()));
         let step = &joined[1][0];
         assert_eq!(step.world, 0);
-        assert!(step.out.is_some(), "no way back out of the far side");
+        assert!(step.outgoing.is_some(), "no way back out of the far side");
         assert!(!step.one_way());
     }
 
     #[test]
-    fn a_walk_towards_a_world_counts_the_steps_left() {
+    fn a_route_toward_a_world_counts_the_steps_left() {
         let joined = connections(&chain(
             &["Nexus", "Sofa Room", "Far Room"],
             ConnType::ONE_WAY,
@@ -536,12 +497,12 @@ mod tests {
         let toward = routes_toward(&joined, 2);
         assert_eq!(toward.depth[2], Some(0));
         assert_eq!(toward.depth[0], Some(2));
-        assert_eq!(toward.walk_from(0), [0, 1, 2]);
+        assert_eq!(toward.route_from(0), [0, 1, 2]);
         assert_eq!(routes_toward(&joined, 0).depth[2], None);
     }
 
     #[test]
-    fn a_walk_never_steps_a_way_that_cannot_be_walked() {
+    fn a_route_never_takes_a_refused_step() {
         let joined: Vec<Vec<Step>> = connections(&chain(
             &["Nexus", "Sofa Room", "Far Room"],
             ConnType::NO_ENTRY,

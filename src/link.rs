@@ -1,33 +1,26 @@
-//! What the address the page was opened at carries:
-//!
-//! ```text
-//! https://explorer.yume.wiki/?location=Nexus&lang=en
-//! ```
-//!
-//! Only the page has an address. Everywhere else both are `None` and a run opens on whatever it
-//! left behind.
+//! Query parameters of the web build's URL (`?location=Nexus&lang=en`); `None` on other builds.
 
-/// The world to open on, by either of its names and in whatever case. See
+/// The world to open on, by either name, case-insensitive. See
 /// [`super::AppEntities::world_named`].
 pub(super) fn location() -> Option<String> {
     param("location")
 }
 
-/// A BCP 47 tag, matched the way the device's own is. Never written to the store: a link is read
-/// in the language it names without changing the language the reader chose.
+/// A BCP 47 tag, matched as the device's is. Not stored, so a link leaves the user's chosen
+/// language unchanged.
 pub(super) fn language() -> Option<String> {
     param("lang")
 }
 
-/// Which of `profile`'s switches a run opens with, comma separated, for a page with nobody to
-/// click them -- what `YUMEZU_FRAMES` names everywhere there is an environment to name it in.
+/// The `profile` switches a session starts with, comma separated: `YUMEZU_FRAMES` for the web
+/// build.
 #[cfg(all(target_family = "wasm", feature = "profile"))]
 pub(super) fn frames() -> Option<String> {
     param("frames")
 }
 
-/// The pose a `profile` run opens on, as `eye` then `target`: six numbers, comma separated, which
-/// is what the `camera in ... dimensions` log line prints. See `profile::pan_aside`.
+/// The pose a `profile` session opens on, as the six numbers the `camera in ... dimensions` log
+/// line prints: `eye` then `target`. See `profile::pan_aside`.
 #[cfg(all(target_family = "wasm", feature = "profile"))]
 pub(super) fn camera() -> Option<String> {
     param("camera")

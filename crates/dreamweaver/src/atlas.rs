@@ -1,6 +1,6 @@
 //! The thumbnail atlas: every world's wiki picture packed into the one jpeg the app samples.
 //!
-//! A world's picture sits at the `cell` the dump gives it; the placeholder takes the grid's last cell.
+//! Each world's picture sits at the `cell` the dump assigns; the placeholder takes the last cell.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,7 +11,7 @@ use axum::body::Bytes;
 use crate::model::Dump;
 
 /// Must match the app's `thumbnails::CELL`. Both sides are a multiple of 16 so the app's mip levels
-/// cannot bleed one cell into its neighbour.
+/// cannot bleed one cell into the next.
 const CELL: [u32; 2] = [64, 48];
 /// YNOproject's own picture for a world the player has not been to.
 const PLACEHOLDER_URL: &str = "https://ynoproject.net/2kki/images/unknown_location.png";
@@ -45,7 +45,7 @@ struct CellSource {
 }
 
 impl Atlas {
-    /// Serves whatever an earlier run left in `directory` until the first [`Atlas::pack`].
+    /// Serves whatever an earlier process left in `directory` until the first [`Atlas::pack`].
     pub fn open(directory: impl Into<PathBuf>) -> Self {
         let directory = directory.into();
         let read = |name| std::fs::read(directory.join(name));
@@ -174,7 +174,7 @@ async fn thumbnails(
     thumbnails
 }
 
-/// Cached before it is returned, so an interrupted pack resumes where it stopped.
+/// Cached before returning, so a resumed pack skips what was already downloaded.
 async fn download_cached(http: &reqwest::Client, url: &str, downloads: &Path) -> Option<Vec<u8>> {
     let name = url.rsplit('/').next().filter(|name| !name.is_empty())?;
     let cached = downloads.join(name);
@@ -224,7 +224,7 @@ fn encode(
     }
     place(columns * rows - 1, &thumbnail(&placeholder_full));
 
-    // Its 8x8 blocks divide a cell, so artefacts stay inside one world.
+    // The 8x8 JPEG blocks divide a cell, so artefacts stay in one world.
     let mut atlas_jpeg = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut atlas_jpeg, JPEG_QUALITY)
         .encode_image(&atlas)?;
@@ -254,7 +254,7 @@ fn decode_thumbnail(bytes: &[u8]) -> Option<image::RgbImage> {
     Some(thumbnail(&image::load_from_memory(bytes).ok()?.to_rgb8()))
 }
 
-/// Cropped about the centre to the cell's aspect ratio, then scaled to it.
+/// Centre-cropped to the cell's aspect ratio, then scaled to the cell size.
 fn thumbnail(picture: &image::RgbImage) -> image::RgbImage {
     let (width, height) = picture.dimensions();
     let scale = (width * CELL[1]).min(height * CELL[0]);

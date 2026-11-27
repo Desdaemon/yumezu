@@ -6,7 +6,7 @@ use chrono::{Datelike, Timelike};
 use super::*;
 
 impl Panel {
-    /// The theme in use beside the button that opens the picker, which has a dialog of its own.
+    /// A preview of the theme in use, beside the button that opens the picker dialog.
     fn system_theme(&mut self, ui: &mut egui::Ui, picking: &mut bool) {
         ui.horizontal(|ui| {
             let preview = skin::skin_button(ui, self.skin, false, SYSTEM_THEME_PREVIEW);
@@ -53,7 +53,7 @@ impl Panel {
             });
     }
 
-    /// A tab of its own because the knobs are set once and then left alone.
+    /// A separate tab, as the knobs are set once and then left alone.
     pub(super) fn settings(
         &mut self,
         ui: &mut egui::Ui,
@@ -64,11 +64,23 @@ impl Panel {
         self.language(ui);
         self.system_theme(ui, &mut browse.picking_theme);
         ui.add(
-            egui::Slider::new(&mut self.hub_repulsion, HUB_REPULSION_RANGE).text(t!("hub-push")),
+            egui::Slider::new(&mut self.hub_repulsion, HUB_REPULSION_RANGE)
+                .logarithmic(true)
+                .text(t!("hub-push")),
         )
         .on_hover_text(t!("hub-push-hint"));
         ui.add(egui::Slider::new(&mut self.link_reach, LINK_REACH_RANGE).text(t!("link-reach")))
             .on_hover_text(t!("link-reach-hint"));
+        ui.add_enabled(
+            self.arrangement.radial(),
+            egui::Checkbox::new(&mut self.pull_across_branches, t!("pull-across-branches")),
+        )
+        .on_hover_text(t!("pull-across-branches-hint"))
+        .on_disabled_hover_text(t!("pull-across-branches-hint"));
+        self.restart_layout |= ui
+            .button(t!("restart-layout"))
+            .on_hover_text(t!("restart-layout-hint"))
+            .clicked();
         ui.add(egui::Slider::new(&mut self.ui_scale, UI_SCALE_RANGE).text(t!("ui-scale")));
         self.antialiasing(ui);
         self.row_follow_switch(ui);
@@ -76,7 +88,7 @@ impl Panel {
         // Restores a guide dismissed for good.
         self.guide |= ui.button(t!("show-controls")).clicked();
         Self::clear_cache(ui);
-        update::controls(ui);
+        app_update::controls(ui);
         Self::freshness(ui, dump);
         Self::yno(ui, browse, account, dump);
 
@@ -93,8 +105,7 @@ impl Panel {
         }
     }
 
-    /// How old the graph is: when the dump was built, and when the wiki behind it was last read
-    /// whole. A fresh dump can still be missing an edit an incremental read never covered.
+    /// How old the graph is: when the dump was built, and when the wiki was last read in full.
     fn freshness(ui: &mut egui::Ui, dump: Option<&world::Dump>) {
         let Some(dump) = dump else {
             return;
@@ -127,8 +138,7 @@ impl Panel {
 
     /// Signing in to YNOproject, and drawing only as much of the graph as that account has seen.
     ///
-    /// Nothing of `self`: the account is told directly, and what comes of it is a graph built
-    /// again rather than anything this panel draws.
+    /// Takes no `self`: signing in rebuilds the graph, which this panel does not draw.
     fn yno(
         ui: &mut egui::Ui,
         browse: &mut Browse,
@@ -170,7 +180,7 @@ impl Panel {
                 {
                     account.refresh();
                 }
-                // Kept on YNOproject: ending it there signs out the game's browser too.
+                // The YNOproject login stays: ending that login signs out the game's browser too.
                 if ui.button(t!("yno-sign-out")).clicked() {
                     account.sign_out();
                 }
@@ -197,11 +207,8 @@ impl Panel {
         }
     }
 
-    /// How much of the game this account has seen, measured against the whole dump rather than the
-    /// graph beside it, which may be the frontier and would read a hundred per cent.
-    ///
-    /// Recomputed each frame it is drawn -- one pass over the titles, only while this tab is open
-    /// -- because anything kept would go stale on either side.
+    /// How much of the game this account has visited, against the whole dump: a frontier graph
+    /// reads 100%. Recomputed each frame while this tab is open, as either side can change.
     fn completion(ui: &mut egui::Ui, account: &yno::Account, dump: Option<&world::Dump>) {
         let (Some(visited), Some(dump)) = (account.visited(), dump) else {
             return;
@@ -218,17 +225,15 @@ impl Panel {
         .on_hover_text(t!("yno-completion-hint"));
     }
 
-    /// What signing in does with the account, beside the fields rather than behind a link. The
-    /// link points at the file that makes the promise rather than at the project.
+    /// What signing in does with the account, shown beside the fields, with a link to the source
+    /// file that keeps the promise.
     fn promise(ui: &mut egui::Ui) {
         ui.label(t!("yno-promise"));
         browser_link(ui, format!("{GITHUB}  {}", t!("yno-source")), YNO_SOURCE);
     }
 
-    /// Nothing of `self`, the cache's own state being the only state there is: one store behind
-    /// one client, and [`fetch::cleared`] is its answer to everyone.
-    ///
-    /// Native only. The page's cache is the browser's, which this app neither built nor may empty.
+    /// Takes no `self`: the cache is one store behind one client, reported by [`fetch::cleared`].
+    /// Native only: the web build's cache belongs to the browser.
     #[cfg(not(target_family = "wasm"))]
     fn clear_cache(ui: &mut egui::Ui) {
         let cleared = fetch::cleared();
@@ -258,8 +263,7 @@ impl Panel {
     #[cfg(target_family = "wasm")]
     fn clear_cache(_: &mut egui::Ui) {}
 
-    /// The one setting whose cost is worth more than its look, so the choice is the person's:
-    /// see [`MULTISAMPLES`].
+    /// The one setting whose cost can outweigh the look, so the user chooses: see [`MULTISAMPLES`].
     fn antialiasing(&mut self, ui: &mut egui::Ui) {
         ui.checkbox(&mut self.antialias, t!("antialias"))
             .on_hover_text(t!("antialias-hint"));
@@ -268,15 +272,14 @@ impl Panel {
         }
     }
 
-    /// The row-follow switch. See [`AppStatics::follow_hovered_row`].
+    /// The row-follow switch. See [`AppPersistent::follow_hovered_row`].
     fn row_follow_switch(&mut self, ui: &mut egui::Ui) {
         ui.checkbox(&mut self.row_follow, t!("leaning"))
             .on_hover_text(t!("leaning-hint"));
     }
 
-    /// Every language names itself, so someone who cannot read the one the app opened in can still
-    /// find theirs. The choice is left on the panel, so a frame half drawn in one language is not
-    /// finished in another.
+    /// Each language is named in that language, so any user can find theirs. The choice applies
+    /// after the frame, so no frame mixes two languages.
     fn language(&mut self, ui: &mut egui::Ui) {
         let speaking = i18n::speaking();
         let mut chosen = speaking;

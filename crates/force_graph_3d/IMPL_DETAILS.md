@@ -1,11 +1,11 @@
 # Implementation details
 
-Where this crate is written for the compiler rather than for the problem, what each of those
-choices is worth, and what to re-measure when the toolchain moves.
+Where this crate is written for the compiler, what each such choice is worth, and what to
+re-measure when the toolchain moves.
 
-Each choice works around something LLVM does not do on its own today. When a later compiler stops
-needing one, delete it and take the plainer code: `tests/codegen.rs` says which ones still apply,
-and the figures below say what it costs if one silently stops working.
+Each choice works around something LLVM does not do unaided today. When a later compiler stops
+needing a workaround, delete the workaround for the plainer code: `tests/codegen.rs` says which
+still apply, and the figures below say what each costs if one silently stops working.
 
 ## Measurements
 
@@ -17,24 +17,29 @@ not comparable with each other, and every table below says which set it belongs 
 | milliseconds per simulation step | 2026-11-15 | rustc 1.100.0 | as in `src/lib.rs` | `just bench` |
 | cycles per vectorized loop iteration | 2026-09-07 | rustc 1.98.1 / LLVM 22.1.8 | one more multiply per interaction | `llvm-mca`[^mca] |
 
-The desktop figures are one core of an AMD Ryzen 7 9800X3D. The phone is a moto g power 5G (2024),
-a Dimensity 7020 of six Cortex-A55 at 2.0 GHz and two Cortex-A78 at 2.2 GHz, with each run pinned
-to one core of a cluster. Node counts are the whole graph; `theta = 0` is the exact O(n²) pass and
-`0.7` the *Barnes-Hut*[^bh] default. The cycle counts are `llvm-mca` over the loop the compiler
-emitted, and one iteration of that loop is eight interactions on every model.
+The desktop figures are one core of an AMD Ryzen 7 9800X3D. The phone is a moto g power 5G (2024), a
+Dimensity 7020 of six Cortex-A55 at 2.0 GHz and two Cortex-A78 at 2.2 GHz, with each measurement
+pinned to one core of a cluster. Node counts are the whole graph; `theta = 0` is the exact O(n²)
+pass and `0.7` the *Barnes-Hut*[^bh] default. The cycle counts are `llvm-mca` over the loop the
+compiler emitted, and one iteration of that loop is eight interactions on every model.
 
 ## The repulsion kernel
 
-`repulsion_on` dominates a step. It is safe scalar Rust over `[f32; LANES]` chunks, written so
+`repulsion_on` dominates a step: safe scalar Rust over `[f32; LANES]` chunks, written so
 LLVM's *SLP vectorizer*[^slp] widens it, and the same source compiles for x86-64, aarch64 and wasm
 simd128. Three choices in it decide whether the SLP pass fires and what it emits around the loop it
 produces: a clamp per architecture, a lane loop over `as_chunks`, and the kernel kept out of line.
-A fourth picks the vector width on x86 at run time.
+A fourth picks the vector width on x86 at runtime.
+
+Node state is one `Vec<f32>` per component, so the scan is flat and branch-free. Every pair is
+computed twice, once per node, because the scattered write that Newton's third law needs blocks
+vectorization. Forces are gathered from one snapshot and integrated afterwards (Jacobi), so results
+do not depend on node order.
 
 ### The clamp has one variant per architecture
 
 `clamp_symmetric` picks `clamp_comparisons` on every `target_arch` except aarch64, which gets
-`clamp_ieee`. Each is the spelling that lowers to bare vector min/max on its architecture.
+`clamp_ieee`. Each is the spelling that lowers to bare vector min/max on the matching architecture.
 
 `f32::max` and `f32::min` are IEEE `maxNum` and `minNum`, which return the operand that is not NaN
 when one side is NaN. The hardware minimum and maximum do the opposite on x86, as
@@ -55,7 +60,7 @@ loop iteration, 2026-09-07 set, shipped `clamp_comparisons` against swapped `cla
 | znver3 | 35.0 | 72.0 | 16.5 | 26.1 |
 | alderlake | 21.8 | 52.6 | 11.1 | 21.6 |
 
-aarch64 reverses the ranking on every one of its scheduling models, favouring `f32::min`/`max` by
+aarch64 reverses the ranking on every aarch64 scheduling model, favouring `f32::min`/`max` by
 4.7% to 14.0%, the newest big cores gaining most. Same set, shipped `clamp_ieee` against swapped
 `clamp_comparisons`:
 
@@ -69,14 +74,14 @@ aarch64 reverses the ranking on every one of its scheduling models, favouring `f
 | cortex-x1, neoverse-v1 | 21.0 | 23.2 |
 | cortex-x4, cortex-x925 | 19.0 | 22.1 |
 
-`llvm-mca` has no wasm model, and a browser's own backend picks the final instructions; the x86
-rows are the closest available proxy for what it emits. These are static estimates of one loop.
+`llvm-mca` has no wasm model, and a browser's own backend picks the final instructions; the x86 rows
+are the closest available proxy for what the browser emits. These are static estimates of one loop.
 Where they disagree with the millisecond tables, the milliseconds are what the machine did.
 
 The two variants agree on every input except two:
 
 - A NaN `limit`, which the comparisons propagate and `minNum` discards. Nothing in the crate
-  produces one: `limit` is `force_max` or a multiple of it, and `clamp_symmetric` documents the
+  produces one: `limit` is `force_max` or a multiple, and `clamp_symmetric` documents the
   argument as excluding NaN.
 - The sign of a zero result, on aarch64 only, where `fmaxnm` and `fminnm` do not pick the zero the
   comparisons pick. A force of `-0.0` moves a node exactly as far as `0.0`, so
@@ -103,26 +108,26 @@ the application, which the shipping profile builds for size: the copy there come
 kernel is entered once per node, so the call is amortized over that node's interactions.
 `tests/codegen.rs` builds its consumer for speed and does not see this.
 
-### x86 dispatches to AVX2 at run time
+### x86 dispatches to AVX2 at runtime
 
 The desktop build targets baseline x86-64, whose SSE2 vectors hold four lanes. `repulsion_on` asks
 `is_x86_feature_detected!("avx2")`, a cached load, and on a yes enters `repulsion_on_avx2`, the
 same kernel compiled with `#[target_feature(enable = "avx2")]` at eight lanes. That halves the exact
 pass and takes a third off Barnes-Hut, and the dispatched build times within 2% of
-`target-cpu=x86-64-v3`. FMA is not enabled: Rust never contracts a multiply and an add on its own,
-so it adds nothing here.
+`target-cpu=x86-64-v3`. FMA is not enabled: Rust never contracts a multiply and an add unasked,
+so FMA adds nothing here.
 
 ### What each choice is worth
 
-The bounds check costs the most, 3x to 8x, and nothing in the Rust suggests it: the indexed loop
-reads the same and differs only in what LLVM can prove. It costs most where the vectors are widest,
-because the loss is the vectorization itself.
+The bounds check costs the most, 3x to 8x, and nothing in the Rust hints at the cost: the indexed
+loop reads the same and differs only in what LLVM can prove. The cost peaks where the vectors are
+widest, because the loss is the vectorization itself.
 
 The swapped clamp costs up to 2x on the exact pass, and the two aarch64 rows are why there are two
-variants. The Cortex-A78's 1.4x is far from the 10% `llvm-mca` estimates for aarch64, and its cause
-is not found: the two loops differ only by twelve `fcmgt` and twelve `bif` standing where twelve
+variants. The Cortex-A78's 1.4x is far from the 10% `llvm-mca` estimates for aarch64, for a cause
+not yet found: the two loops differ only by twelve `fcmgt` and twelve `bif` standing where twelve
 `fmaxnm`/`fminnm` were, and the gap holds whichever variant runs first. The Cortex-A55's 3% is
-inside its run-to-run variance.
+inside the variance between measurements.
 
 Milliseconds per step of the whole simulation, 2026-11-15 set, from `just bench`, one change at a
 time. The SSE2 rows are the path a CPU without AVX2 takes; this host has AVX2, so `just bench`
@@ -140,8 +145,10 @@ Exact summation, 4000 nodes:
 | Cortex-A78, 2.2 GHz | 37.6 | 53.9 | 1.43 | 163.8 | 4.36 |
 
 Barnes-Hut cuts interactions per node to O(log n), so the kernel is a smaller share of a step and
-every ratio shrinks: the octree walk around the kernel is the same in all three variants. This is
-the workload the application runs, and on the phone's big core the swapped clamp still costs 1.4x.
+every ratio shrinks: the octree traversal around the kernel is the same in all three variants. This
+is the workload the application runs, and on the phone's big core the swapped clamp still costs
+1.4x.
+
 Barnes-Hut at the default opening angle, 16000 nodes:
 
 | target | shipped (ms) | swapped clamp (ms) | ratio | indexed lanes (ms) | ratio |
@@ -173,8 +180,8 @@ the same module counts 20. For the same reason, `--emit=llvm-ir` on an LTO build
 bitcode that no optimization level has vectorized, so `tests/codegen.rs` builds without LTO to
 inspect the emitted kernel and reads the manifest separately.
 
-The last row below ships: the smallest after brotli, with the vectorized kernel. It gives up
-cross-crate inlining for everything outside this crate, which is mostly rendering and unmeasured.
+The last row below ships: the smallest after brotli, with the vectorized kernel. That build gives
+up cross-crate inlining for everything outside this crate, which is mostly rendering and unmeasured.
 At `opt-level = 3`, fat LTO adds 380 KB of raw wasm and 9 KB after brotli. The whole application,
 built for wasm32 with `+simd128`; the kernel column says whether `repulsion_on` in the emitted wasm
 holds `f32x4` instructions or scalar ones:
@@ -191,8 +198,8 @@ holds `f32x4` instructions or scalar ones:
 
 ### A reciprocal square root estimate
 
-Measured in the emitted loop, it is mostly not worth adopting, it hurts the slowest cores most, and
-wasm cannot express it.
+Measured in the emitted loop, the estimate is mostly not worth adopting, hurts the slowest cores
+most, and has no wasm instruction.
 
 `inv_cube` chains a square root and a divide, the two highest-latency vector operations the machine
 has, in a loop otherwise of multiplies and adds. x86 has [`rsqrtps`][rsqrtps] and aarch64 has
@@ -228,32 +235,32 @@ slack, so the substitution moves work off an idle unit onto busy ones, and the *
 throughput*[^mca] rises from 12.5 to 14.5.
 
 On `neoverse-n1`, `fsqrt` and `fdiv` are 7 cycles each on `N1UnitV0`, while `frsqrte` is 2 and
-[`frsqrts`][frsqrts] and the multiplies around it about 1 apiece, spread over `N1UnitV0` and
+[`frsqrts`][frsqrts] and the surrounding multiplies about 1 apiece, spread over `N1UnitV0` and
 `N1UnitV1`: the estimate empties the pipe that held the loop up, which is the gain on that class of
-core. On the two *in-order*[^inorder] cores, `cortex-a55` and `cortex-a510`, `frsqrte` and
-`frsqrts` are each charged 9 cycles to `CortexA55UnitFPDIV`, the unit `fsqrt` uses, so one
-Newton-Raphson step occupies it twice and adds two multiplies on the FP ALU: 18 cycles against the
-19 of the pair it replaces, and a loss once those multiplies land in a loop already full of them.
-Their NEON *datapath*[^datapath] is 64-bit, so each multiply occupies it for two cycles. Two
-Newton-Raphson steps break even at best, and the machines that would most want the estimate are
-the ones it hurts most.
+core. On the two *in-order*[^inorder] cores, `cortex-a55` and `cortex-a510`, `frsqrte` and `frsqrts`
+are each charged 9 cycles to `CortexA55UnitFPDIV`, the unit `fsqrt` uses, so one Newton-Raphson step
+occupies that unit twice and adds two multiplies on the FP ALU: 18 cycles against the 19 of the
+replaced pair, and a loss once those multiplies land in a loop already full of them. Their NEON
+*datapath*[^datapath] is 64-bit, so each multiply occupies the datapath for two cycles. Two
+Newton-Raphson steps break even at best, and the machines that would most want the estimate are the
+ones the estimate hurts most.
 
-wasm has no reciprocal-estimate instruction, because its SIMD is required to be bit-deterministic.
+wasm has no reciprocal-estimate instruction: wasm SIMD is required to be bit-deterministic.
 The browser build, the one with the tightest frame budget, cannot have the estimate whatever the
 flags say: `-ffast-math` emits the same square root and divide as the default build, instruction
 for instruction.
 
 On the native targets nothing in the toolchain stands in the way. The substitution is gated on one
-*fast-math flag*[^fastmath], `arcp`, on the divide: clang sets it with `-freciprocal-math` alone,
-and `-fapprox-func` alone changes nothing. `f32::algebraic_div` sets that flag from safe stable
-Rust on a single expression, which is enough for `rsqrtps` and one Newton-Raphson step under rustc
-1.98.1, with no intrinsics. The table above is what decides against it.
+*fast-math flag*[^fastmath], `arcp`, on the divide: clang sets `arcp` with `-freciprocal-math`
+alone, and `-fapprox-func` alone changes nothing. `f32::algebraic_div` sets that flag from safe
+stable Rust on a single expression, which is enough for `rsqrtps` and one Newton-Raphson step under
+rustc 1.98.1, with no intrinsics. The table above decides against the estimate.
 
 ### The charge folded into the divide
 
 On wasm the SLP vectorizer declines `charge_target * m / (r * r.sqrt())` and the kernel comes out
-scalar, 3.5x slower under wasmtime. Elsewhere it saves one more multiply than `inv_cube` does and is
-9% to 17% faster on x86-64 and the Cortex-A78.
+scalar, 3.5x slower under wasmtime. Elsewhere the fold saves one more multiply than `inv_cube` does
+and is 9% to 17% faster on x86-64 and the Cortex-A78.
 
 ### A wider `LANES` on AVX-512
 
@@ -264,10 +271,10 @@ scalar, 3.5x slower under wasmtime. Elsewhere it saves one more multiply than `i
 
 `tests/codegen.rs` asserts the clamp variant and the vectorized lane loop on each target, and
 `just bench <nodes> <theta> <steps>` times those two against the variant each was chosen over, here
-and on a phone over adb; the millisecond tables come from it. It builds through `tools/variant.py`, which writes
-the alternatives into a scratch copy of the crate, so none of them lives in the kernel behind a
-`cfg`. An alternative whose anchor text no longer matches is an error: the kernel moved, and the
-figure it measured wants remeasuring.
+and on a phone over adb; the millisecond tables come from `just bench`. The bench builds through
+`tools/variant.py`, which writes the alternatives into a scratch copy of the crate, so none of them
+lives in the kernel behind a `cfg`. An alternative whose anchor text no longer matches is an error:
+the kernel moved, and the alternative's figure needs remeasuring.
 
 To read the code directly:
 

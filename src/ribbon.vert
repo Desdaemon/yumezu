@@ -1,7 +1,10 @@
-// A connection as a flat strip turned to face the eye: the instance's x axis runs from one world
-// to the other and the length of its y axis is half the strip's width.
+// A connection as a flat strip facing the eye: the instance's x axis runs from one world to the
+// other, and the y axis length is half the strip's width.
 uniform mat4 viewProjection;
 uniform vec3 eye;
+// Past `fadeWholeWithin` of the origin a line dims to 1/e per `fadeLength`; zero disables the fade.
+uniform float fadeWholeWithin;
+uniform float fadeLength;
 in vec3 position;
 in vec4 row1;
 in vec4 row2;
@@ -23,6 +26,14 @@ in vec4 instance_color;
 out vec3 pos;
 out vec4 col;
 flat out int instance_id;
+
+float brightness_at(vec3 at)
+{
+    if (fadeLength <= 0.0) {
+        return 1.0;
+    }
+    return exp(-max(length(at) - fadeWholeWithin, 0.0) / fadeLength);
+}
 
 void main()
 {
@@ -52,5 +63,7 @@ void main()
 #ifdef USE_INSTANCE_COLORS
     col *= instance_color;
 #endif
+    // Interpolated between the ends: the chord passes nearer the origin than either end.
+    col.rgb *= mix(brightness_at(from), brightness_at(from + span), position.x);
     instance_id = gl_InstanceID;
 }

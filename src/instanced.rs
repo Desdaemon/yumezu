@@ -1,12 +1,12 @@
-//! Three-d's [`InstancedMesh`] with its GPU buffers kept and refilled: its `set_instances` clones
-//! the instances, bounds every one and makes new buffers, which was most of a moving frame.
+//! Three-d's [`InstancedMesh`] with the GPU buffers kept and refilled: the stock `set_instances`
+//! clones the instances, bounds every one and makes new buffers, which was most of a moving frame.
 
 use three_d::renderer::*;
 
-/// Outside three-d's own range, which its [`GeometryId`] reserves.
+/// Outside the range three-d's [`GeometryId`] reserves.
 const REFILLED_MESH_ID: u16 = 0x0100;
 
-/// Drawn the way an [`InstancedMesh`] is, by the same vertex shader, or as [`RefilledMesh::ribbon`].
+/// Drawn as an [`InstancedMesh`] is, by the same vertex shader, or as [`RefilledMesh::ribbon`].
 /// Unlit: no normals or tangents are uploaded.
 pub(super) struct RefilledMesh {
     context: Context,
@@ -15,6 +15,8 @@ pub(super) struct RefilledMesh {
     uvs: Option<VertexBuffer<Vec2>>,
     shape: Shape,
     base_shader: String,
+    /// Ribbons only; `None` draws them whole.
+    pub(super) line_fade: Option<LineFade>,
     rows: [InstanceBuffer<Vec4>; 3],
     texture_rows: Option<[InstanceBuffer<Vec3>; 2]>,
     colors: Option<InstanceBuffer<Vec4>>,
@@ -23,6 +25,14 @@ pub(super) struct RefilledMesh {
     staged_rows: [Vec<Vec4>; 3],
     staged_texture_rows: [Vec<Vec3>; 2],
     staged_colors: Vec<Vec4>,
+}
+
+/// How a ribbon dims with distance from the origin, in world units.
+#[derive(Clone, Copy)]
+pub(super) struct LineFade {
+    pub(super) whole_within: f32,
+    /// Past `whole_within`, the distance over which a line dims to 1/e of full brightness.
+    pub(super) e_fold_length: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -42,8 +52,8 @@ impl RefilledMesh {
         Self::with_shader(context, instances, cpu_mesh, Shape::Mesh, base_shader)
     }
 
-    /// A strip from `(0, 0, 0)` to `(1, 0, 0)` of each instance, turned to face the eye: two
-    /// triangles where a tube takes two a side. `dashed` gives it a `u` running along it.
+    /// A strip from `(0, 0, 0)` to `(1, 0, 0)` per instance, facing the eye: two triangles where a
+    /// tube takes two a side. `dashed` adds a `u` along the strip.
     pub(super) fn ribbon(context: &Context, instances: &Instances, dashed: bool) -> Self {
         let corners = [
             vec2(0.0, -1.0),
@@ -81,6 +91,7 @@ impl RefilledMesh {
             }),
             shape,
             base_shader,
+            line_fade: None,
             rows: std::array::from_fn(|_| InstanceBuffer::new(context)),
             texture_rows: None,
             colors: None,
@@ -166,7 +177,15 @@ impl Geometry for RefilledMesh {
                 program.use_uniform("animationTransform", Mat4::identity());
                 program.use_uniform("modelMatrix", Mat4::identity());
             }
-            Shape::Ribbon => program.use_uniform("eye", viewer.position()),
+            Shape::Ribbon => {
+                program.use_uniform("eye", viewer.position());
+                let fade = self.line_fade.unwrap_or(LineFade {
+                    whole_within: 0.0,
+                    e_fold_length: 0.0,
+                });
+                program.use_uniform("fadeWholeWithin", fade.whole_within);
+                program.use_uniform("fadeLength", fade.e_fold_length);
+            }
         }
         for (name, buffer) in ["row1", "row2", "row3"].into_iter().zip(&self.rows) {
             program.use_instance_attribute(name, buffer);
@@ -255,7 +274,7 @@ impl Geometry for RefilledMesh {
         }
     }
 
-    /// Unbounded, so nothing is culled and a render call keeps its given order; an empty mesh is
+    /// Unbounded, so nothing is culled and a render call keeps the given order; an empty mesh is
     /// still skipped.
     fn aabb(&self) -> AxisAlignedBoundingBox {
         match self.count {

@@ -1,10 +1,5 @@
-//! Times `ForceGraph::update` on the machine the kernel is meant for.
-//!
-//! `bench <nodes> <theta> <steps>`, printing nanoseconds per step. `theta` of zero sums every pair
-//! and is the workload the lane loop dominates; the default angle adds the octree walk around it
-//! and is what the application runs.
-//!
-//! `tools/bench.sh` runs this here and on an Android device over adb.
+//! Times `ForceGraph::update`: `bench <nodes> <theta> <steps>` prints ns per step; `theta` 0
+//! isolates the lane loop. Also run on Android by `tools/bench.sh`.
 
 use force_graph_3d::*;
 use std::time::Instant;
@@ -25,7 +20,7 @@ fn main() {
         ..Default::default()
     });
 
-    // Deterministic: positions decide how much of the octree a step walks.
+    // Deterministic: positions decide how much of the octree a step traverses.
     let mut seed = 0x2545_F491_4F6C_DD1Du64;
     let mut next = || {
         seed ^= seed << 13;

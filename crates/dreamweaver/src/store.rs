@@ -1,9 +1,5 @@
-//! Where the dump lives between requests, and where it survives a restart.
-//!
-//! No database: the dump is small enough to hold whole, it is rebuilt rather than edited, and the
-//! file it is written to is the very thing clients are served. So it is one JSON document, kept
-//! parsed for the sync that reads the last one and serialized for the requests that hand it out. A
-//! server coming up with the wiki unreachable still serves the last dump it wrote.
+//! The dump in memory and as one JSON file, the file clients are served, so a restart with the
+//! wiki unreachable still serves the last dump.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -11,17 +7,15 @@ use std::sync::{Arc, RwLock};
 use crate::model::Dump;
 
 pub struct Snapshot {
-    /// For the next sync, which reads the previous dump to keep the published world order and to
-    /// carry over what an operator marked on them.
+    /// For the next sync, which keeps the previous dump's world order and operator marks.
     pub dump: Dump,
-    /// Byte for byte what a client is sent and what the file holds. Kept rather than produced per
-    /// request, being a couple of megabytes and identical every time.
+    /// Byte for byte what a client is sent and what the file holds; serialized once per dump.
     pub json: Arc<str>,
-    /// What `/getNextLocations` walks. Built with the dump: the walk is per request, this is not.
+    /// The connections `/getNextLocations` traverses, built once with the dump.
     pub routing: Routing,
 }
 
-/// The dump as something to walk, and how a caller naming a world in words finds it.
+/// The dump as connections to traverse, and a lookup for callers that name a world by title.
 pub struct Routing {
     pub connections: Vec<Vec<yumezu_routing::Step>>,
     /// By the wiki's English title, which is what YNOproject's location list calls a world.
@@ -52,8 +46,8 @@ pub struct Store {
 }
 
 impl Store {
-    /// A missing or unreadable file is the state before the first sync. One that is there but
-    /// malformed means a previous run wrote something a later one cannot read.
+    /// A missing file is the state before the first sync; a malformed one came from an
+    /// incompatible build.
     pub fn open(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let dump = match std::fs::read_to_string(&path) {
@@ -106,7 +100,7 @@ fn snapshot(dump: Dump) -> Snapshot {
     }
 }
 
-/// Written beside `path` and renamed over it, so a run dying mid-write leaves the previous file whole.
+/// Written beside `path`, then renamed over the original: a crash mid-write keeps the old file.
 pub fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     if let Some(directory) = path
         .parent()

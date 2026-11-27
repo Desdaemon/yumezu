@@ -1,13 +1,5 @@
-//! Everything this app says, in whichever language it is being spoken.
-//!
-//! Fluent, because half of what is said is a count and the languages disagree about how a count is
-//! said. That disagreement belongs in `locales/<tag>/main.ftl` rather than in the panel.
-//!
-//! Every language is parsed at once because English has to be resident whatever is being spoken: it
-//! is what the rest fall back to for a message not written in them yet.
-//!
-//! Nothing here is locked: the messages never change, and the language is an atomic, read once per
-//! world name on screen and so a few thousand times a frame.
+//! Fluent messages from `locales/<tag>/main.ftl`, with English loaded as the fallback. The
+//! language is an atomic, read by every world name on screen each frame.
 
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
@@ -16,12 +8,11 @@ use fluent_bundle::concurrent::FluentBundle;
 use fluent_bundle::{FluentArgs, FluentResource};
 use unic_langid::LanguageIdentifier;
 
-// A tag, so it survives a version with a different set of languages.
+// Stored as a tag, which survives a change in the set of languages.
 const LANGUAGE: &str = "language";
 
-/// A closed set rather than a table of tags, so anything reading differently per language can say
-/// so in a checked `match`. Adding one is a variant here, an entry in [`Language::ALL`], and a
-/// file for [`Language::ftl`] to name.
+/// A closed set, so per-language differences are a checked `match`. Adding a language takes a
+/// variant here, an entry in [`Language::ALL`], and a file for [`Language::ftl`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Language {
     /// The fallback, and so the one language that has to carry every message.
@@ -33,7 +24,7 @@ impl Language {
     /// In the order the picker offers them, English first as the fallback.
     pub(super) const ALL: [Language; 2] = [Language::English, Language::Japanese];
 
-    /// BCP 47, which is what the store keeps and what a device names its language in.
+    /// BCP 47, as stored and as devices name locales.
     pub(super) fn tag(self) -> &'static str {
         match self {
             Self::English => "en-US",
@@ -54,8 +45,8 @@ impl Language {
         }
     }
 
-    /// Read out of its own messages, so someone who cannot read the language the app came up in
-    /// can still find theirs in the picker.
+    /// Written in the language itself, so the user finds theirs in the picker whatever the
+    /// current language.
     pub(super) fn name(self) -> String {
         CATALOG
             .say(self, "language-name", None)
@@ -63,15 +54,15 @@ impl Language {
     }
 }
 
-/// An index into [`Language::ALL`], or [`UNSETTLED`] before anything has read it. Relaxed
-/// throughout: nothing is published alongside it for another thread to have to see first.
+/// An index into [`Language::ALL`], or [`UNSETTLED`] before the first read. Relaxed: no other
+/// data is published with the index.
 static SPEAKING: AtomicUsize = AtomicUsize::new(UNSETTLED);
 
-/// Settled on the first read rather than at startup, so nothing has to remember to settle it.
+/// Settled on the first read, so no startup call is needed.
 const UNSETTLED: usize = usize::MAX;
 
-/// Immutable once built, which is what leaves this without a lock. The bundles are the concurrent
-/// ones because a plain [`fluent_bundle::FluentBundle`] is not [`Sync`].
+/// Immutable once built, so lock-free. The bundles are the concurrent kind, since a plain
+/// [`fluent_bundle::FluentBundle`] is not [`Sync`].
 static CATALOG: LazyLock<Catalog> = LazyLock::new(Catalog::new);
 
 struct Catalog {
@@ -100,8 +91,8 @@ impl Catalog {
         Self { bundles }
     }
 
-    /// A message whose values do not add up counts as unsaid and falls through to the next
-    /// language and finally to its own id: a message id on screen is a fault anybody can report.
+    /// A message with mismatched values falls through to the next language, then to the message
+    /// id, which shows on screen as a reportable fault.
     fn say(&self, language: Language, id: &str, args: Option<&FluentArgs>) -> Option<String> {
         let bundle = &self.bundles[language as usize];
         let pattern = bundle.get_message(id)?.value()?;
@@ -111,12 +102,11 @@ impl Catalog {
     }
 }
 
-/// One relaxed load and no lock, which is what lets a caller read it per world name rather than be
-/// told once and carry the answer around.
+/// One relaxed load and no lock, cheap enough to call per world name.
 pub(super) fn speaking() -> Language {
     match SPEAKING.load(Relaxed) {
         UNSETTLED => {
-            // Racers compute the same answer.
+            // Racing threads compute the same answer.
             let language = chosen();
             SPEAKING.store(language as usize, Relaxed);
             language
@@ -126,8 +116,7 @@ pub(super) fn speaking() -> Language {
     }
 }
 
-/// Read often enough to be worth its own name: no font this app starts with carries the
-/// glyphs, and the wiki has a second site in it.
+/// Read often: no font loaded at startup carries the glyphs, and Japanese has a second wiki site.
 pub(super) fn speaking_japanese() -> bool {
     speaking() == Language::Japanese
 }
@@ -137,8 +126,7 @@ pub(super) fn speak(language: Language) {
     super::store::write(LANGUAGE, Some(language.tag()));
 }
 
-/// Reached through [`t!`] rather than called, which is what names a message's values where it is
-/// said.
+/// Called through [`t!`], which names a message's values at the call site.
 pub(super) fn format(id: &str, args: Option<&FluentArgs>) -> String {
     let speaking = speaking();
     CATALOG
@@ -150,14 +138,14 @@ pub(super) fn format(id: &str, args: Option<&FluentArgs>) -> String {
         .unwrap_or_else(|| id.to_owned())
 }
 
-/// What a message says, by name, with the values it takes named where it is said:
+/// Formats a message by id, with values named at the call site:
 ///
 /// ```ignore
 /// t!("graph-size", worlds = 1574, connections = 4402)
 /// ```
 ///
-/// The names are the message's own `$variables`, so one that does not match leaves the message
-/// unsaid rather than silently dropping a number out of a sentence.
+/// The names are the message's `$variables`; a mismatched name makes the message fall back, so no
+/// number drops silently out of a sentence.
 macro_rules! t {
     ($id:literal) => {
         $crate::i18n::format($id, None)
@@ -170,15 +158,14 @@ macro_rules! t {
 }
 pub(super) use t;
 
-/// For the tests that assert on what something says: a test has nobody to have chosen a language
-/// and would otherwise read out in the machine's. Not written to the store.
+/// For tests that assert on text, which would otherwise follow the machine's language. Not stored.
 #[cfg(test)]
 pub(super) fn speak_english() {
     SPEAKING.store(Language::English as usize, Relaxed);
 }
 
 fn chosen() -> Language {
-    // The link first: it was written for this run.
+    // The link first: the URL carries a language picked for this session.
     super::link::language()
         .and_then(|tag| matching(&tag))
         .or_else(|| super::store::read(LANGUAGE).and_then(|tag| matching(&tag)))
@@ -187,8 +174,7 @@ fn chosen() -> Language {
         .unwrap_or(Language::English)
 }
 
-/// The whole tag first, then the language alone: `ja-JP` wants the Japanese this app has, and
-/// `en-GB` is better served by the American English here than by nothing.
+/// The whole tag first, then the language alone, so `ja-JP` matches Japanese and `en-GB` English.
 fn matching(tag: &str) -> Option<Language> {
     let wanted: LanguageIdentifier = tag.parse().ok()?;
     let tags: Vec<LanguageIdentifier> = Language::ALL
@@ -209,7 +195,7 @@ mod tests {
 
     use super::Language;
 
-    // A bundle cannot list its messages.
+    // Bundles cannot list messages.
     fn named(ftl: &str) -> Vec<&str> {
         ftl.lines()
             .filter(|line| line.starts_with(|first: char| first.is_ascii_alphabetic()))
@@ -285,7 +271,7 @@ mod tests {
             args.set(worded, "x");
         }
         for id in named(Language::English.ftl()) {
-            // `format` answers a missing message with its name, which some messages equal.
+            // `format` answers a missing message with the message id, which some messages equal.
             assert!(
                 super::CATALOG
                     .say(Language::English, id, Some(&args))

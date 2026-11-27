@@ -1,14 +1,10 @@
-//! Reading the release names the wiki writes into a world's infobox.
-//!
-//! Two are lists packed into one string, both packing a `-` into entries whose version names may
-//! themselves begin `pre-`. So neither can be split on the first dash it contains; both are split
-//! on the dash a version name starts after.
+//! Parses the infobox's packed version lists, splitting on the `-` a version name starts after,
+//! since names may begin `pre-`.
 
 use crate::model::{VerGap, VerUpdated};
 
-/// Where a version name ends inside `entry`, given that one starts at its beginning: the first `-`
-/// that is not the one inside a leading `pre-` and that a version name follows -- another `pre-`,
-/// or a digit. `None` where `entry` is one name and nothing else.
+/// Where the first version name in `entry` ends: the first `-`, past any leading `pre-`, followed
+/// by `pre-` or a digit. `None` when `entry` is a single name.
 fn separator(entry: &str) -> Option<usize> {
     let from = if entry.starts_with("pre-") { 4 } else { 0 };
     entry[from..].char_indices().find_map(|(at, c)| {
@@ -19,10 +15,8 @@ fn separator(entry: &str) -> Option<usize> {
     })
 }
 
-/// Splits `0.120d patch 21-0.120e,0.125a-0.125b` into the spans a world was absent for.
-///
-/// An entry with no separator is dropped rather than guessed at: half a gap says nothing about
-/// when the world came back.
+/// Splits `0.120d patch 21-0.120e,0.125a-0.125b` into the spans a world was absent for; an entry
+/// without a readded version is dropped.
 pub fn gaps(packed: &str) -> Option<Vec<VerGap>> {
     let gaps: Vec<VerGap> = packed
         .split(',')
@@ -38,10 +32,8 @@ pub fn gaps(packed: &str) -> Option<Vec<VerGap>> {
     (!gaps.is_empty()).then_some(gaps)
 }
 
-/// Splits `0.118e,0.120a-c,0.121` into the releases that changed a world.
-///
-/// Here the part after the separator is the wiki's shorthand for the kind of change rather than
-/// another version, so an entry without one is kept: the wiki did not say how it changed.
+/// Splits `0.118e,0.120a-c,0.121` into the releases that changed a world; after the `-` is the
+/// kind of change, and an entry without one is kept with no kind.
 pub fn updates(packed: &str) -> Option<Vec<VerUpdated>> {
     let updates: Vec<VerUpdated> = packed
         .split(',')

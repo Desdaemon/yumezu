@@ -1,10 +1,10 @@
-//! The tabs that read the graph rather than a selection in it -- the worlds, the authors, the
+//! The tabs that read the whole graph rather than a selection -- the worlds, the authors, the
 //! releases, the settings -- and the windows they stand in on a wide screen and a narrow one.
 
 use super::*;
 
-/// A right-click on a release, offering the history page it is written up on. The Japanese wiki
-/// writes its own history rather than translating the English one, so both are offered.
+/// A right-click menu on a release, opening the release's history page. The Japanese wiki keeps
+/// a separate history, so a Japanese user is offered both.
 fn wiki_menu(row: &egui::Response, release: &world::Version) {
     egui::Popup::context_menu(row)
         .style(egui::style::StyleModifier::default())
@@ -20,7 +20,7 @@ fn wiki_menu(row: &egui::Response, release: &world::Version) {
         });
 }
 
-/// Pressing the open tab again folds it away, which on a narrow screen closes its window.
+/// Pressing the open tab again folds the list away; on a narrow screen, the window closes.
 fn tabs(ui: &mut egui::Ui, browse: &mut Browse) {
     let tabs = [
         (Tab::Worlds, t!("tab-worlds")),
@@ -70,7 +70,7 @@ impl Panel {
         );
     }
 
-    /// A tab bar along the foot, and over it the open tab or, once folded, the selection.
+    /// A tab bar along the foot, under the open tab or, once folded, the selection.
     /// Answers the insets left for everything else.
     pub(super) fn narrow_windows(
         &mut self,
@@ -144,7 +144,7 @@ impl Panel {
             Tab::Versions => {
                 self.versions_tab(ui, read, &mut browse.versions, &mut browse.collapsed)
             }
-            // Never folded: it holds no list a selection would want room from.
+            // Never folded: settings hold no list a selection needs room from.
             Tab::Settings => {
                 egui::ScrollArea::vertical()
                     .max_height(ui.available_height())
@@ -154,7 +154,7 @@ impl Panel {
         }
     }
 
-    /// The open tab's list, or a line that unfolds it while a selection has it folded away.
+    /// The open tab's list or, while a selection has the list folded, a line that unfolds the list.
     fn foldable_list(
         &mut self,
         ui: &mut egui::Ui,
@@ -266,8 +266,7 @@ impl Panel {
         });
     }
 
-    /// Listed whole rather than cut to the best few: a release is looked up as often by reading
-    /// down the history as by name.
+    /// Lists every release, as one is found as often by reading down the history as by name.
     fn versions_tab(
         &mut self,
         ui: &mut egui::Ui,
@@ -287,12 +286,11 @@ impl Panel {
         });
     }
 
-    /// The whole row lights the release, and each picture in it goes to its own world, so the
-    /// catalog is a way into the graph rather than only a way to read it.
+    /// The row highlights the release, and each picture in the row selects that picture's world.
     fn version(&mut self, ui: &mut egui::Ui, read: &PanelData, version: usize) {
         let data = read.data;
         let release = &data.versions[version];
-        // egui derives a widget's id from its content, so the release keeps identical rows apart.
+        // egui ids derive from content, so the release index keeps identical rows apart.
         ui.push_id(version, |ui| {
             let lit = read.selected == Some(Highlight::Version(version));
             let tile = Tile::new(
@@ -336,8 +334,8 @@ impl Panel {
     }
 }
 
-/// `of` names the box to egui and never reaches the screen. `hint` is read in it while it is
-/// empty. Answers whether anything was typed or cleared.
+/// `of` is the box's egui id, never shown; `hint` shows in the empty box.
+/// Answers whether anything was typed or cleared.
 fn search_box(ui: &mut egui::Ui, search: &mut String, of: &str, hint: String) -> bool {
     let clear_id = egui::Id::new(of);
     let clear_size = egui::Vec2::splat(ui.spacing().interact_size.y);
@@ -357,8 +355,8 @@ fn search_box(ui: &mut egui::Ui, search: &mut String, of: &str, hint: String) ->
     typed
 }
 
-/// `kind` names the list rather than the noun: a language need not say "3 authors" with the same
-/// word it says "3 of 9 authors" with, so each list has a message for each.
+/// `kind` names the list, which has a message per form: a language may word "3 authors" and
+/// "3 of 9 authors" differently.
 fn showing(shown: usize, of: usize, kind: &str) -> String {
     match shown == of {
         true => i18n::format(&format!("showing-{kind}"), Some(&count_args(shown, of))),

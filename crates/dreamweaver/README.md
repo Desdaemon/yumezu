@@ -1,37 +1,36 @@
 # dreamweaver
 
 Builds and serves `data.json`, the world dump yumezu draws, and the thumbnail atlas of every world's
-picture. It queries yume.wiki's Semantic
-MediaWiki store for the Yume 2kki world data and keeps the result in one JSON file, which is both
-what it serves and what it reads back when it restarts.
+picture. The dump is queried from yume.wiki's Semantic MediaWiki store and kept in one JSON file,
+served as is and read back on restart.
 
 ```
 dreamweaver [--listen ADDR|PATH] [--data PATH] [--atlas DIR] [--sync-every HOURS]
 ```
 
-There is nothing to run but the server and nothing to tell it to do.
+There are no subcommands: the binary is the server.
 
 | flag | default | |
 |---|---|---|
-| `--listen` | `127.0.0.1:5000` | a `host:port`, or the path of a Unix socket if it has a `/` in it |
+| `--listen` | `127.0.0.1:5000` | a `host:port`, or the path of a Unix socket if the value has a `/` |
 | `--data` | `data.json` | where every version of the dump is written, and read back at startup |
 | `--atlas` | `atlas` | where the atlas is written and read back, and the wiki's pictures are kept |
 | `--sync-every` | `2` | hours between syncs |
 
-A run that comes up with the wiki unreachable still serves the last dump it wrote.
+A server that comes up with the wiki unreachable still serves the last dump written.
 
 ## Listening
 
-nginx reaches it either way:
+nginx reaches the server either way:
 
 ```nginx
 proxy_pass http://127.0.0.1:5000;                # dreamweaver --listen 127.0.0.1:5000
 proxy_pass http://unix:/run/dreamweaver.sock:;   # dreamweaver --listen /run/dreamweaver.sock
 ```
 
-The socket is made mode `0666`, so the directory you put it in is what decides who may connect:
-choose it on purpose. A stale socket left by a run that was killed is cleared at startup, and the
-socket is removed when the server stops.
+The socket is made mode `0666`, so the socket's directory decides who may connect: choose that
+directory on purpose. A stale socket left by a process that was killed is cleared at
+startup, and the socket is removed when the server stops.
 
 ## Routes
 
@@ -42,8 +41,8 @@ socket is removed when the server stops.
 | `GET /static/thumbnails.jpg` | the thumbnail atlas |
 | `GET /static/unknown_location.png` | the picture for a world the player has not been to |
 | `GET /pollUpdate` | what the running sync is doing: `{"task": ..., "done": ...}` |
-| `GET /getNextLocations?origin=&dest=` | standing in `origin` and headed for `dest`, which ways on to take |
-| `GET /yno/info` | YNOproject, forwarded: who the session belongs to and everywhere they have been |
+| `GET /getNextLocations?origin=&dest=` | the exits from `origin` toward `dest` |
+| `GET /yno/info` | YNOproject, forwarded: who the session belongs to and every location they visited |
 | `GET /yno/gamelocations` | YNOproject, forwarded |
 | `POST /ynoauth/login` | YNOproject sign-in, forwarded |
 | `POST /ynoauth/forget` | YNOproject sign-out, forwarded |
@@ -51,8 +50,8 @@ socket is removed when the server stops.
 Every `GET /data` is answered from the file, including the ones that arrive while a sync is running.
 
 A server that has not finished its first sync answers **`503 needs update`**. Poll `/pollUpdate`
-until it says `done`, then try again. An empty dump is never served: it is indistinguishable from a
-wiki with no worlds in it, and the reader on the other end would draw the second.
+until the answer says `done`, then try again. An empty dump is never served: a client cannot tell
+an empty dump from a wiki with no worlds.
 
 The four `yno` routes carry a player's own YNOproject session, because a browser may not reach
 YNOproject directly. **A signed-in request therefore goes through this host, and this host sees the
@@ -60,18 +59,18 @@ session.** The native builds reach YNOproject directly instead.
 
 ### `GET /getNextLocations`
 
-Both worlds are named by their English titles, and the answer is at most three ways on, nearest
+Both worlds are named by their English titles, and the answer is at most three exits, nearest
 first:
 
 ```json
 [{"title": "Blue Eyes World", "titleJP": "碧眼世界", "connType": 0, "typeParams": {}, "depth": 6}]
 ```
 
-`connType` and `typeParams` are the wiki's own flags and words for that door; `depth` counts the
-connections left to the destination, that door included. Routes are ordered by the harshest
-condition anywhere along them and then by length, so an unconditional way round wins however long it
-is. A route through a world the wiki keeps secret is held back unless there is no other, and one
-that walks into an isolated section is never offered at all -- the way on from there is the way back.
+`connType` and `typeParams` are the wiki's own flags and words for that exit; `depth` counts the
+connections left to the destination, that exit included. Routes are ordered by the harshest
+condition anywhere along them and then by length, so an unconditional route wins at any length. A
+route through a world the wiki keeps secret is held back unless there is no other, and a route into
+an isolated section is never offered.
 
 A world the dump does not hold is answered with `200` and:
 
@@ -83,15 +82,15 @@ A world the dump does not hold is answered with `200` and:
 
 ## Syncing
 
-Every `--sync-every` hours the server does a **soft** sync: it queries the wiki for which pages have
-been edited since the dump was built, and re-reads only what those edits made stale. Once a week it
-does a **full** sync instead, reading the whole wiki.
+Every `--sync-every` hours the server does a **soft** sync: the server queries the wiki for which
+pages have been edited since the dump was built, and re-reads only what those edits made stale. Once
+a week a **full** sync reads the whole wiki instead.
 
 Syncs are timed from when the dump on disk was built, so restarting is not a way to make the server
 re-read the wiki. Three other cases read the whole wiki: a server coming up with nothing on disk, a
-dump more than thirty days old, and a wiki that cannot say what it changed.
+dump more than thirty days old, and a wiki that cannot say what changed.
 
-**Deleting `--data` and restarting is the only way to demand a full read.** There is no route for it.
+**Deleting `--data` and restarting is the only way to demand a full read.** No route triggers one.
 A cold build has no previous dump to carry cells or secret marks forward from, so every world may
 change cell.
 
@@ -116,9 +115,9 @@ a newer one.
 
 ## Marking a world secret
 
-`secret` on a world means a reader is not meant to be shown it. Set it by hand in `data.json`; every
-later sync carries it forward by title, and the restart that reads it packs the world's cell black. A
-world the wiki renames loses its mark, as does a cold build.
+`secret` on a world means a reader is not meant to be shown the world. Set the field by hand in
+`data.json`; every later sync carries the mark forward by title, and the restart that reads the mark
+packs the world's cell black. A world the wiki renames loses the mark, as does a cold build.
 
 Secret worlds stay in the dump, keep their id, and stay an end of the connections that reach them.
-yumezu is what leaves them out, as it reads the dump.
+yumezu leaves them out when reading the dump.

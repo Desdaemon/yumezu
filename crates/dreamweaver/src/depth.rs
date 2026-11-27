@@ -1,12 +1,6 @@
-//! How far each world is from the one the game starts in.
-//!
-//! Two numbers differing only in which connections they will walk. `depth` counts steps along
-//! connections a player can take unconditionally; `minDepth` takes any connection at all, so it
-//! says how deep the world sits at best. The reader draws the graph by the first and ranks by the
-//! second.
-//!
-//! Neither is a plain shortest path: whole branches hang off connections locked from both ends, so
-//! a run that leaves worlds unreached gives up one condition at a time, weakest first.
+//! The dump's `depth` (steps from the start without conditions) and `minDepth` (with conditions).
+//! Worlds out of reach are measured by allowing increasingly restrictive connections one class at
+//! a time.
 
 use crate::model::ConnType;
 
@@ -14,16 +8,15 @@ pub(crate) use yumezu_routing::START;
 
 pub struct Node {
     pub title: String,
-    /// A world the game no longer has. A route may walk into one but never back out, so a removed
-    /// world cannot shorten a live world's distance.
+    /// A world the game no longer has. Routes may enter a removed world but never leave one, so a
+    /// removed world cannot shorten a live world's distance.
     pub removed: bool,
-    /// `(index of the world it leads to, what the connection is like)`.
-    pub out: Vec<(usize, ConnType)>,
+    /// `(destination index, connection flags)` for every connection out of this world.
+    pub outgoing: Vec<(usize, ConnType)>,
 }
 
-/// The conditions `depth` refuses: a connection that demands any of them is not a step a player
-/// can take unconditionally.
-fn walkable() -> ConnType {
+/// Conditions `depth` refuses: a connection with any of these is not unconditional.
+fn refused_by_depth() -> ConnType {
     ConnType::NO_ENTRY
         | ConnType::LOCKED
         | ConnType::DEAD_END
@@ -32,54 +25,49 @@ fn walkable() -> ConnType {
         | ConnType::EXIT_POINT
 }
 
-/// Only the conditions meaning the connection does not lead where it is written: a way back rather
-/// than a way there, or a way into a pocket of the destination that connects to nothing else.
-fn reachable() -> ConnType {
+/// Conditions `minDepth` refuses: connections that lead somewhere other than the written
+/// destination, as a way back or into an isolated pocket.
+fn refused_by_min_depth() -> ConnType {
     ConnType::NO_ENTRY | ConnType::DEAD_END | ConnType::ISOLATED
 }
 
-/// `(depth, minDepth)` for every world, in the order they were given.
-pub fn of(worlds: &[Node]) -> Vec<(i32, i32)> {
-    let deep = distances(worlds, walkable());
-    let shallow = distances(worlds, reachable());
-    deep.into_iter().zip(shallow).collect()
+/// `(depth, minDepth)` for every world, in input order.
+pub fn depths_from_start(worlds: &[Node]) -> Vec<(i32, i32)> {
+    let depths = steps_from_start(worlds, refused_by_depth());
+    let min_depths = steps_from_start(worlds, refused_by_min_depth());
+    depths.into_iter().zip(min_depths).collect()
 }
 
-/// Distances from [`START`] under one set of refused conditions, giving conditions up until
-/// nothing more can be reached.
-fn distances(worlds: &[Node], refused: ConnType) -> Vec<i32> {
-    let mut depth: Vec<Option<i32>> = vec![None; worlds.len()];
-    // A route inside the removed part of the graph may not walk back out.
-    let mut through_removed: Vec<bool> = vec![false; worlds.len()];
+/// Steps from [`START`] with `refused` connections skipped; while a world is out of reach, the next
+/// class is allowed.
+fn steps_from_start(worlds: &[Node], refused: ConnType) -> Vec<i32> {
+    let mut steps: Vec<Option<i32>> = vec![None; worlds.len()];
+    let mut via_removed: Vec<bool> = vec![false; worlds.len()];
 
     let Some(start) = worlds.iter().position(|world| world.title == START) else {
         tracing::warn!("no world called {START}: every distance will be a guess");
         return vec![1; worlds.len()];
     };
-    depth[start] = Some(0);
+    steps[start] = Some(0);
 
-    relax(worlds, refused, &mut depth, &mut through_removed, false);
+    extend_steps(worlds, refused, &mut steps, &mut via_removed, false);
 
     let mut refused = refused;
-    while !depth.iter().all(Option::is_some) {
-        let Some(weaker) = give_up(refused) else {
+    while !steps.iter().all(Option::is_some) {
+        let Some(allowed) = allow_next_restriction(refused) else {
             break;
         };
-        refused = weaker;
-        // Measured worlds keep the stricter pass's distance.
-        relax(worlds, refused, &mut depth, &mut through_removed, true);
+        refused = allowed;
+        extend_steps(worlds, refused, &mut steps, &mut via_removed, true);
     }
 
-    // Unreached worlds go one step in: they exist, so they are not the start.
-    depth.into_iter().map(|d| d.unwrap_or(1)).collect()
+    // Worlds out of reach get 1: present in the game, so not the start.
+    steps.into_iter().map(|step| step.unwrap_or(1)).collect()
 }
 
-/// The next condition to stop refusing, weakest first.
-///
-/// The reference implementation's order, and one of confidence rather than difficulty: a
-/// conditional connection is the likeliest to be walkable in practice, a no-entry connection the
-/// least, since walking one means going the way the wiki says you cannot.
-fn give_up(refused: ConnType) -> Option<ConnType> {
+/// `refused` minus the next class to allow, least restrictive first, in the reference
+/// implementation's order; `None` once nothing is refused.
+fn allow_next_restriction(refused: ConnType) -> Option<ConnType> {
     for condition in [
         ConnType::LOCKED_CONDITION,
         ConnType::LOCKED,
@@ -94,53 +82,50 @@ fn give_up(refused: ConnType) -> Option<ConnType> {
     None
 }
 
-/// Nearest first out of a heap rather than a breadth-first sweep: every pass after the first starts
-/// from seeds at every distance at once, and `keep` forbids improving a distance afterwards, so the
-/// first one a world is given has to be its shortest.
-///
-/// `keep` leaves the worlds that already have a distance exactly as they are, and is how a pass that
-/// has given up a condition reaches further without rewriting what a stricter pass decided.
-fn relax(
+/// Dijkstra from every measured world; with `keep_measured`, measured distances are final and only
+/// unmeasured worlds are added. A heap, since later passes seed from every distance at once.
+fn extend_steps(
     worlds: &[Node],
     refused: ConnType,
-    depth: &mut [Option<i32>],
-    through_removed: &mut [bool],
-    keep: bool,
+    steps: &mut [Option<i32>],
+    via_removed: &mut [bool],
+    keep_measured: bool,
 ) {
-    let settled: Vec<bool> = match keep {
-        true => depth.iter().map(Option::is_some).collect(),
+    let measured: Vec<bool> = match keep_measured {
+        true => steps.iter().map(Option::is_some).collect(),
         false => vec![false; worlds.len()],
     };
-    let mut queue: std::collections::BinaryHeap<std::cmp::Reverse<(i32, usize)>> = depth
+    let mut queue: std::collections::BinaryHeap<std::cmp::Reverse<(i32, usize)>> = steps
         .iter()
         .enumerate()
-        .filter_map(|(world, d)| Some(std::cmp::Reverse(((*d)?, world))))
+        .filter_map(|(world, step)| Some(std::cmp::Reverse(((*step)?, world))))
         .collect();
 
     while let Some(std::cmp::Reverse((here, from))) = queue.pop() {
         // Stale heap entry.
-        if depth[from] != Some(here) {
+        if steps[from] != Some(here) {
             continue;
         }
-        let removed_route = through_removed[from];
-        for &(to, flags) in &worlds[from].out {
+        let from_removed = via_removed[from];
+        for &(to, flags) in &worlds[from].outgoing {
             if flags.intersects(refused) {
                 continue;
             }
             let into_removed = worlds[to].removed;
-            // Once removed, a route stays removed; otherwise it may not cross a removed connection.
-            if removed_route && !into_removed {
+            // A route through a removed world stays among removed worlds; a live route skips
+            // inaccessible connections.
+            if from_removed && !into_removed {
                 continue;
             }
-            if !removed_route && !into_removed && flags.contains(ConnType::INACCESSIBLE) {
+            if !from_removed && !into_removed && flags.contains(ConnType::INACCESSIBLE) {
                 continue;
             }
-            if settled[to] {
+            if measured[to] {
                 continue;
             }
-            if depth[to].is_none_or(|there| there > here + 1) {
-                depth[to] = Some(here + 1);
-                through_removed[to] = removed_route || into_removed;
+            if steps[to].is_none_or(|there| there > here + 1) {
+                steps[to] = Some(here + 1);
+                via_removed[to] = from_removed || into_removed;
                 queue.push(std::cmp::Reverse((here + 1, to)));
             }
         }

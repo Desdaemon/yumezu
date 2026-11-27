@@ -1,15 +1,5 @@
-//! The player's own account on YNOproject, and the worlds it says they have been to.
-//!
-//! The game is played at <https://ynoproject.net>, which records every place its client has seen
-//! the player standing in. See [`Account::frontier`].
-//!
-//! Two documents have to be read together: `GET /api/info` answers with YNOproject's own database
-//! ids, which mean nothing to a dump numbered by the game's maps, and `GET /api/gamelocations`
-//! turns them into names -- the one thing both sides write the same way.
-//!
-//! The credential is a cookie and only a cookie: a request carrying its value as a header is
-//! answered as if nobody had signed in. A native run may set one by hand and so keeps the session
-//! itself; on the page the cookie is the browser's, unreadable and sent regardless.
+//! The player's YNOproject account and visited worlds, with ids named via `/api/gamelocations`.
+//! The session is a cookie only; the same value sent as a header reads as signed out.
 
 use super::fetch;
 use super::prelude::*;
@@ -19,67 +9,58 @@ use std::collections::HashSet;
 /// YNOproject serves one host per game, and this app draws exactly one: Yume 2kki.
 #[cfg(not(target_family = "wasm"))]
 const API: &str = "https://api.ynoproject.net/2kki/api";
-/// Signing in is a service of its own rather than a route of [`API`]'s.
+/// Sign-in is a separate service from [`API`].
 #[cfg(not(target_family = "wasm"))]
 const AUTH: &str = "https://auth.ynoproject.net";
 
-/// Relayed by the page's own host rather than fetched from [`API`] directly: YNOproject allows
-/// exactly one origin, and same-origin is what makes the sign-in's cookie keepable. See
-/// `dreamweaver`'s `relay`.
-///
-/// The cost is that the host sees the session a relayed request carries. A run that would rather not
-/// pay that is a native run.
+/// Relayed by the web build's own host: YNOproject allows exactly one origin, and only a
+/// same-origin cookie is kept. The host sees each relayed session; see `dreamweaver`'s `relay`.
 #[cfg(target_family = "wasm")]
 const API_PATH: &str = "/yno";
-/// A path of its own because signing in is its own host. See [`API_PATH`].
+/// A separate path, since sign-in is a separate host. See [`API_PATH`].
 #[cfg(target_family = "wasm")]
 const AUTH_PATH: &str = "/ynoauth";
 
 const SESSION: &str = "yno-session";
-/// Named only where this app is the one carrying it: on the page it is the browser's, and nothing
-/// here ever writes it out.
+/// Native build only: on the web build the browser carries the cookie.
 #[cfg(not(target_family = "wasm"))]
 const COOKIE: &str = "auth";
 const FRONTIER: &str = "frontier";
 
-/// As the wiki writes them: names rather than either side's numbering, that being the only thing
-/// YNOproject and the dump have in common.
+/// World names as the wiki writes them, the only key YNOproject and the dump share.
 pub type Visited = HashSet<String>;
 
-/// Where a sign-in or a resumption got to, which is the whole of what the settings tab draws.
+/// Progress of a sign-in or resumption, shown in the settings tab.
 pub enum State<'a> {
-    /// Nobody has signed in this run and no earlier run left a session behind.
+    /// Nobody has signed in since the app started, and no session was kept from before.
     SignedOut,
-    /// Signing in, or fetching what the account has seen: the same wait for the same answer.
+    /// Signing in, or fetching the visited worlds.
     Working,
     SignedIn,
-    /// Why the last attempt came to nothing, in the server's own words where it wrote any.
+    /// Why the last attempt failed, in the server's words where given.
     Failed(&'a str),
 }
 
-/// Held by the app rather than the overlay, because the graph is built out of it: a sign-in
-/// rebuilds the graph the same way the dump landing does.
+/// Held by the app, since the graph is built from the visited worlds: a sign-in rebuilds the graph
+/// as the dump's arrival does.
 #[derive(Default)]
 pub struct Account {
-    /// Kept between runs, so signing in is something a person does once rather than every time
-    /// they open the app.
+    /// Persisted, so the user signs in once.
     session: Option<String>,
     visited: Option<Visited>,
-    /// Answers with both session and visits, so the caller has the same two things to write down
-    /// whichever it was.
+    /// Session and visited worlds, from either a sign-in or a resumption.
     pending: Option<fetch::Pending<Result<(String, Visited), String>>>,
-    /// Why the last attempt came to nothing, until the next one is started.
+    /// Why the last attempt failed, until the next one starts.
     failed: Option<String>,
-    /// Kept apart from [`Account::visited`] so leaving the frontier does not sign out of the
-    /// account, and so the switch answers instantly once the visits are in hand.
+    /// Separate from [`Account::visited`], so turning the frontier off keeps the user signed in,
+    /// and turning the frontier on is instant once the visits are fetched.
     frontier: bool,
     restated: bool,
-    pretended: Visited,
+    force_reveal_worlds: Visited,
 }
 
 impl Account {
-    /// Fetches the visits on the way in rather than when the switch is turned on: the switch is
-    /// meant to answer at once, and the fetch is two documents off someone else's server.
+    /// Resumes a kept session at startup, so the frontier switch responds at once.
     pub fn new() -> Self {
         let session = store::read(SESSION).filter(|session| !session.is_empty());
         let pending = session.clone().map(|session| fetch::spawn(resume(session)));
@@ -91,20 +72,20 @@ impl Account {
         }
     }
 
-    /// What keeps the window drawing over a wait nothing on screen is moving through.
+    /// Whether a request is pending, which keeps the window redrawing.
     pub fn working(&self) -> bool {
         self.pending.is_some()
     }
 
-    /// Called once a frame, and does nothing on the frames there is nothing to read.
+    /// Called once a frame; takes the answer once one arrives.
     pub fn poll(&mut self) {
         let Some(answer) = self.pending.as_ref().and_then(fetch::Pending::take) else {
             return;
         };
         self.pending = None;
         // An unchanged refresh keeps the layout; an answer always replaces a pretence.
-        let mut changed = !self.pretended.is_empty();
-        self.pretended.clear();
+        let mut changed = !self.force_reveal_worlds.is_empty();
+        self.force_reveal_worlds.clear();
         match answer {
             Ok((session, visited)) => {
                 log::info!("signed in to ynoproject, {} locations seen", visited.len());
@@ -116,7 +97,7 @@ impl Account {
             }
             Err(error) => {
                 log::warn!("cannot read what this account has seen: {error}");
-                // Usually an expired session, which would fail again next run.
+                // Usually an expired session, which would fail again next time the app starts.
                 self.drop_session();
                 self.failed = Some(error);
             }
@@ -131,27 +112,25 @@ impl Account {
         self.visited = None;
     }
 
-    /// Reads what the account has seen in the same go: nothing else needs the session.
+    /// Also fetches the visited worlds, the only use of the session.
     pub fn sign_in(&mut self, user: String, password: String) {
         self.failed = None;
         self.pending = Some(fetch::spawn(sign_in(user, password)));
     }
 
-    /// YNOproject is not told: its own sign-out would end the session the person is playing the
-    /// game with. Only this app's copy is dropped.
+    /// Drops only this app's copy of the session: YNOproject's sign-out ends the user's game too.
     pub fn sign_out(&mut self) {
         forget();
         self.drop_session();
         self.pending = None;
         self.failed = None;
-        self.pretended.clear();
+        self.force_reveal_worlds.clear();
         // See [`Account::poll`].
         self.restated |= self.frontier;
     }
 
-    /// The app reads the account once at startup while the person goes on walking into places in
-    /// another window. A button rather than a poll. Does nothing without a session, or while an
-    /// attempt is in flight.
+    /// Refetches the visited worlds, which change as the user plays in another window. Does
+    /// nothing without a session, or while a request is pending.
     pub fn refresh(&mut self) {
         let Some(session) = self.session.clone() else {
             return;
@@ -163,13 +142,13 @@ impl Account {
         self.pending = Some(fetch::spawn(resume(session)));
     }
 
-    /// Everywhere the account has been, whether or not the graph is cut back by it -- unlike
-    /// [`Account::frontier`]. Worth saying either way, and no reason to redraw anything.
+    /// Every world the account has visited, whether or not the frontier switch is on; see
+    /// [`Account::frontier`].
     pub fn visited(&self) -> Option<&Visited> {
         self.visited.as_ref()
     }
 
-    /// On, whether or not there is anything to show for it yet.
+    /// Whether the frontier switch is on, even before any visits are fetched.
     pub fn frontier_wanted(&self) -> bool {
         self.frontier
     }
@@ -183,44 +162,39 @@ impl Account {
         self.restated |= self.visited.is_some();
     }
 
-    /// Pretends the account has been to a world, so the graph opens out past it.
-    ///
-    /// Nothing is sent and nothing written down, so the pretence goes with the run, the sign-out or
-    /// the next answer. Kept out of [`Account::visited`], which the reported completion reads.
-    pub fn pretend(&mut self, title: String) {
-        let known = self
+    /// Marks a world visited locally, so the frontier opens past that world, until the next answer
+    /// or sign-out. Kept out of [`Account::visited`], which the reported completion reads.
+    pub fn force_reveal(&mut self, title: String) {
+        let already_visited = self
             .visited
             .as_ref()
             .is_some_and(|visited| visited.contains(&title));
-        if known || !self.pretended.insert(title.clone()) {
+        if already_visited || !self.force_reveal_worlds.insert(title.clone()) {
             return;
         }
-        log::info!("pretending {title} has been visited");
+        log::info!("force-revealing {title}");
         self.restated |= self.frontier && self.visited.is_some();
     }
 
-    /// `None` where the graph should draw the whole game: the switch off, or nothing read to cut it
-    /// back by. Owned only where a pretence has been laid over the account.
+    /// `None` when the graph shows the whole game: the switch off, or no visits fetched. Owned only
+    /// when worlds are force-revealed.
     pub fn frontier(&self) -> Option<std::borrow::Cow<'_, Visited>> {
         let visited = self.visited.as_ref().filter(|_| self.frontier)?;
-        Some(match self.pretended.is_empty() {
+        Some(match self.force_reveal_worlds.is_empty() {
             true => std::borrow::Cow::Borrowed(visited),
-            false => std::borrow::Cow::Owned(visited.union(&self.pretended).cloned().collect()),
+            false => {
+                std::borrow::Cow::Owned(visited.union(&self.force_reveal_worlds).cloned().collect())
+            }
         })
     }
 
-    /// Answered once: the reading is what clears it.
+    /// Whether the frontier changed since the last call; the call clears the flag.
     pub fn restated(&mut self) -> bool {
         std::mem::take(&mut self.restated)
     }
 
-    /// Whether what the graph should be built out of is settled.
-    ///
-    /// A run resuming a session checks it with YNOproject while the dump is still on its way.
-    /// Building on the dump alone would draw the whole game and then throw it away.
-    ///
-    /// Only while the switch is on. A finished attempt is settled however it finished -- a failure
-    /// answers the question too.
+    /// Whether the frontier is known: with the switch off, or once the pending request ends, even
+    /// in failure. Keeps the graph from being built on the whole dump and then discarded.
     pub fn settled(&self) -> bool {
         !self.frontier || self.pending.is_none()
     }
@@ -236,21 +210,21 @@ impl Account {
         }
     }
 
-    /// Also what settles whether the tab offers the fields or the sign-out button.
+    /// Decides whether the tab shows the sign-in fields or the sign-out button.
     pub fn signed_in(&self) -> bool {
         self.session.is_some()
     }
 }
 
-/// These addresses go to `reqwest`, which parses each by itself with no document to resolve a bare
-/// path against, so the page's own origin has to be written in.
+/// Absolute, with the web build's origin written in: `reqwest` has no document to resolve a bare
+/// path against.
 fn api() -> &'static str {
     #[cfg(not(target_family = "wasm"))]
     return API;
     #[cfg(target_family = "wasm")]
     {
         static API: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        API.get_or_init(|| format!("{}{API_PATH}", super::world::origin()))
+        API.get_or_init(|| format!("{}{API_PATH}", super::world::web_origin()))
     }
 }
 
@@ -260,12 +234,12 @@ fn auth() -> &'static str {
     #[cfg(target_family = "wasm")]
     {
         static AUTH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        AUTH.get_or_init(|| format!("{}{AUTH_PATH}", super::world::origin()))
+        AUTH.get_or_init(|| format!("{}{AUTH_PATH}", super::world::web_origin()))
     }
 }
 
-/// The page's session is a cookie, so only the host that handed it over can drop it. Not waited on:
-/// the sign-out has already happened here whatever the host says about it.
+/// On the web build only the host that set the session cookie can drop the cookie. Not awaited:
+/// the sign-out is already done locally.
 #[cfg(target_family = "wasm")]
 fn forget() {
     let url = format!("{}/forget", auth());
@@ -276,7 +250,7 @@ fn forget() {
     }));
 }
 
-/// Nothing to tell anyone: a native run keeps the session itself.
+/// No-op: the native build keeps the session itself.
 #[cfg(not(target_family = "wasm"))]
 fn forget() {}
 
@@ -286,14 +260,14 @@ async fn sign_in(user: String, password: String) -> Result<(String, Visited), St
     Ok((session, visited))
 }
 
-/// Hands the session back so the caller has the same pair either way.
+/// Returns the session with the visits, as a sign-in does.
 async fn resume(session: String) -> Result<(String, Visited), String> {
     let visited = visited(&session).await?;
     Ok((session, visited))
 }
 
-/// The service answers by setting a cookie. A native run takes it off the response and keeps it,
-/// having to send it itself; the page is not told at all, the browser keeping it.
+/// The service answers by setting a cookie. The native build takes the cookie off the response,
+/// keeps the value and sends the value back; on the web build the browser keeps the cookie.
 async fn login(user: &str, password: &str) -> Result<String, String> {
     let url = format!("{}/login", auth());
     let response = fetch::client()
@@ -320,10 +294,8 @@ async fn login(user: &str, password: &str) -> Result<String, String> {
     issued.ok_or_else(|| format!("{url} did not answer with a session"))
 }
 
-/// Where the sign-in is held, which is not the same place on the two platforms.
-///
-/// Natively the cookie's own value, kept by this app and set on every signed-in request. On the
-/// page only a marker that the browser has one, a script being unable to read or send it.
+/// Where the sign-in is held: natively the cookie's value, set on every signed-in request; on the
+/// web build only a marker, since scripts cannot read or send the browser's cookie.
 mod session {
     #[cfg(target_family = "wasm")]
     const HELD_BY_THE_BROWSER: &str = "browser";
@@ -338,7 +310,7 @@ mod session {
             .find_map(value)
     }
 
-    /// There is nothing here for the page to read.
+    /// Scripts cannot read the cookie on the web build.
     #[cfg(target_family = "wasm")]
     pub fn issued(_: &reqwest::Response) -> Option<String> {
         Some(HELD_BY_THE_BROWSER.to_owned())
@@ -355,13 +327,13 @@ mod session {
         )
     }
 
-    /// The browser has already signed it, and will not let this add the header even to agree.
+    /// The browser adds the cookie, and refuses a script-set `Cookie` header.
     #[cfg(target_family = "wasm")]
     pub fn sign(request: super::fetch::RequestBuilder, _: &str) -> super::fetch::RequestBuilder {
         request
     }
 
-    /// Everything after the first `;` is how long to keep it and where.
+    /// Cookie attributes after the first `;` are ignored.
     #[cfg(not(target_family = "wasm"))]
     fn value(cookie: &str) -> Option<String> {
         let (name, session) = cookie.split(';').next()?.split_once('=')?;
@@ -404,10 +376,10 @@ async fn visited(session: &str) -> Result<Visited, String> {
     Ok(visited)
 }
 
-/// Only the places the account has been are read.
+/// Only the visited locations are read.
 #[derive(serde::Deserialize)]
 struct Info {
-    /// `None` for a request with no session, or one whose session has run out.
+    /// `None` for a request with no session, or an expired one.
     #[serde(rename = "locationIds")]
     location_ids: Option<Vec<u64>>,
 }
@@ -432,8 +404,8 @@ async fn seen(session: &str) -> Result<Vec<u64>, String> {
         .ok_or_else(|| t!("yno-signed-out"))
 }
 
-/// Public and the same for everyone, so it is fetched without a session and left to the ordinary
-/// HTTP cache between runs.
+/// Public and the same for everyone, so fetched without a session and left to the ordinary
+/// HTTP cache, which outlives the app.
 async fn named() -> Result<std::collections::HashMap<u64, String>, String> {
     let url = format!("{}/gamelocations", api());
     let said = fetch::client()

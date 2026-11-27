@@ -1,21 +1,14 @@
-//! What a sync is doing, for whoever is waiting on it.
-//!
-//! A sync takes a minute or so, and until the first one lands `GET /data` answers `needs update`.
-//! The app has nothing to draw and nothing to say about why, so `GET /pollUpdate` reads this.
-//!
-//! The stage names are the reference implementation's own, so a reader written against its
-//! `/pollUpdate` reads these unchanged. They are coarser than its worker gives: this program
-//! fetches the authors, the releases and the connections as one concurrent question.
+//! The running sync's stage for `GET /pollUpdate`, under the reference implementation's names.
 
 use std::sync::RwLock;
 
-/// Querying the wiki for what it has changed, where a soft sync starts and often ends.
+/// Querying the wiki for what has changed, where a soft sync starts and often ends.
 pub const CHANGES: &str = "init";
 pub const WORLDS: &str = "fetchWorldData";
 /// Reading the connections, and with them the authors and the release history.
 pub const CONNECTIONS: &str = "fetchConnData";
 
-/// The stage a sync has reached, or `None` for none running -- which is `done` to a client.
+/// The stage a sync has reached, or `None` when no sync is running: `done` to a client.
 #[derive(Default)]
 pub struct Progress(RwLock<Option<&'static str>>);
 
@@ -24,7 +17,7 @@ impl Progress {
         *self.0.write().unwrap() = Some(task);
     }
 
-    /// Whatever came of it.
+    /// Clears the stage, whether the sync succeeded or failed.
     pub fn done(&self) {
         *self.0.write().unwrap() = None;
     }

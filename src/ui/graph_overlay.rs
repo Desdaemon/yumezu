@@ -1,14 +1,13 @@
-//! The controls and words that stand over the graph rather than in a window beside it: the layer
-//! rocker, the right-click menu, and the message box naming what is hovered.
+//! The controls and words overlaid on the graph, outside the windows: the layer rocker, the
+//! right-click menu, and the message box naming what is hovered.
 
 use super::*;
 
 impl Panel {
-    /// Steps the lit layer in and out from the origin.
+    /// Steps the highlighted layer in and out from the origin.
     ///
-    /// An [`egui::Area`] rather than part of a window, so it sits in a corner the graph is visible
-    /// in whatever the windows show. Its middle is the off position, so a layer can be dropped
-    /// without clicking a world.
+    /// An [`egui::Area`] in a corner of the graph, visible whatever the windows show. The middle
+    /// position is off, dropping the layer without clicking a world.
     pub(super) fn rocker(
         &mut self,
         ui: &mut egui::Ui,
@@ -30,7 +29,7 @@ impl Panel {
             }
             style.spacing.button_padding *= ROCKER_SCALE;
             style.spacing.item_spacing *= ROCKER_SCALE;
-            // A skin's arrow takes the chevron's place without resizing the button around it.
+            // A skin's arrow takes the chevron's place without resizing the button.
             let glyph = egui::WidgetText::from(ICON_KEYBOARD_ARROW_UP)
                 .into_galley(
                     ui,
@@ -97,7 +96,7 @@ impl Panel {
                         self.lit = Some(Some(Highlight::Descendants(world)));
                     }
                     self.directions_menu(ui, read, world);
-                    let named = data.titles[world].known();
+                    let named = data.titles[world].is_searchable();
                     if named && ui.button(t!("menu-open-wiki")).clicked() {
                         open_in_browser(&data.titles[world].wiki_url());
                         self.menu_taken = true;
@@ -118,15 +117,15 @@ impl Panel {
                             .on_hover_text(t!("menu-reveal-hint"))
                             .clicked()
                     {
-                        self.revealed = Some(world);
+                        self.force_reveal_world = Some(world);
                         self.menu_taken = true;
                     }
                 });
             });
     }
 
-    /// Not while a menu is open: the menu is over the same world and already names it. Passes the
-    /// pointer through, so it never takes the hover that called it up.
+    /// The message box naming the hovered world, hidden while a menu over that world is open.
+    /// Passes the pointer through, keeping the hover on the graph.
     pub(super) fn message(&self, ui: &mut egui::Ui, read: &PanelData, insets: Insets, width: f32) {
         let Some(world) = read.hovered.filter(|_| read.menu.is_none()) else {
             return;

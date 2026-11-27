@@ -2,37 +2,29 @@
 
 use super::*;
 
-/// How long after the last thing that moved the window goes on being drawn at the display's rate.
-///
-/// Without it the pacing would follow the input rather than the view: a drag's events arrive
-/// unevenly, so a frame that saw none would drop to [`IDLE_REDRAW_HZ`] and the next go back up.
+/// How long the window keeps drawing at the display's rate after the last motion, so uneven drag
+/// events do not drop the rate to [`IDLE_REDRAW_HZ`] between them.
 pub(super) const IDLE_AFTER_SECONDS: f32 = 2.0;
-/// Frames a second the window falls back to when the dashes are the only thing still moving.
-///
-/// A settled layout nobody is touching would otherwise be redrawn at the display's own rate for as
-/// long as the app is open. The dashes march by wall clock, so a slower rate makes the marching
-/// coarser and not slower. See [`App::wanted`].
+/// Frames a second once only the dashes move. The dashes march by wall clock, so a lower rate makes
+/// the marching coarser at the same speed. See [`App::wanted`].
 pub(super) const IDLE_REDRAW_HZ: f32 = 30.0;
-/// Frames a second while the only reason to draw one is to see whether something fetched over
-/// the network has landed. Nothing on screen is moving, so this is a poll and not an animation.
+/// Frames a second while polling a network fetch, with nothing on screen moving.
 const POLL_REDRAW_HZ: f32 = 10.0;
 
-/// When the next frame is wanted, which is what a frame ends by working out.
-///
-/// The window is redrawn on demand rather than continuously: see [`App::wanted`] for what is
-/// wanting one, and [`profile::eager`] for the switch that puts the old always-on behaviour back.
+/// When the next frame is wanted, decided at the end of each frame. See [`App::wanted`], and
+/// [`profile::eager`] for always-on drawing.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Wanted {
     /// As soon as the display will take one: something is moving.
     Now,
     /// Not before this long has passed. Nothing is moving fast enough to need the display's rate.
     After(std::time::Duration),
-    /// Not until an event arrives. Every pixel would come out the way it already is.
+    /// Not until an event arrives: nothing on screen would change.
     Never,
 }
 
 impl Wanted {
-    /// The stricter of two demands, a frame being drawn for whichever of them wants one first.
+    /// The sooner of two demands.
     fn or_sooner(self, other: Self) -> Self {
         self.min(other)
     }
@@ -55,7 +47,7 @@ impl Wanted {
 }
 
 impl App {
-    /// When the frame just drawn wants the next one, given what it left moving. See [`Wanted`].
+    /// When the frame just drawn wants the next one, given what is still moving. See [`Wanted`].
     pub(super) fn wanted(&self, data: &AppEntities) -> Wanted {
         if profile::eager() {
             return Wanted::Now;
@@ -66,14 +58,14 @@ impl App {
             Some(Wanted::after(
                 self.overlay.as_ref().unwrap().gui.repaint_after(),
             )),
-            // The dashes keep moving over a settled layout. See [`AppStatics::focused`].
+            // The dashes keep moving over a settled layout. See [`AppPersistent::focused`].
             (!data.dash_instances.transformations.is_empty()
-                && (self.statics.focused || cfg!(target_family = "wasm")))
+                && (self.persistent.focused || cfg!(target_family = "wasm")))
             .then(|| Wanted::after_hz(IDLE_REDRAW_HZ)),
             // Only a frame collects resolved work. See [`App::draw`].
             (self.yno.working()
                 || matches!(data.atlas, Atlas::Loading(_))
-                || data.detail.pending())
+                || data.lod.has_pending_fetch())
             .then(|| Wanted::after_hz(POLL_REDRAW_HZ)),
         ]
         .into_iter()
@@ -95,11 +87,8 @@ impl App {
         }
     }
 
-    /// Requests a frame, unless one has already been requested and not yet drawn.
-    ///
-    /// On the page a request is an animation frame, and winit serves a second by cancelling the
-    /// first, so requesting on every event of a drag cancels the frame that was about to be drawn
-    /// over and over.
+    /// Requests a frame unless one is already pending. On the web build winit serves a request by
+    /// cancelling the previous one, so a drag's events would keep cancelling the frame.
     pub(super) fn request_a_frame(&mut self) {
         if self.frame_requested {
             return;

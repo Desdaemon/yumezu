@@ -1,6 +1,5 @@
-//! The look of RPG Maker 2000's system graphics: the default one painted in code, or one of Yume
-//! 2kki's own skins sampled out of an atlas. A palette for egui's widgets, and the window every
-//! panel sits in.
+//! RPG Maker 2000 window skins for egui: the default painted in code, or a Yume 2kki skin
+//! sampled from an atlas.
 
 use super::*;
 
@@ -10,10 +9,10 @@ const PAINTED_ACCENT: egui::Color32 = egui::Color32::from_rgb(0xff, 0xe0, 0x8a);
 const PAINTED_TOP: egui::Color32 = egui::Color32::from_rgb(0x2b, 0x3f, 0x9e);
 const PAINTED_MIDDLE: egui::Color32 = egui::Color32::from_rgb(0x16, 0x22, 0x6a);
 const PAINTED_BOTTOM: egui::Color32 = egui::Color32::from_rgb(0x0c, 0x14, 0x46);
-/// How far down the window its gradient reaches the middle colour.
+/// How far down the window the gradient reaches the middle colour.
 const PAINTED_MIDDLE_AT: f32 = 0.55;
 const PAINTED_EDGE: egui::Color32 = egui::Color32::from_rgb(0xd8, 0xdc, 0xf4);
-/// The two lines inside the edge, light then dark, that give the border its bevel.
+/// The two lines inside the edge, light then dark, that bevel the border.
 const PAINTED_BEVEL_LIGHT: egui::Color32 = egui::Color32::from_rgb(0x4a, 0x5a, 0xa8);
 const PAINTED_BEVEL_DARK: egui::Color32 = egui::Color32::from_rgb(0x0a, 0x0f, 0x36);
 const PAINTED_WELL: egui::Color32 = egui::Color32::from_rgb(0x06, 0x0a, 0x2a);
@@ -21,17 +20,17 @@ const PAINTED_EDGE_WIDTH: f32 = 2.0;
 const PAINTED_CORNER: u8 = 3;
 
 pub(super) const WINDOW_PADDING: i8 = 10;
-/// How much of the graph a window's background lets through; its border and text stay solid.
+/// How much of the graph a window's background lets through; the border and text stay solid.
 const WINDOW_SEE_THROUGH: f32 = 0.2;
 const WIDGET_CORNER: u8 = 3;
 /// How opaque the cursor is over a selected row, and over a hovered one.
 const CURSOR_ALPHA: u8 = 72;
 const CURSOR_FAINT_ALPHA: u8 = 26;
-/// How far a skin's quiet text and rules lean from its text towards its background.
+/// How far a skin's quiet text and rules blend from the text colour towards the background.
 const QUIET_SHARE: f32 = 0.35;
 const WELL_DARKENING: f32 = 0.5;
 
-/// Packed by `tools/windowskins.py` out of forest-orb's cuts; keep the layout below in sync with it.
+/// Packed by `tools/windowskins.py` from forest-orb's cuts; keep the layout below in sync.
 const ATLAS: &[u8] = include_bytes!("../../assets/windowskins.png");
 const ATLAS_NAMES: &str = include_str!("../../assets/windowskins.txt");
 const ATLAS_COLUMNS: usize = 11;
@@ -45,11 +44,11 @@ const ARROW_DOWN_AT: egui::Vec2 = egui::vec2(32.0, 40.0);
 const TILE_SIZE: egui::Vec2 = egui::vec2(32.0, 32.0);
 const ARROW_SIZE: egui::Vec2 = egui::vec2(16.0, 8.0);
 const ARROW_SCALE: f32 = 1.5;
-/// Mobile GPUs interpolate UVs at half precision, enough to sample past a piece's edge into its neighbour.
+/// Mobile GPUs interpolate UVs at half precision, enough to bleed into the neighbouring piece.
 const TEXEL_INSET: f32 = 0.25;
 /// The row of a text gradient read as the text's one colour.
 const GRADIENT_MIDDLE: f32 = 8.0;
-/// How deep each side of a border is, which `border-image` calls its slice.
+/// How deep each side of a border is: the slice, in CSS `border-image` terms.
 const BORDER_SLICE: f32 = 8.0;
 const ATLAS_TEXTURE_ID: &str = "window skins";
 
@@ -60,7 +59,7 @@ const SKIN_STORED: &str = "window-skin";
 const FONT: &[u8] = include_bytes!("../../assets/DotGothic16-Latin.ttf");
 const FONT_NAME: &str = "DotGothic16";
 
-/// Urotsuki walking, the four frames side by side, as the explorer shows while it loads.
+/// Urotsuki walking, the four frames side by side, as the explorer's loading screen shows.
 const WALK: &[u8] = include_bytes!("../../assets/urowalk.png");
 const WALK_FRAMES: usize = 4;
 const WALK_FRAME_SECONDS: f64 = 0.15;
@@ -72,7 +71,7 @@ const WALK_TEXTURE_ID: &str = "walking sprite";
 pub(super) enum Skin {
     /// The default system graphic's blue, painted rather than sampled.
     Painted,
-    /// One of Yume 2kki's skins, by its place in the atlas.
+    /// One of Yume 2kki's skins, by index in the atlas.
     Atlas(usize),
 }
 
@@ -126,8 +125,8 @@ impl Palette {
         }
     }
 
-    /// Read off the skin's pixels the way forest-orb reads them: the text from the middle of its
-    /// gradient, the background from three texels averaged.
+    /// Read off the skin's pixels the way forest-orb reads them: the text from the middle of the
+    /// text gradient, the background from three texels averaged.
     fn sampled(index: usize) -> Self {
         let pixels = atlas_pixels();
         let cell = cell_origin(index);
@@ -185,8 +184,8 @@ impl Palette {
             bg_stroke: edge,
             corner_radius: egui::CornerRadius::same(WIDGET_CORNER),
             fg_stroke: egui::Stroke::new(1.0, self.text),
-            // egui takes the stroke out of a button's padding even where it draws no frame, so a
-            // hovered row would grow by it; expanding by the stroke keeps every state one size.
+            // egui subtracts the stroke from a button's padding even without a frame; expanding by
+            // the stroke keeps every state one size.
             expansion: edge.width,
         };
         let rule = egui::Stroke::new(1.0, self.rule);
@@ -218,7 +217,7 @@ pub(super) fn install_font(ctx: &egui::Context) {
     ));
 }
 
-/// Dark whatever the system prefers: every skin picks its own colours.
+/// Dark whatever the system prefers: every skin sets the colours.
 pub(super) fn apply_skin(ctx: &egui::Context, skin: Skin) {
     ctx.set_theme(egui::Theme::Dark);
     ctx.set_visuals_of(egui::Theme::Dark, Palette::of(skin).visuals());
@@ -230,7 +229,7 @@ fn applied_skin(ctx: &egui::Context) -> Skin {
         .unwrap_or(Skin::Painted)
 }
 
-/// Lays `add_contents` out inside a window, painted behind it once its size is known.
+/// Lays `add_contents` out inside a window, painted behind once the contents are measured.
 pub(super) fn window<R>(
     ui: &mut egui::Ui,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
@@ -283,7 +282,7 @@ pub(super) fn skin_arrow(
     Some(egui::Image::new((texture.id(), size)).uv(uv))
 }
 
-/// A skin drawn small enough to pick from, with its arrows in it as forest-orb shows it.
+/// A skin drawn small enough to pick from, arrows included, as forest-orb shows skins.
 pub(super) fn skin_button(
     ui: &mut egui::Ui,
     skin: Skin,
@@ -390,7 +389,7 @@ fn vertical_gradient(
     mesh.add_triangle(first + 1, first + 2, first + 3);
 }
 
-/// The background tiled under the border, the border cut in nine as CSS's `border-image` cuts it:
+/// The background tiled under the border, the border cut in nine as CSS `border-image` does:
 /// corners whole, edges repeated.
 fn atlas_window_shape(
     ctx: &egui::Context,
@@ -444,7 +443,7 @@ fn atlas_window_shape(
 }
 
 /// Repeats `source`, in texels, across `area` at a texel a point, cutting the last row and column
-/// short rather than squeezing them.
+/// short.
 fn tile(
     mesh: &mut egui::Mesh,
     area: egui::Rect,
@@ -497,7 +496,7 @@ fn atlas_texture(ctx: &egui::Context) -> egui::TextureHandle {
     })
 }
 
-/// Uploaded the first time it is asked for and kept in egui's memory for every frame after.
+/// Uploaded on the first request and kept in egui's memory for every frame after.
 fn texture_once(
     ctx: &egui::Context,
     name: &str,
@@ -512,7 +511,7 @@ fn texture_once(
     texture
 }
 
-/// One frame of the walk, chosen by the clock, and a repaint booked for the next.
+/// One frame of the walk cycle, chosen by the clock, and a repaint booked for the next.
 pub(super) fn walking_sprite(ui: &mut egui::Ui) -> egui::Response {
     let texture = texture_once(ui.ctx(), WALK_TEXTURE_ID, || {
         let strip = image::load_from_memory_with_format(WALK, image::ImageFormat::Png)

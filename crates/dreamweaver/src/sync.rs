@@ -1,10 +1,5 @@
-//! Building a dump out of what the wiki knows.
-//!
-//! Four fetches describe four parts of the same thing -- worlds, connections, credits, releases --
-//! and none knows about the others. Here they are joined into one graph, measured and written out.
-//!
-//! A rebuild does not have to fetch all four: [`Fetched`] keeps the last answers, and a sync that
-//! knows which pages have been edited re-reads only the parts those pages could have changed.
+//! Builds a dump from four wiki fetches (worlds, connections, credits, releases); [`Fetched`]
+//! keeps them, so a sync rereads only the parts that edited pages could change.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -14,16 +9,8 @@ use crate::progress::{self, Progress};
 use crate::smw;
 use crate::versions;
 
-/// What the last sync fetched, kept so the next one can leave most of it alone.
-///
-/// Every fetch here is a question about pages, so an account of which pages have been edited says
-/// which answers can still be trusted: two or three requests a week instead of thirty.
-///
-/// The worlds themselves are not kept: they are one query for all sixteen hundred, and a world that
-/// changed can add or remove one, which would make this something to reconcile rather than skip.
-///
-/// No invalidation of its own, which is safe only because it is never read except beside a
-/// [`RefreshScope`] saying what has moved, and a run that has just come up has an empty one.
+/// What the last sync fetched, reused for whatever the next [`RefreshScope`] leaves untouched.
+/// Worlds are always refetched: a changed world can add or remove worlds. Empty on a fresh server.
 #[derive(Default)]
 pub struct Fetched {
     authors: Vec<smw::Author>,
@@ -34,10 +21,10 @@ pub struct Fetched {
 }
 
 pub enum RefreshScope {
-    /// Whatever the wiki says about itself, without querying what has changed.
+    /// Rereads every page, without querying what has changed.
     Everything,
-    /// Titles without the `Yume 2kki:` namespace prefix. An empty list never reaches here: the
-    /// caller stands the sync down instead.
+    /// Titles without the `Yume 2kki:` namespace prefix; never empty, as the caller skips a sync
+    /// with no edits.
     Pages(Vec<String>),
 }
 
@@ -57,8 +44,8 @@ impl RefreshScope {
         }
     }
 
-    /// A connection is written up on the page of the world it leaves, so an edited page can only
-    /// have changed the piece its own title falls in.
+    /// Connections are written up on their origin world's page, so an edited page changes only
+    /// the shard of the page's initial.
     fn shards(&self, all: &BTreeSet<char>) -> BTreeSet<char> {
         match self {
             RefreshScope::Everything => all.clone(),
@@ -71,13 +58,13 @@ impl RefreshScope {
     }
 }
 
-/// The wiki's author list, and the title its version history is written under. An edit to either
-/// is what makes those answers stale.
+/// The author list page and the version history's title; an edit under either makes those
+/// fetches stale.
 const AUTHORS: &str = "Authors";
 const VERSION_HISTORY: &str = "Version History";
 
-/// `previous` is the last dump published, consulted only for what an operator has marked on the
-/// worlds and when the dump was last rebuilt without querying.
+/// `previous` is the last dump published, read for operator marks, atlas cells and
+/// `lastFullUpdate`.
 pub async fn run(
     http: &reqwest::Client,
     previous: &Dump,
@@ -116,13 +103,12 @@ pub async fn run(
         fetched.releases = releases;
     }
     fetched.connections.extend(connections);
-    // Otherwise a deleted world stays reachable.
+    // A shard whose initial no world has any more would keep a deleted world reachable.
     fetched
         .connections
         .retain(|initial, _| initials.contains(initial));
 
-    /// Which parts were read this time, so a log line reads as what this sync cost rather
-    /// than what it ended up holding.
+    /// Whether a part was reread this sync or kept from the last.
     fn again(read: bool) -> &'static str {
         match read {
             true => "reread",
@@ -148,7 +134,7 @@ pub async fn run(
     ))
 }
 
-/// Awaits `work` only if it is wanted, so several conditional fetches can still run as one.
+/// Awaits `work` only when `wanted`, so several conditional fetches can still run as one.
 async fn optional<T>(
     wanted: bool,
     work: impl std::future::Future<Output = smw::Result<T>>,
@@ -159,7 +145,7 @@ async fn optional<T>(
     }
 }
 
-/// Split out from [`run`] so it can be exercised without a network.
+/// Split out from [`run`] to be tested without a network.
 fn assemble<'a>(
     locations: Vec<smw::Location>,
     connections: impl Iterator<Item = &'a smw::Connection>,
@@ -168,8 +154,8 @@ fn assemble<'a>(
     previous: &Dump,
     full: bool,
 ) -> Dump {
-    let locations = published_worlds(locations);
-    let at: HashMap<&str, usize> = locations
+    let locations = in_publish_order(locations);
+    let index_of: HashMap<&str, usize> = locations
         .iter()
         .enumerate()
         .map(|(at, location)| (location.title.as_str(), at))
@@ -183,8 +169,8 @@ fn assemble<'a>(
             continue;
         }
         let (Some(&from), Some(&to)) = (
-            at.get(connection.origin.as_str()),
-            at.get(connection.destination.as_str()),
+            index_of.get(connection.origin.as_str()),
+            index_of.get(connection.destination.as_str()),
         ) else {
             // A hole in the wiki: the end is not a location page.
             continue;
@@ -220,14 +206,14 @@ fn assemble<'a>(
         .iter()
         .map(|location| location.version_removed.is_some())
         .collect();
-    let distances = depth::of(
+    let depths = depth::depths_from_start(
         &locations
             .iter()
             .enumerate()
             .map(|(at, location)| depth::Node {
                 title: location.title.clone(),
                 removed: removed[at],
-                out: leaving[at]
+                outgoing: leaving[at]
                     .iter()
                     .map(|&to| (to, merged[&(at, to)].flags))
                     .collect(),
@@ -235,8 +221,8 @@ fn assemble<'a>(
             .collect::<Vec<_>>(),
     );
 
-    // Removed worlds are measured, since a live world can sit behind one, but not published.
-    let published: Vec<Option<usize>> = {
+    // Removed worlds are measured with the rest but not published.
+    let published_id: Vec<Option<usize>> = {
         let mut next = 0;
         removed
             .iter()
@@ -252,21 +238,21 @@ fn assemble<'a>(
     let live: Vec<&str> = locations
         .iter()
         .enumerate()
-        .filter(|(at, _)| published[*at].is_some())
+        .filter(|(at, _)| published_id[*at].is_some())
         .map(|(_, location)| location.title.as_str())
         .collect();
-    let cells = cells(previous, &live, full);
+    let cell_by_title = atlas_cells(previous, &live, full);
     let worlds = locations
         .iter()
         .enumerate()
-        .filter(|(at, _)| published[*at].is_some())
+        .filter(|(at, _)| published_id[*at].is_some())
         .map(|(at, location)| {
             let connections: Vec<Connection> = leaving[at]
                 .iter()
                 .filter_map(|&to| {
                     let attributes = &merged[&(at, to)];
                     Some(Connection {
-                        target_id: published[to]?,
+                        target_id: published_id[to]?,
                         bits: attributes.flags.bits(),
                         type_params: attributes.wording_by_flag.clone(),
                     })
@@ -274,18 +260,18 @@ fn assemble<'a>(
                 .collect();
 
             World {
-                id: published[at].expect("filtered to published worlds"),
-                cell: cells.get(location.title.as_str()).copied(),
+                id: published_id[at].expect("filtered to published worlds"),
+                cell: cell_by_title.get(location.title.as_str()).copied(),
                 title: location.title.clone(),
                 title_jp: text(location.original_name.as_deref()),
                 author: location.primary_author.clone().unwrap_or_default(),
-                depth: distances[at].0,
-                min_depth: distances[at].1,
+                depth: depths[at].0,
+                min_depth: depths[at].1,
                 filename: encode_uri(&location.location_image),
                 map_url: joined(location.location_maps.iter().map(|map| map.path.clone())),
                 map_label: joined(location.location_maps.iter().map(|map| map.caption.clone())),
                 bgm_url: joined(location.bgms.iter().map(|bgm| bgm.path.clone())),
-                // A track with neither still holds its place in the list.
+                // A track with neither still keeps a slot in the list.
                 bgm_label: joined(location.bgms.iter().map(|bgm| {
                     format!(
                         "{}^{}",
@@ -319,7 +305,7 @@ fn assemble<'a>(
             .iter()
             .map(|release| crate::model::Version {
                 name: release.name.clone(),
-                // Unread yet, but published as the reference dump writes it.
+                // Unread yet, but published in the reference dump's format.
                 authors: (!release.authors.is_empty()).then(|| release.authors.join(", ")),
                 release_date: release.released.clone(),
             })
@@ -341,63 +327,41 @@ struct Attributes {
     wording_by_flag: std::collections::BTreeMap<u16, TypeParams>,
 }
 
-/// The worlds this dump is about, in [`published_place`] order.
-///
-/// Secrets included: the mark is carried from one dump to the next by title, so a dropped world is
-/// a mark forgotten at the next sync, and hiding is a question about a reader rather than the game.
-///
-/// A world's published id is its index here, and the order is the wiki's rather than this program's
-/// history, so two runs reading the same wiki publish the same ids.
-fn published_worlds(mut locations: Vec<smw::Location>) -> Vec<smw::Location> {
-    locations.sort_by(|one, other| published_place(one).cmp(&published_place(other)));
+/// `locations` in [`publish_order_key`] order, secret and removed worlds included.
+/// The order is the wiki's alone, so two syncs of one wiki publish the same ids.
+fn in_publish_order(mut locations: Vec<smw::Location>) -> Vec<smw::Location> {
+    locations.sort_by(|one, other| publish_order_key(one).cmp(&publish_order_key(other)));
     locations
 }
 
-/// The origin first, then every other world by title.
-///
-/// Nothing reads a world's position: the app and [`crate::depth`] both find the origin by title,
-/// and a `targetId` only has to agree with the dump it was published in. The order used to be the
-/// game's map numbering, to keep the thumbnail atlas from shifting under an insertion -- a job the
-/// world's own `cell` now does. What is left is a dump a person can read.
-///
-/// The origin is named anyway. It costs a comparison, and a dump opening on `3D Structures Path`
-/// rather than the room the player wakes up in reads as a mistake.
-fn published_place(location: &smw::Location) -> (bool, &str) {
+/// The start first, then every other world by title.
+/// Readers find the start by title, so the order serves people reading the dump.
+fn publish_order_key(location: &smw::Location) -> (bool, &str) {
     (location.title != depth::START, &location.title)
 }
 
-/// Every published world's cell in the thumbnail atlas, by title.
-///
-/// A cell is handed out once and never moves: a world keeps whatever the last dump gave it, and one
-/// first seen now takes a cell above every cell in use. Not packed by [`World::id`], which is a
-/// place in [`published_place`] order and moves under an already-published world, leaving every
-/// picture after the newcomer belonging to somebody else.
-///
-/// So an atlas is still right about every world it was packed with however far the dump has moved
-/// on, and a world it has no cell for draws the placeholder until the next pack.
-///
-/// Cells are not reused below the highest one held: handing a dropped world's gap to the next world
-/// along is the same wrong picture in miniature. A `full` run reclaims the tail, held to the weekly
-/// pass so a world the wiki marks removed and then restores keeps its picture.
-///
-/// Title is the key, as it is for [`marked_secret`], and carries the same cost: a world the wiki
-/// renames takes a fresh cell. A cold build hands out cells in publish order.
-fn cells<'a>(previous: &Dump, live: &[&'a str], full: bool) -> HashMap<&'a str, usize> {
-    let mut held: HashMap<&str, usize> = previous
+/// Every live world's thumbnail atlas cell, by title; a world keeps a cell once given.
+/// New worlds take cells above the highest in use; a `full` sync first forgets dropped worlds.
+fn atlas_cells<'a>(previous: &Dump, live: &[&'a str], full: bool) -> HashMap<&'a str, usize> {
+    let mut cell_by_title: HashMap<&str, usize> = previous
         .worlds
         .iter()
         .filter_map(|world| Some((world.title.as_str(), world.cell?)))
         .collect();
     if full {
-        let still: std::collections::HashSet<&str> = live.iter().copied().collect();
-        held.retain(|title, _| still.contains(*title));
+        let still_live: std::collections::HashSet<&str> = live.iter().copied().collect();
+        cell_by_title.retain(|title, _| still_live.contains(*title));
     }
-    let mut next = held.values().map(|cell| cell + 1).max().unwrap_or(0);
+    let mut next_cell = cell_by_title
+        .values()
+        .map(|cell| cell + 1)
+        .max()
+        .unwrap_or(0);
     live.iter()
         .map(|&title| {
-            let cell = held.get(title).copied().unwrap_or_else(|| {
-                next += 1;
-                next - 1
+            let cell = cell_by_title.get(title).copied().unwrap_or_else(|| {
+                next_cell += 1;
+                next_cell - 1
             });
             (title, cell)
         })
@@ -414,8 +378,8 @@ fn marked_secret(previous: &Dump) -> std::collections::HashSet<&str> {
         .collect()
 }
 
-/// `None` for an absent *or* empty field: the reader treats an empty string as a value it has, so
-/// an empty Japanese title would be shown as a world's name.
+/// `None` for an absent *or* empty field: the reader would show an empty Japanese title as the
+/// world's name.
 fn text(value: Option<&str>) -> Option<String> {
     value.filter(|text| !text.is_empty()).map(str::to_owned)
 }
@@ -427,10 +391,8 @@ fn joined(parts: impl Iterator<Item = String>) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("|"))
 }
 
-/// Percent-encodes an address the way a browser's `encodeURI` does.
-///
-/// The wiki serves pictures under the page titles they were uploaded for, so an address can carry a
-/// space or a Japanese character verbatim, and readers hand these straight to an HTTP client.
+/// Percent-encodes an address as a browser's `encodeURI` does: wiki picture addresses can carry
+/// raw spaces and Japanese characters, which readers hand straight to an HTTP client.
 fn encode_uri(url: &str) -> String {
     /// What `encodeURI` leaves alone: the unreserved set, the reserved delimiters, and `#`.
     const KEEP: &str = ";,/?:@&=+$-_.!~*'()#";
@@ -448,11 +410,8 @@ fn encode_uri(url: &str) -> String {
     encoded
 }
 
-/// When the dump was built, and when it was last built without checking whether it needed to be.
-///
-/// A soft sync publishes a dump as complete as any other, but by trusting the wiki's account of
-/// itself, which no soft sync could catch out. So `lastFullUpdate` marks the last time this program
-/// saw the whole wiki, and a soft sync carries it over rather than moving it.
+/// `(lastUpdate, lastFullUpdate)`: a soft sync trusts the wiki's change list, so carries over the
+/// last full sync's stamp.
 fn stamps(previous: &Dump, full: bool) -> (Option<String>, Option<String>) {
     let now = stamp();
     let last_full = match full {
@@ -462,23 +421,16 @@ fn stamps(previous: &Dump, full: bool) -> (Option<String>, Option<String>) {
     (Some(now.clone()), Some(last_full.unwrap_or(now)))
 }
 
-/// How far back the wiki's record of its own recent changes is worth trusting.
-///
-/// MediaWiki keeps that record for a fixed span and then forgets, answering about a moment further
-/// back with what it still has rather than with a complaint -- so an older dump would read that as
-/// "nothing has changed" and stay stale for ever. The default is ninety days; a month leaves room
-/// for it to be configured tighter.
+/// How far back the wiki's recent-changes list is trusted. MediaWiki silently forgets older
+/// changes (ninety days by default; a month allows for a tighter setting).
 const HORIZON: time::Duration = time::Duration::days(30);
 
-/// How far before the last dump a soft sync starts looking.
-///
-/// The store is not written by the edit that changes it: a job queue re-reads the page afterwards,
-/// and until it has, a query answers with what the page used to say. A sync querying only what
-/// changed since it last ran would take that answer and never ask again.
+/// How far before the last dump a soft sync starts looking: a job queue updates the store after
+/// the edit, so a query right after an edit can return the page's previous content.
 const MARGIN: time::Duration = time::Duration::hours(1);
 
-/// The moment a soft sync queries the wiki from, or `None` for a dump too old for the question to
-/// mean anything, which is a full sync's job.
+/// The moment a soft sync queries the wiki from; `None` for a dump past [`HORIZON`], which needs a
+/// full sync.
 pub fn looking_from(since: &str, now: time::OffsetDateTime) -> Option<String> {
     let since = parse_iso(since)?;
     (now - since < HORIZON).then(|| iso(since - MARGIN))
@@ -493,7 +445,7 @@ fn stamp() -> String {
     iso(time::OffsetDateTime::now_utc())
 }
 
-/// Also what a release is dated with: two conventions would be two things for one reader to know.
+/// Also dates releases, so a reader parses one format.
 pub fn iso(now: time::OffsetDateTime) -> String {
     // The milliseconds are always zero.
     format!(
@@ -522,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn the_origin_opens_the_dump_and_the_rest_follow_by_title() {
+    fn the_start_opens_the_dump_and_the_rest_follow_by_title() {
         let world = |title: &str| crate::smw::Location {
             title: title.to_owned(),
             location_image: String::new(),
@@ -535,7 +487,7 @@ mod tests {
             version_removed: None,
             version_gaps: Vec::new(),
         };
-        let published = super::published_worlds(vec![
+        let published = super::in_publish_order(vec![
             world("Nexus"),
             world("Chocolate World"),
             world("Urotsuki's Room"),
@@ -557,9 +509,8 @@ mod tests {
         );
     }
 
-    /// A dump holding just what [`super::cells`] reads: the titles published last time and the
-    /// cells they were given. `None` is a dump written before cells existed.
-    fn previously(worlds: &[(&str, Option<usize>)]) -> crate::model::Dump {
+    /// A previous dump of titles and cells, as [`super::atlas_cells`] reads; `None` for no cell.
+    fn dump_with_cells(worlds: &[(&str, Option<usize>)]) -> crate::model::Dump {
         serde_json::from_value(serde_json::json!({
             "worldData": worlds
                 .iter()
@@ -601,8 +552,9 @@ mod tests {
     #[test]
     fn a_world_keeps_the_cell_the_last_dump_gave_it() {
         // Cell 5's world was dropped; the cell is not reassigned.
-        let previous = previously(&[("Nexus", Some(1)), ("Dropped", Some(5)), ("Hub", Some(0))]);
-        let cells = super::cells(&previous, &["New", "Hub", "Nexus", "Newer"], false);
+        let previous =
+            dump_with_cells(&[("Nexus", Some(1)), ("Dropped", Some(5)), ("Hub", Some(0))]);
+        let cells = super::atlas_cells(&previous, &["New", "Hub", "Nexus", "Newer"], false);
         assert_eq!(cells["Hub"], 0);
         assert_eq!(cells["Nexus"], 1);
         assert_eq!(cells["New"], 6);
@@ -612,16 +564,16 @@ mod tests {
     #[test]
     fn a_dump_with_no_cells_to_carry_hands_out_the_publish_order() {
         for previous in [
-            previously(&[]),
-            previously(&[("Hub", None), ("Nexus", None)]),
+            dump_with_cells(&[]),
+            dump_with_cells(&[("Hub", None), ("Nexus", None)]),
         ] {
-            let cells = super::cells(&previous, &["Hub", "Nexus"], false);
+            let cells = super::atlas_cells(&previous, &["Hub", "Nexus"], false);
             assert_eq!(cells["Hub"], 0);
             assert_eq!(cells["Nexus"], 1);
         }
     }
 
-    // `lastFullUpdate` tells a dump this program verified from one taken at the wiki's word.
+    // `lastFullUpdate` moves only on a full sync.
     #[test]
     fn only_a_full_sync_moves_the_stamp_that_says_so() {
         let mut previous = crate::model::Dump {
@@ -667,9 +619,9 @@ mod tests {
     }
 
     #[test]
-    fn a_full_run_reclaims_the_cells_above_the_worlds_it_still_publishes() {
-        let previous = previously(&[("Hub", Some(0)), ("Gap", Some(2)), ("Dropped", Some(5))]);
-        let full = super::cells(&previous, &["Hub", "Gap", "New"], true);
+    fn a_full_sync_reclaims_the_cells_above_the_worlds_still_published() {
+        let previous = dump_with_cells(&[("Hub", Some(0)), ("Gap", Some(2)), ("Dropped", Some(5))]);
+        let full = super::atlas_cells(&previous, &["Hub", "Gap", "New"], true);
         assert_eq!(full["Hub"], 0, "a world still published keeps its cell");
         assert_eq!(full["Gap"], 2, "wherever the dropped world's cell sat");
         assert_eq!(
@@ -677,7 +629,7 @@ mod tests {
             "and the next one out is above the highest still held, not in the gap at 1"
         );
         assert_eq!(
-            super::cells(&previous, &["Hub", "Gap", "New"], false)["New"],
+            super::atlas_cells(&previous, &["Hub", "Gap", "New"], false)["New"],
             6,
             "where a soft sync holds the dropped world's cell and passes over it"
         );
@@ -694,7 +646,7 @@ mod tests {
             Some(super::iso(now - time::Duration::hours(7)).as_str())
         );
 
-        // Past the wiki's memory, "nothing changed" is indistinguishable from "nothing known".
+        // Past the recent-changes retention, an empty answer proves nothing.
         let stale = super::iso(now - time::Duration::days(45));
         assert_eq!(
             super::looking_from(&stale, now),

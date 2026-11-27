@@ -1,40 +1,5 @@
-//! A 3D force-directed graph simulation.
-//!
-//! Derived from the 2D [`force_graph`](https://github.com/t-mw/force-graph-rs) crate, which in
-//! turn implements the algorithm from [Graphoon](https://github.com/rm-code/Graphoon/).
-//!
-//! # Layout
-//!
-//! Node state lives in parallel `Vec<f32>` arrays, one per component, so the repulsion pass is a
-//! flat branch-free scan LLVM can auto-vectorize. Two consequences: every pair is computed twice
-//! rather than applying Newton's third law once, because the scattered write to the second node is
-//! what blocks vectorization; and forces are gathered from one snapshot and integrated afterwards
-//! (Jacobi), so results do not depend on node order.
-//!
-//! # Repulsion cost
-//!
-//! A Barnes-Hut octree replaces distant groups with their center of mass, bringing the all-to-all
-//! pass from O(n²) to O(n log n); [`SimulationParameters::theta`] controls the tradeoff and `0.0`
-//! restores exact summation. One core with AVX2, 4000 nodes: 5.5 ms per step exact, 1.4 ms at the
-//! default angle, worst-case force error near 1%.
-//!
-//! # Settling
-//!
-//! A layout that has come to rest stops stepping until something disturbs it, so an idle graph
-//! costs nothing per frame. Not every graph reaches equilibrium, so
-//! [`SimulationParameters::settle_after`] settles one that has not by a deadline.
-//!
-//! # Modes
-//!
-//! [`SimulationParameters::dimensions`] and [`SimulationParameters::dag_level_distance`] may both
-//! change between any two steps. Neither alters the force passes: each constrains the positions
-//! after the forces have run, so a switch reads as the graph settling into the new arrangement.
-//!
-//! # Vectorization
-//!
-//! The hot loops are scalar Rust that LLVM widens, which needs `-C target-feature=+simd128` for
-//! wasm and an optimization level that leaves the unroller on. Neither is visible from here and
-//! neither fails loudly, so `tests/codegen.rs` checks both.
+//! A 3D force-directed graph, derived from [`force_graph`](https://github.com/t-mw/force-graph-rs),
+//! after [Graphoon](https://github.com/rm-code/Graphoon/).
 //!
 //! # Example
 //!
@@ -71,65 +36,46 @@ use petgraph::{
 
 pub type DefaultNodeIdx = NodeIndex<petgraph::stable_graph::DefaultIx>;
 
-/// Added to every squared distance so a coincident pair yields a finite force rather than a NaN,
-/// replacing the branch the scalar version needed. The direction vector is zero there regardless,
-/// so the force still is.
+/// Added to every squared distance so a coincident pair yields a zero force instead of a NaN: the
+/// direction vector is zero there.
 const SOFTENING: f32 = 1e-6;
 
 /// Eight `f32` lanes fill an AVX2 register and are a whole multiple of the four wasm `simd128`,
 /// SSE and NEON provide, so the repulsion loop vectorizes on all of them.
 const LANES: usize = 8;
 
-/// Seconds of continued disturbance needed to bring the damping all the way back.
-///
-/// Settling withdraws the damping without touching the forces, so a layout stopped short of
-/// equilibrium is only being held still and handing the damping back in one step releases all of
-/// it at once. Recovering over a window makes the response proportional to how long the layout is
-/// actually disturbed.
+/// Seconds of continued disturbance needed to restore the full damping. A settled layout still
+/// holds unbalanced forces, so a gradual restore keeps a brief touch from releasing them all.
 const WAKE_TIME: f32 = 0.5;
 
-/// Rate at which a constrained axis closes the gap to its target, per second.
-///
-/// A fixed fraction of the remaining distance each step, so it converges without overshoot at any
-/// frame time, unlike a spring stiff enough to look instant.
+/// Rate at which a constrained axis closes the gap to the target, per second: a fixed fraction of
+/// the remaining distance each step, which converges without overshoot at any frame time.
 const CONSTRAINT_RATE: f32 = 8.0;
 
-/// The one timestep the simulation is ever advanced by, in seconds.
+/// The one timestep the simulation steps by, in seconds; [`ForceGraph::update`] banks elapsed
+/// time and spends that time in these steps. [`SimulationParameters::damping_factor`] is per step
+/// and force becomes displacement as `dt.powi(3)`, so a varying `dt` changes the trajectory.
 ///
-/// [`SimulationParameters::damping_factor`] is per step and force becomes displacement as
-/// `dt.powi(3)`, so a varying `dt` walks a different trajectory rather than the same one at a
-/// coarser resolution -- worst on a cold start, whose longest frames land on exactly the steps a
-/// freshly seeded layout has its largest forces. [`ForceGraph::update`] therefore banks elapsed
-/// time and spends it in steps of this size.
-///
-/// Not a frame rate. The forces, the damping and [`SimulationParameters::settle_speed`] are all
-/// tuned against a step of this length; changing it changes the layout. Retune with it.
+/// The forces, damping and [`SimulationParameters::settle_speed`] are tuned to this step.
 const FIXED_STEP: f32 = 1.0 / 60.0;
 
-/// How many [`FIXED_STEP`]s one [`ForceGraph::update`] call may spend.
-///
-/// Time beyond this is dropped rather than banked: a tab away for a minute would both stall the
-/// frame that repaid the debt and, in one call, undo the point of the fixed step.
+/// How many [`FIXED_STEP`]s one [`ForceGraph::update`] call may spend; time beyond is dropped, so
+/// returning to a backgrounded tab does not stall a frame catching up.
 const MAX_STEPS_PER_UPDATE: usize = 3;
 
-/// Distance below which a constrained axis is set to its target exactly.
-///
-/// Geometric decay only approaches the target, and [`Dimensions::Two`] is expected to be actually
-/// planar. Simulation units are pixel-sized, so this is invisible.
+/// Distance below which a constrained axis is set to the target exactly, since geometric decay
+/// only approaches the target and [`Dimensions::Two`] must be exactly planar.
 const CONSTRAINT_SNAP: f32 = 1e-2;
 
 /// How much stiffer a spring gets past [`SimulationParameters::link_distance_max`], as a multiple
-/// of its own rate.
-///
-/// Decides how soft the ceiling is, not where it is. Large enough that a stretched edge is visibly
-/// held, small enough that the term stays a force the fixed step can integrate rather than a snap.
+/// of the base rate: stiff enough to visibly hold an edge, soft enough for the fixed step.
 const OVERSTRETCH_STIFFNESS: f32 = 20.0;
 
 /// Which axes the layout may use.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Dimensions {
-    /// Layout on the `z = 0` plane. Repulsion and springs still run in 3D, so switching at
-    /// runtime collapses the graph onto the plane rather than flattening it in one step.
+    /// Layout on the `z = 0` plane. Repulsion and springs still run in 3D, so switching at runtime
+    /// collapses the graph onto the plane gradually.
     Two,
     #[default]
     Three,
@@ -140,9 +86,8 @@ pub enum Dimensions {
 pub enum Layers {
     /// Planes across y, so y reads as depth.
     Planes,
-    /// Shells around the origin, so distance from it reads as depth. By symmetry the shells
-    /// inside a node push it straight outward, which the shell discards whole, where a plane
-    /// would keep the sideways part.
+    /// Shells around the origin, so distance from the origin reads as depth. By symmetry, inner
+    /// shells push a node straight outward, a push the shell constraint discards whole.
     #[default]
     Shells,
 }
@@ -151,19 +96,16 @@ pub enum Layers {
 pub struct SimulationParameters {
     pub force_charge: f32,
     pub force_spring: f32,
-    /// Ceiling on what one repulsion interaction may contribute per component.
-    ///
-    /// Keeps a single close neighbour from dominating the sum, which softening alone does not do.
-    /// Repulsion only; the springs and [`ForceGraph::apply_force`] are unclamped.
+    /// Ceiling per component on one repulsion interaction, so one close neighbour cannot dominate.
+    /// The springs and [`ForceGraph::apply_force`] are unclamped.
     pub force_max: f32,
     pub node_speed: f32,
     pub damping_factor: f32,
-    /// Barnes-Hut opening angle.
-    ///
-    /// A distant group is replaced by its center of mass once its width subtends less than this,
-    /// turning the O(n²) repulsion pass into O(n log n). `0.0` sums every pair exactly.
+    /// Barnes-Hut opening angle: a distant group is replaced by the center of mass once the group
+    /// width subtends less than this, making repulsion O(n log n). `0.0` sums every pair exactly.
     pub theta: f32,
-    /// Whether the layout is free to use the z axis.
+    /// Whether the layout may use the z axis. Like [`Self::dag_level_distance`], free to change
+    /// between any two steps: both constrain positions after the forces run.
     pub dimensions: Dimensions,
     /// Speed below which the layout counts as settled, in position units per second.
     ///
@@ -173,41 +115,29 @@ pub struct SimulationParameters {
     /// Simulated seconds over which the layout is brought to a standstill, or `None` to wait on
     /// [`SimulationParameters::settle_speed`] however long that takes.
     ///
-    /// Whether these forces reach equilibrium depends on the graph: a sparse one large enough for
-    /// repulsion to outweigh its springs expands without ever converging.
-    /// [`SimulationParameters::damping_factor`] is ramped to zero across this window instead, so
-    /// such a layout coasts to a rest it would not have reached. Disturbing it hands the damping
-    /// back over [`WAKE_TIME`] rather than at once.
+    /// [`SimulationParameters::damping_factor`] is ramped to zero across this window, so a sparse
+    /// graph whose repulsion outweighs the springs, which never converges, still comes to rest. A
+    /// disturbance restores the damping over [`WAKE_TIME`].
     pub settle_after: Option<f32>,
-    /// Layered ("DAG") mode: spacing between the [`Layers`] that hold each depth, or `None` to let
-    /// the forces place nodes freely.
-    ///
-    /// Each node is held [`NodeData::level`] times this along y or from the origin, so that reads
-    /// as depth and the forces only move nodes within their layer.
+    /// Layered ("DAG") mode: spacing between the [`Layers`], or `None` for free placement. Each
+    /// node is held at [`NodeData::level`] times this, along y or from the origin.
     pub dag_level_distance: Option<f32>,
     /// Layered mode: what each layer is.
     pub dag_layers: Layers,
-    /// Layered mode: how far a node may sit off its layer, or `0.0` to pin it to it.
+    /// Layered mode: how far a node may sit off the layer, or `0.0` to pin the node there. Only
+    /// read with [`SimulationParameters::dag_level_distance`] set, and best kept well under that.
     ///
-    /// Inside the band the radius is free, so a crowded shell stacks across its thickness instead
-    /// of squeezing onto one surface. Meant for [`Dimensions::Two`], where a shell is a ring with
-    /// no third axis to take the overflow. Read only while
-    /// [`SimulationParameters::dag_level_distance`] is set, and best kept well under it, or
-    /// neighbouring layers meet. The band edge is soft -- the same decay at [`CONSTRAINT_RATE`] --
-    /// so a node pushed outward hard enough settles a little past it.
+    /// Inside the band the radius is free, so a crowded [`Dimensions::Two`] ring stacks across the
+    /// band. The edge is soft, decaying at [`CONSTRAINT_RATE`].
     pub dag_level_slack: f32,
-    /// How far an edge may stretch, or `None` to leave every spring linear however far its nodes
-    /// drift.
+    /// How far an edge may stretch, or `None` for linear springs at any length.
     ///
-    /// A linear spring balances the repulsion of a whole graph at whatever length that takes, and
-    /// that summed push grows with node count while one edge's pull does not. Past this distance
-    /// the spring gains a second term, [`OVERSTRETCH_STIFFNESS`] times stiffer, proportional to
-    /// the excess. The ceiling is soft: an edge held open harder settles somewhat past it.
+    /// The summed repulsion grows with node count while one edge's pull does not, so a linear
+    /// spring stretches with the graph. Past this distance the spring gains a second term,
+    /// [`OVERSTRETCH_STIFFNESS`] times stiffer, proportional to the excess. The ceiling is soft.
     pub link_distance_max: Option<f32>,
-    /// How far a node's repulsion reaches, or `None` for every distance.
-    ///
-    /// A pushed node only stops where something holds it, so with an unlimited reach every edge
-    /// with slack in it is pushed taut. Past this distance nothing pushes, and slack can stay.
+    /// How far a node's repulsion reaches, or `None` for every distance. Past this distance nothing
+    /// pushes, so slack edges can stay slack.
     pub repulsion_range: Option<f32>,
 }
 
@@ -236,11 +166,10 @@ pub struct NodeData<UserNodeData = ()> {
     pub x: f32,
     pub y: f32,
     pub z: f32,
-    /// Which depth shell the node belongs to. Read only while
-    /// [`SimulationParameters::dag_level_distance`] is set, which turns it into a distance from the
-    /// origin; what a level counts is the caller's to decide.
+    /// Which depth shell the node belongs to, as a count the caller defines. Read only while
+    /// [`SimulationParameters::dag_level_distance`] is set, which scales the level to a distance.
     pub level: f32,
-    /// A heavier node repels its neighbours harder.
+    /// A heavier node repels neighbours harder.
     pub mass: f32,
     pub is_anchor: bool,
     pub user_data: UserNodeData,
@@ -264,14 +193,11 @@ where
 }
 
 pub struct EdgeData<UserEdgeData = ()> {
-    /// This edge's own ceiling, as a multiple of [`SimulationParameters::link_distance_max`].
-    ///
-    /// An end with a crowd of edges needs more room to seat them than an end with one, and a long
-    /// way round should not drag together two ends the layout keeps apart. `f32::INFINITY` exempts
-    /// the edge, leaving it a plain linear spring however far it stretches.
+    /// This edge's own ceiling, as a multiple of [`SimulationParameters::link_distance_max`];
+    /// `f32::INFINITY` exempts the edge, leaving a plain linear spring.
     pub reach: f32,
-    /// This edge's pull within its ceiling, as a multiple of [`SimulationParameters::force_spring`].
-    /// Past the ceiling the overstretch term holds it whatever this is, so `0.0` is slack, not cut.
+    /// Pull within the ceiling, as a multiple of [`SimulationParameters::force_spring`]. `0.0`
+    /// means slack: past the ceiling the overstretch term still holds the edge.
     pub stiffness: f32,
     pub user_data: UserEdgeData,
 }
@@ -289,12 +215,11 @@ where
     }
 }
 
-/// Node state, one array per component.
+/// Node state, one array per component, indexed by [`DefaultNodeIdx::index`].
 ///
-/// Every array is indexed by [`DefaultNodeIdx::index`], so a slot outlives the node that owned it
-/// until [`StableUnGraph`] hands the index out again. A free slot carries `mass == 0.0` and
-/// `mobility == 0.0`, which makes it exert no force and receive no motion, so the hot loops can
-/// scan the whole array without testing whether a slot is live.
+/// A slot outlives the node until [`StableUnGraph`] reuses the index. A free slot has `mass == 0.0`
+/// and `mobility == 0.0`, exerting no force and receiving no motion, so the hot loops scan every
+/// slot without a liveness test.
 #[derive(Default)]
 struct NodeStore {
     x: Vec<f32>,
@@ -309,7 +234,7 @@ struct NodeStore {
     mass: Vec<f32>,
     /// `1.0` for a node the simulation may move, `0.0` for an anchor or a free slot.
     mobility: Vec<f32>,
-    /// Depth shell per node, as handed over in [`NodeData::level`]. Only layered mode reads it.
+    /// Depth shell per node, as handed over in [`NodeData::level`]. Read only in layered mode.
     level: Vec<f32>,
 }
 
@@ -385,7 +310,7 @@ impl NodeStore {
         self.az[slot] += fz;
     }
 
-    /// So a settled layout resumes from rest rather than from the residual drift it settled with.
+    /// So a settled layout resumes from rest, without the residual drift.
     fn halt(&mut self) {
         self.vx.fill(0.0);
         self.vy.fill(0.0);
@@ -409,15 +334,12 @@ impl NodeStore {
     }
 }
 
-/// Whether the layout is at rest, and how much of the damping is in play.
-///
-/// One value rather than separate fields because waking is one operation on all of it: every
-/// method that can disturb the layout records that it did, without knowing how the damping is
-/// managed.
+/// Whether the layout is at rest, and how much of the damping is in play. One value, so a method
+/// that disturbs the layout wakes the whole value without knowing how damping is managed.
 struct Rest {
     settled: bool,
     /// Fraction of [`SimulationParameters::damping_factor`] in effect: withdrawn across the
-    /// settling window while the layout is left alone, restored while it is being disturbed.
+    /// settling window while the layout is left alone, restored while the layout is disturbed.
     liveliness: f32,
     disturbed_since_step: bool,
 }
@@ -443,9 +365,9 @@ impl Rest {
         *self = Rest::default();
     }
 
-    /// Fraction of the damping now in effect: rises while the layout is disturbed and falls when
-    /// it is not, so a brief touch gives a brief response.
-    fn advance(&mut self, dt: f32, settle_after: Option<f32>) -> f32 {
+    /// Fraction of the damping now in effect: rises while the layout is disturbed and falls
+    /// otherwise, so a brief touch gives a brief response.
+    fn update(&mut self, dt: f32, settle_after: Option<f32>) -> f32 {
         let Some(window) = settle_after else {
             self.liveliness = 1.0;
             return 1.0;
@@ -464,17 +386,17 @@ impl Rest {
 
 pub struct ForceGraph<UserNodeData = (), UserEdgeData = ()> {
     parameters: SimulationParameters,
-    /// Every path that can disturb the layout wakes this, which is why
-    /// [`ForceGraph::parameters`] is behind an accessor.
+    /// Woken by every path that can disturb the layout, hence the accessor
+    /// [`ForceGraph::parameters`].
     rest: Rest,
     graph: StableUnGraph<UserNodeData, EdgeData<UserEdgeData>>,
     nodes: NodeStore,
-    /// Rebuilt every step by the approximate pass; kept to reuse its allocations.
+    /// Rebuilt every step by the approximate pass; kept to reuse the allocations.
     tree: Octree,
     interactions: Interactions,
     /// `force_max` per node, the uniform interaction limit the exact pass hands the kernel.
     limits: Vec<f32>,
-    /// Target coordinate per node for the axis a constraint is closing on; kept to reuse its
+    /// Target coordinate per node for the axis a constraint is closing on; kept to reuse the
     /// allocation.
     targets: Vec<f32>,
     unspent_time: f32,
@@ -504,21 +426,15 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         &self.parameters
     }
 
-    /// Borrows the parameters for modification, and wakes the layout.
-    ///
-    /// Changing a parameter invalidates the rest the layout had come to, and the graph has no
-    /// other way to notice; this is why the parameters are not a public field.
+    /// Borrows the parameters for modification, and wakes the layout: a parameter change
+    /// invalidates the rest, and the graph has no other way to notice.
     pub fn parameters_mut(&mut self) -> &mut SimulationParameters {
         self.rest.wake();
         &mut self.parameters
     }
 
-    /// Starts the settling window over, as though the layout had just been built.
-    ///
-    /// A woken layout gets the damping back over [`WAKE_TIME`] only for as long as it is actually
-    /// disturbed, which is right for a drag and far too little for a layout rearranged wholesale:
-    /// there is no equilibrium left to release gently. A caller that changed the arrangement
-    /// itself, rather than nudged it, says so here.
+    /// Starts the settling window over, as though the layout had just been built. For a caller that
+    /// rearranged the layout wholesale, which the gradual wake over [`WAKE_TIME`] is too short for.
     pub fn revive(&mut self) {
         self.rest.revive();
         self.unspent_time = 0.0;
@@ -586,15 +502,11 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         self.rest.wake();
     }
 
-    /// Advances the simulation over `dt` seconds elapsed since the previous update.
+    /// Steps the simulation over `dt` seconds elapsed since the previous update.
     ///
-    /// Only whole [`FIXED_STEP`]s are ever taken, so `dt` decides how many this call spends, never
-    /// how far each one goes. A frame longer than [`MAX_STEPS_PER_UPDATE`] steps is not caught up
-    /// on, and a settled layout does nothing at all.
-    ///
-    /// Reports whether any node moved, which a caller rebuilding geometry from the positions can
-    /// skip that work on. Two frames answer no: one over a settled layout, and one shorter than a
-    /// whole [`FIXED_STEP`].
+    /// `dt` decides how many [`FIXED_STEP`]s this call takes, up to [`MAX_STEPS_PER_UPDATE`]; a
+    /// settled layout takes none. Returns whether any node moved, so a caller can skip rebuilding
+    /// geometry: false over a settled layout or for a frame that completes no step.
     pub fn update(&mut self, dt: f32) -> bool {
         if self.rest.settled || self.graph.node_count() == 0 {
             return false;
@@ -606,7 +518,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
             self.fixed_step();
             stepped = true;
             if self.rest.settled {
-                // Otherwise whatever next wakes the layout inherits a part-step.
+                // Settled: the next wake starts without a leftover part-step.
                 self.unspent_time = 0.0;
                 break;
             }
@@ -617,11 +529,11 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
     fn fixed_step(&mut self) {
         let dt = FIXED_STEP;
         let damping =
-            self.parameters.damping_factor * self.rest.advance(dt, self.parameters.settle_after);
+            self.parameters.damping_factor * self.rest.update(dt, self.parameters.settle_after);
         self.repel();
         self.attract();
-        // A constrained direction is driven by `constrain` alone, or 2D would never be exactly
-        // planar. A slack layer's constraint is a band, which the forces fill.
+        // A constrained direction is driven by `constrain` alone, so 2D stays exactly planar. A
+        // slack layer's constraint is a band, which the forces fill.
         let pinned =
             self.parameters.dag_level_distance.is_some() && self.parameters.dag_level_slack <= 0.0;
         let planes = self.parameters.dag_layers == Layers::Planes;
@@ -647,11 +559,8 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         }
     }
 
-    /// Adds a force to one node, to be applied by the next [`ForceGraph::update`].
-    ///
-    /// Repeated calls accumulate and one update consumes the total. Not subject to
-    /// [`SimulationParameters::force_max`], so a caller dragging a node is not competing with the
-    /// clamp; an anchored node ignores it, as it ignores every other force.
+    /// Adds a force to one node for the next [`ForceGraph::update`]; repeated calls accumulate.
+    /// Unclamped by [`SimulationParameters::force_max`], and ignored by an anchored node.
     pub fn apply_force(&mut self, idx: DefaultNodeIdx, force: [f32; 3]) {
         if force == [0.0; 3] {
             return;
@@ -720,9 +629,8 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         }
     }
 
-    /// Barnes-Hut: walk the octree once per leaf to collect an interaction list of nearby bodies
-    /// and distant cell aggregates, then run the same kernel over that list for each of the
-    /// leaf's nodes.
+    /// Barnes-Hut: per leaf, traverse the octree once to collect nearby bodies and distant cell
+    /// aggregates, then run the kernel over that list for each node in the leaf.
     fn repel_approx(&mut self) {
         let n = self.nodes.len();
         let force_max = self.parameters.force_max;
@@ -767,15 +675,11 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         }
     }
 
-    /// Spring attraction along the edges.
+    /// Spring attraction along the edges, proportional to the offset, so an edge within the ceiling
+    /// needs no square root.
     ///
-    /// The force is the offset vector scaled, so an edge within its ceiling needs no square root;
-    /// one stretched past it pays for one and pulls harder than linearly on the excess.
-    ///
-    /// Unclamped, unlike the repulsion: this is the only force that grows with distance, so it is
-    /// the one that decides how far an edge ends up. Held to
-    /// [`SimulationParameters::force_max`], a node on a single edge would lose to the summed
-    /// repulsion of a large graph.
+    /// Unclamped: the only force growing with distance decides edge length, and a clamped spring on
+    /// one edge would lose to a large graph's repulsion.
     fn attract(&mut self) {
         let rate = self.parameters.force_spring * 0.5;
         let max = self.parameters.link_distance_max.unwrap_or(f32::INFINITY);
@@ -787,7 +691,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
                 nodes.y[j] - nodes.y[i],
                 nodes.z[j] - nodes.z[i],
             );
-            // Only an edge past its ceiling pays for the square root.
+            // Only an edge past the ceiling pays for the square root.
             let ceiling = max * edge.weight().reach;
             let stiffness = edge.weight().stiffness;
             let squared = dx * dx + dy * dy + dz * dz;
@@ -807,8 +711,8 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         }
     }
 
-    /// Removes the part of each accumulated force that points along its node's radius, leaving
-    /// what moves it around its shell. A node bound for the origin keeps none.
+    /// Removes the radial part of each accumulated force, leaving the motion around the shell. A
+    /// node bound for the origin keeps none.
     fn discard_radial_force(&mut self) {
         let n = self.nodes.len();
         let NodeStore {
@@ -834,9 +738,8 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         }
     }
 
-    /// Integrates the accumulated forces. `damping` is what the settling envelope has left of
-    /// [`SimulationParameters::damping_factor`]: the forces push regardless, so what stops the
-    /// layout is how much of the velocity they build it gets to keep.
+    /// Integrates the accumulated forces. `damping`, the share of velocity kept each step, is what
+    /// the settling envelope leaves of [`SimulationParameters::damping_factor`].
     fn integrate(&mut self, dt: f32, damping: f32, free: [bool; 3]) {
         // The accumulators hold force: one `dt` makes a velocity change, the other the step.
         let dv = dt * dt * self.parameters.node_speed;
@@ -866,11 +769,8 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         }
     }
 
-    /// Applies the axis constraints the current mode calls for, after the forces have moved the
-    /// nodes freely.
-    ///
-    /// Returns whether every constraint has reached its target, the other half of deciding that
-    /// the layout has settled.
+    /// Applies the axis constraints of the current mode after the forces move the nodes freely.
+    /// Returns whether every constraint has reached the target, the other half of the settled test.
     fn constrain(&mut self, dt: f32) -> bool {
         let n = self.nodes.len();
         let mut reached = true;
@@ -947,8 +847,7 @@ impl<UserNodeData, UserEdgeData> ForceGraph<UserNodeData, UserEdgeData> {
         }
     }
 
-    /// Wakes the layout whether or not the callback changes anything: what an edge carries is read
-    /// every step, so there is no telling from here whether the next one still holds.
+    /// Wakes the layout regardless, since edge data is read every step.
     pub fn visit_edges_mut<
         F: FnMut(DefaultNodeIdx, DefaultNodeIdx, &mut EdgeData<UserEdgeData>),
     >(
@@ -1033,7 +932,7 @@ pub struct NodeMut<'a, UserNodeData = ()> {
     pub user_data: &'a mut UserNodeData,
     slot: usize,
     nodes: &'a mut NodeStore,
-    /// Woken by every setter: each one invalidates the rest the layout had come to.
+    /// Woken by every setter, each invalidating the rest the layout had reached.
     rest: &'a mut Rest,
 }
 
@@ -1051,7 +950,7 @@ impl<UserNodeData> NodeMut<'_, UserNodeData> {
         ]
     }
 
-    /// Moves the node, leaving its velocity alone.
+    /// Moves the node, leaving the velocity alone.
     pub fn set_position(&mut self, [x, y, z]: [f32; 3]) {
         self.rest.wake();
         self.nodes.x[self.slot] = x;
@@ -1059,8 +958,8 @@ impl<UserNodeData> NodeMut<'_, UserNodeData> {
         self.nodes.z[self.slot] = z;
     }
 
-    /// Sets the velocity, leaving the position alone. Zeroing it stops the node dead, which is
-    /// what restarting a layout needs: a node moved elsewhere keeps the momentum it had otherwise.
+    /// Sets the velocity, leaving the position alone. Zero stops the node dead, as restarting a
+    /// layout needs.
     pub fn set_velocity(&mut self, [vx, vy, vz]: [f32; 3]) {
         self.rest.wake();
         self.nodes.vx[self.slot] = vx;
@@ -1090,19 +989,15 @@ impl<UserNodeData> NodeMut<'_, UserNodeData> {
     }
 }
 
-/// Repulsion exerted on one node by a list of masses.
+/// Repulsion exerted on one node by a list of masses: every node in the graph, or an octree
+/// interaction list. An entry at the target's own position contributes nothing.
 ///
-/// `charge_target` folds in the target's own mass and the sign of the charge. `limit` caps what
-/// each entry may contribute per component: `force_max` for a single node, a multiple of it for a
-/// cell aggregate standing in for several. The list may be every node in the graph or the
-/// interaction list of an octree walk; an entry at the target's own position contributes nothing.
+/// `charge_target` folds in the target's mass and the charge sign. `limit` caps each entry per
+/// component: `force_max` for a node, a multiple for a cell aggregate.
 ///
-/// The lane loop is written the way it is so LLVM vectorizes it without bounds-checking or
-/// NaN-correcting inside the loop; `tests/codegen.rs` fails if either of those stops working.
-///
-/// Not `#[inline]`: entered once per node and run over every interaction that node has, so the
-/// call is already amortized and one out-of-line copy keeps the vectorized loop somewhere a
-/// disassembler can find it.
+/// The lane loop is shaped so LLVM vectorizes without bounds checks or NaN correction inside;
+/// `tests/codegen.rs` enforces both. Not `#[inline]`: one call per node is already amortized, and
+/// one out-of-line copy keeps the vectorized loop findable in a disassembler.
 #[expect(clippy::too_many_arguments)]
 fn repulsion_on(
     target: [f32; 3],
@@ -1208,17 +1103,14 @@ fn inv_cube(d2: f32) -> f32 {
     (softened * softened.sqrt()).recip()
 }
 
-/// `v` held to `+/-limit`, and a NaN `v` to `-limit`. `limit` is assumed not to be NaN, the one
-/// input the two variants disagree on.
+/// `v` held to `+/-limit`, and a NaN `v` to `-limit`. `limit` is assumed not NaN, the one input
+/// the two variants disagree on.
 ///
-/// There are two because the clamp that lowers to bare instructions differs by backend, and this
-/// is the innermost expression in the kernel. `f32::max` and `f32::min` are IEEE `maxNum` and
-/// `minNum`, which return the operand that is *not* NaN when one side is NaN. The hardware minimum
-/// and maximum do the opposite — `maxps`/`minps` on x86, `f32x4.pmax`/`pmin` on wasm — and need a
-/// NaN test and a select per bound to correct.
-///
-/// aarch64 alone has the IEEE rule in hardware, as `fmaxnm`/`fminnm`, where it is the comparisons
-/// that need the second instruction. `tests/codegen.rs` checks that the intended one arrived.
+/// Two variants because the clamp that lowers to bare instructions differs by backend. `f32::max`
+/// and `f32::min` are IEEE `maxNum`/`minNum`, returning the non-NaN operand; `maxps`/`minps` on x86
+/// and `f32x4.pmax`/`pmin` on wasm do the opposite and need a NaN test and select per bound.
+/// aarch64 has `maxNum` in hardware as `fmaxnm`/`fminnm`, where the comparisons need the second
+/// instruction. `tests/codegen.rs` checks the intended variant.
 #[inline(always)]
 fn clamp_symmetric(v: f32, limit: f32) -> f32 {
     #[cfg(target_arch = "aarch64")]
@@ -1250,11 +1142,8 @@ fn reduce(lanes: [f32; LANES]) -> f32 {
     lanes.iter().sum()
 }
 
-/// Relaxes one axis toward a target coordinate, discarding whatever the forces did to it.
-///
-/// The gap closes geometrically rather than through a spring, so it converges at a rate set only
-/// by elapsed time and cannot overshoot however large the step or the distance. Returns whether
-/// every node it may move is now exactly on its target.
+/// Relaxes one axis geometrically toward a target, discarding the forces on that axis, so the gap
+/// never overshoots. Returns whether every movable node is exactly on target.
 fn constrain_axis(
     pos: &mut [f32],
     vel: &mut [f32],
@@ -1289,8 +1178,8 @@ fn constrain_axis(
     reached
 }
 
-/// Relaxes each node's distance from the origin toward its shell, scaling its position about the
-/// origin and discarding the radial part of its velocity, as [`constrain_axis`] does for one axis.
+/// Relaxes each node's distance from the origin toward the node's shell, scaling the position
+/// about the origin and discarding radial velocity, as [`constrain_axis`] does for one axis.
 fn constrain_shells(nodes: &mut NodeStore, distance: f32, slack: f32, retained: f32) -> bool {
     let n = nodes.len();
     let NodeStore {
@@ -1510,13 +1399,11 @@ mod test {
         }
     }
 
-    /// CI runs on one architecture, so without this the Android build would reach a phone with its
-    /// clamp never executed anywhere.
+    /// Runs both clamp variants on every host: CI covers one architecture, and phones get aarch64.
     ///
-    /// A NaN `limit` is excluded: the comparisons propagate it and IEEE `minNum` discards it.
-    /// Zeroes are compared by value rather than by bit, because `fmaxnm`/`fminnm` do not pick the
-    /// same zero as the comparisons and `-0.0` moves a node exactly as far as `0.0`. That shows up
-    /// only on aarch64, which `just test-arm` is for.
+    /// A NaN `limit` is excluded: the comparisons propagate a NaN and IEEE `minNum` discards one.
+    /// Zeroes compare by value: `fmaxnm`/`fminnm` pick a different zero than the comparisons, and
+    /// `-0.0` moves a node as far as `0.0`. Only aarch64 shows this, under `just test-arm`.
     #[test]
     fn the_two_clamp_variants_agree() {
         const INTERESTING: [f32; 11] = [
@@ -1544,9 +1431,8 @@ mod test {
         }
     }
 
-    /// The distance to a non-finite coordinate is infinite, making the falloff zero and the force
-    /// `inf * 0`; only the clamp turns that back into a number, so the bound it picks for a NaN is
-    /// what keeps the rest of the graph finite.
+    /// A non-finite coordinate makes the falloff zero and the force `inf * 0`; the bound the clamp
+    /// picks for a NaN keeps the rest of the graph finite.
     #[test]
     fn a_runaway_coordinate_does_not_infect_the_others() {
         let mut graph = <ForceGraph>::new(Default::default());
@@ -1599,8 +1485,8 @@ mod test {
         };
         assert_eq!(layout(false), layout(true));
     }
-    /// Displacement after one step from rest is proportional to the force, so it measures the
-    /// approximation directly.
+    /// Displacement after one step from rest is proportional to the force, so the displacement
+    /// measures the approximation directly.
     fn one_step_displacements(theta: f32) -> Vec<[f32; 3]> {
         let mut seed = 0x5eed_1337u32;
         let mut rng = || {
@@ -1658,7 +1544,7 @@ mod test {
         );
     }
 
-    /// ~1% worst case, and the bound must hold at any size: an aggregate that mis-clamps its share
+    /// ~1% worst case, and the bound must hold at any size: an aggregate that mis-clamps the share
     /// of the force makes the error grow with node count.
     #[test]
     fn default_theta_stays_accurate() {
@@ -1668,7 +1554,7 @@ mod test {
         assert!(error < 0.02, "{error}");
     }
 
-    /// Exactly planar, not merely small, and without flattening the other axes.
+    /// Exactly planar, with the other axes intact.
     #[test]
     fn two_dimensions_collapse_onto_the_plane() {
         let mut graph = <ForceGraph>::new(SimulationParameters {
@@ -1697,8 +1583,8 @@ mod test {
         assert!(spread(0) > 100.0 && spread(1) > 100.0, "{positions:?}");
     }
 
-    /// A cold start hands `update` its longest frames on exactly the steps a freshly seeded layout
-    /// has its largest forces, and that opening burst is what fixes how far apart it ends up.
+    /// A cold start hands `update` the longest frames on exactly the steps a freshly seeded layout
+    /// has the largest forces, and that opening burst fixes the final spread.
     #[test]
     fn the_layout_does_not_depend_on_the_frame_rate() {
         let seeded = || {
@@ -1785,8 +1671,8 @@ mod test {
         assert!(positions(&graph)[0][0] > resting[0][0]);
     }
 
-    /// This graph's repulsion outweighs its springs, so it expands for as long as it is stepped:
-    /// withdrawing the damping is the only thing that will ever settle it.
+    /// This graph's repulsion outweighs the springs, so the graph expands without end; only
+    /// withdrawing the damping brings rest.
     #[test]
     fn an_unconverged_layout_is_brought_to_rest() {
         let budget = 5.0f32;
@@ -1813,8 +1699,8 @@ mod test {
         assert_eq!(positions(&graph), resting);
     }
 
-    /// Settling leaves the forces in place, so handing the damping all back at the first touch
-    /// would let one frame of contact release the whole layout.
+    /// Settling leaves the forces in place, so the damping returns gradually and one frame of
+    /// contact does not release the whole layout.
     #[test]
     fn a_brief_touch_gives_a_brief_response() {
         let dt = FIXED_STEP;
@@ -1898,7 +1784,7 @@ mod test {
     fn a_collapsing_layout_is_not_settled() {
         let mut graph = <ForceGraph>::new(SimulationParameters {
             dimensions: Dimensions::Two,
-            // Otherwise speed alone would settle it at the first step.
+            // No forces, so speed alone would call the layout settled at the first step.
             force_charge: 0.0,
             ..converge()
         });
@@ -1914,7 +1800,7 @@ mod test {
     }
 
     /// Repulsion acts along the offset between two nodes, so nodes sharing a coordinate get no
-    /// force along that axis: a caller switching back to three dimensions has to reseed it.
+    /// force along that axis: a caller switching back to three dimensions has to reseed z.
     #[test]
     fn a_flat_layout_gets_no_depth_back() {
         let mut graph = <ForceGraph>::new(Default::default());
@@ -1933,7 +1819,7 @@ mod test {
         assert!(positions.iter().all(|p| p[2] == 0.0), "{positions:?}");
     }
 
-    /// Across the band rather than piled onto its ring, and none of them leaving the band.
+    /// Spread across the band, none leaving the band.
     #[test]
     fn slack_stacks_a_crowded_shell() {
         let mut graph = <ForceGraph>::new(SimulationParameters {
@@ -1965,8 +1851,8 @@ mod test {
         assert!(spread > 1.0, "{radii:?}");
     }
 
-    /// However hard the rest of the graph pulls the two ends apart. The plain linear spring does
-    /// not, an edge given more reach is held further out, and an exempt one is not held at all.
+    /// However hard the graph pulls the two ends apart. A plain linear spring stretches further, a
+    /// larger reach holds the edge further out, and an exempt edge is not held.
     #[test]
     fn a_ceiling_bounds_how_far_an_edge_stretches() {
         const CEILING: f32 = 250.0;
@@ -2024,7 +1910,7 @@ mod test {
         assert!(slack < CEILING * 1.3, "{slack}");
     }
 
-    /// However the forces would rather place it.
+    /// Whatever placement the forces prefer.
     #[test]
     fn shells_follow_the_level() {
         let mut graph = <ForceGraph>::new(SimulationParameters {
@@ -2035,7 +1921,7 @@ mod test {
             .map(|i| {
                 graph.add_node(NodeData {
                     x: i as f32 * 10.0,
-                    // Not the shell's radius: the constraint has to place it.
+                    // Off the shell radius, so the constraint must move the node.
                     y: 500.0,
                     level: i as f32,
                     ..Default::default()
@@ -2059,7 +1945,7 @@ mod test {
     /// disturbance lasts -- right for a drag, useless for a rearrangement.
     #[test]
     fn reviving_lets_a_settled_layout_rearrange() {
-        /// Bounded, so a layout that will not settle fails the test instead of hanging it.
+        /// Bounded, so a layout that will not settle fails the test instead of hanging.
         fn rest(graph: &mut ForceGraph) {
             for _ in 0..2000 {
                 if graph.is_settled() {
@@ -2069,8 +1955,8 @@ mod test {
             }
             panic!("never settled");
         }
-        // Several nodes per shell, so lifting the layering leaves the forces work. Roomy shells, or
-        // the strain they hold makes even a brief wake travel far.
+        // Several nodes per shell, so lifting the layering leaves the forces work. Roomy shells
+        // keep the held strain low, so a brief wake travels little.
         fn layered() -> ForceGraph {
             let mut graph = <ForceGraph>::new(SimulationParameters {
                 dag_level_distance: Some(3000.0),

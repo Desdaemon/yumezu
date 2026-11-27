@@ -24,7 +24,7 @@ fn app_worlds(places: Vec<Place>) -> Vec<World> {
             map_label: None,
             secret: false,
             cell: Some(id),
-            unknown: false,
+            concealed: false,
             connections: place.connections,
         })
         .collect()
@@ -41,7 +41,7 @@ fn world(title: &str, secret: bool, out: &[usize]) -> World {
         map_label: None,
         secret,
         cell: None,
-        unknown: false,
+        concealed: false,
         connections: out
             .iter()
             .map(|&to| fixture::connection(to, ConnType::empty(), None))
@@ -141,7 +141,7 @@ fn a_frontier_keeps_one_step_past_what_was_visited() {
 }
 
 #[test]
-fn a_frontier_does_not_reach_through_a_passage_it_cannot_be_walked_down() {
+fn a_frontier_does_not_reach_through_a_passage_it_cannot_be_passed_down() {
     let dump = chain(
         &["Nexus", "Sofa Room", "Far Room", "Farther Room"],
         ConnType::NO_ENTRY,
@@ -177,8 +177,8 @@ fn a_connection_reads_the_same_from_either_end() {
         for step in steps {
             let far = super::step_between(&connections, step.world, from)
                 .expect("the world at the far end carries it too");
-            assert_eq!(step.out.is_some(), far.back.is_some());
-            assert_eq!(step.back.is_some(), far.out.is_some());
+            assert_eq!(step.outgoing.is_some(), far.incoming.is_some());
+            assert_eq!(step.incoming.is_some(), far.outgoing.is_some());
             assert_eq!(step.one_way(), far.one_way());
         }
     }
@@ -192,8 +192,8 @@ fn a_condition_is_read_out_in_the_words_the_dump_carries() {
     let conditions: Vec<String> = connections
         .iter()
         .flatten()
-        .filter_map(|step| step.out.as_ref())
-        .map(super::sentences)
+        .filter_map(|step| step.outgoing.as_ref())
+        .map(super::conditions_display)
         .collect();
     let any = |wanted: &str| {
         conditions
@@ -213,7 +213,7 @@ fn a_condition_is_read_out_in_the_words_the_dump_carries() {
 #[test]
 fn an_effect_is_named_and_the_words_around_it_are_left_alone() {
     crate::i18n::speak_english();
-    let named = |detail: &str| super::named_effects(&super::corrected(detail));
+    let named = |detail: &str| super::named_effects(&super::manual_wiki_corrections(detail));
     assert_eq!(super::effects("Bat&comma; Fairy"), "Bat, Fairy");
     assert_eq!(named("fairy"), "Fairy");
     assert_eq!(named("Teru Teru Bozu"), "Teru Teru Bōzu");
@@ -227,7 +227,7 @@ fn an_effect_is_named_and_the_words_around_it_are_left_alone() {
 #[test]
 fn the_origin_roots_the_route_tree() {
     let worlds = load();
-    let origin = super::origin_world(&worlds);
+    let origin = super::origin(&worlds);
     assert_eq!(worlds[origin].title, yumezu_routing::START);
     let routes = super::canonical_routes(&worlds);
     assert_eq!(routes.depth[origin], Some(0));
@@ -243,10 +243,10 @@ fn the_origin_roots_the_route_tree() {
 }
 
 #[test]
-fn directions_start_where_the_walk_is_read_from() {
+fn directions_start_where_the_route_is_read_from() {
     let worlds = load();
     let connections = super::connections(&worlds);
-    let from = (super::origin_world(&worlds) + worlds.len() / 2) % worlds.len();
+    let from = (super::origin(&worlds) + worlds.len() / 2) % worlds.len();
     let routes = super::routes_from(&connections, from);
     assert_eq!(routes.depth[from], Some(0));
     assert!(routes.parents[from].is_none());
@@ -262,14 +262,18 @@ fn directions_start_where_the_walk_is_read_from() {
             let onward = super::step_between(&connections, parent, step)
                 .expect("a route steps between worlds that are connected");
             assert!(
-                onward.out.is_some(),
-                "{} is walked to {} the way it cannot be",
+                onward.outgoing.is_some(),
+                "the route takes {} to {} against the connection",
                 worlds[parent].title,
                 worlds[step].title
             );
             step = parent;
         }
-        assert_eq!(step, from, "{} is not walked from", worlds[from].title);
+        assert_eq!(
+            step, from,
+            "route to {} does not start at {}",
+            worlds[to].title, worlds[from].title
+        );
     }
 }
 
@@ -278,20 +282,20 @@ fn a_free_way_nothing_is_shorter_than_is_offered_alone() {
     let worlds = load();
     let connections = super::connections(&worlds);
     let hub = super::hub_world(&worlds);
-    let from = super::origin_world(&worlds);
+    let from = super::origin(&worlds);
     let to = connections[from]
         .iter()
         .find(|step| {
-            step.out
+            step.outgoing
                 .as_ref()
                 .is_some_and(|step| step.gate == super::Gate::Free)
         })
-        .expect("the origin walks somewhere for nothing")
+        .expect("the origin has a free exit")
         .world;
 
     let ways = super::ways(&connections, from, to, 5, hub);
-    assert_eq!(ways.len(), 1, "an alternative to walking straight there");
-    assert_eq!(ways[0].walk, [from, to]);
+    assert_eq!(ways.len(), 1, "an alternative to going straight there");
+    assert_eq!(ways[0].worlds, [from, to]);
 }
 
 #[test]
@@ -307,22 +311,22 @@ fn the_eyeball_bomb_is_a_way_back_from_anywhere() {
     let ways = super::ways(&connections, from, hub, 5, Some(hub));
     let bomb = ways
         .iter()
-        .find(|way| way.walk == [from, hub])
+        .find(|way| way.worlds == [from, hub])
         .expect("no way back with the bomb");
-    assert_eq!((bomb.conditions, bomb.demands), (super::Gate::Effect, 1));
+    assert_eq!((bomb.gate, bomb.demanding_steps), (super::Gate::Effect, 1));
     assert_eq!(
         super::step_conditions(&connections, Some(hub), from, hub)
             .as_ref()
-            .and_then(super::Conditions::detail),
-        Some(yumezu_routing::ESCAPE)
+            .and_then(super::Conditions::most_restrictive_detail),
+        Some(yumezu_routing::ESCAPE_EFFECT)
     );
 }
 
 #[test]
-fn every_way_offered_is_one_a_player_could_walk() {
+fn every_way_offered_is_one_a_player_can_pass() {
     let worlds = load();
     let connections = super::connections(&worlds);
-    let from = super::origin_world(&worlds);
+    let from = super::origin(&worlds);
     let to = (from + worlds.len() / 2) % worlds.len();
     let hub = super::hub_world(&worlds);
     let ways = super::ways(&connections, from, to, 5, hub);
@@ -331,39 +335,45 @@ fn every_way_offered_is_one_a_player_could_walk() {
 
     for way in &ways {
         assert_eq!(
-            (way.walk.first(), way.walk.last()),
+            (way.worlds.first(), way.worlds.last()),
             (Some(&from), Some(&to))
         );
         let mut seen = std::collections::HashSet::new();
         assert!(
-            way.walk.iter().all(|&world| seen.insert(world)),
-            "a way walks through the same world twice"
+            way.worlds.iter().all(|&world| seen.insert(world)),
+            "a way visits the same world twice"
         );
         let (mut conditions, mut demands) = (super::Gate::Free, 0);
-        for pair in way.walk.windows(2) {
+        for pair in way.worlds.windows(2) {
             let step = super::step_conditions(&connections, hub, pair[0], pair[1])
-                .expect("a way is walked the way it can be");
+                .expect("a way follows connections that exist");
             conditions = conditions.max(step.gate);
             demands += u32::from(step.gate != super::Gate::Free);
         }
-        assert_eq!((conditions, demands), (way.conditions, way.demands));
+        assert_eq!((conditions, demands), (way.gate, way.demanding_steps));
         let onward: Vec<_> = way
-            .walk
+            .worlds
             .windows(2)
             .map(|pair| {
                 super::step_conditions(&connections, hub, pair[0], pair[1])
-                    .is_some_and(|step| step.gate.onward())
+                    .is_some_and(|step| step.gate.passable())
             })
             .collect();
         assert!(
             onward.windows(2).all(|pair| pair[0] >= pair[1]),
-            "a way walks on out of an isolated section"
+            "a way leads on out of an isolated section"
         );
     }
 
     let traded: Vec<_> = ways
         .iter()
-        .map(|way| (way.demands, way.walk.len(), way.backs_out))
+        .map(|way| {
+            (
+                way.demanding_steps,
+                way.worlds.len(),
+                way.through_exit_point,
+            )
+        })
         .collect();
     assert!(
         traded.windows(2).all(|pair| pair[0].0 <= pair[1].0),
@@ -389,21 +399,21 @@ fn every_way_offered_is_one_a_player_could_walk() {
             "a way is offered that demands more without saving a connection: {traded:?}"
         );
     }
-    let walks: std::collections::HashSet<_> = ways.iter().map(|way| &way.walk).collect();
-    assert_eq!(walks.len(), ways.len(), "one way is offered twice");
+    let unique_ways: std::collections::HashSet<_> = ways.iter().map(|way| &way.worlds).collect();
+    assert_eq!(unique_ways.len(), ways.len(), "one way is offered twice");
 }
 
 #[test]
 fn a_player_who_can_pass_everything_is_never_sent_further() {
     let worlds = load();
     let connections = super::connections(&worlds);
-    let from = super::origin_world(&worlds);
-    let walked = super::routes_from(&connections, from);
-    let open = yumezu_routing::routes_from_passing(&connections, from, super::Gate::Revisit);
+    let from = super::origin(&worlds);
+    let routes = super::routes_from(&connections, from);
+    let open = yumezu_routing::routes_from_unlocked(&connections, from, super::Gate::Revisit);
 
     let mut nearer = 0;
     for (to, world) in worlds.iter().enumerate() {
-        let Some(depth) = walked.depth[to] else {
+        let Some(depth) = routes.depth[to] else {
             continue;
         };
         let open = open.depth[to].expect("a world reached is reached with nothing in the way");
@@ -435,11 +445,15 @@ fn depth_is_the_length_of_the_canonical_route() {
         }
         assert_eq!(
             step,
-            super::origin_world(&worlds),
-            "{} walks back to {step}",
+            super::origin(&worlds),
+            "{} traces back to {step}",
             worlds[world].title
         );
-        assert_eq!(steps, depth, "{} walks {steps} steps", worlds[world].title);
+        assert_eq!(
+            steps, depth,
+            "{} is {steps} steps from the origin",
+            worlds[world].title
+        );
     }
 }
 
@@ -458,7 +472,7 @@ fn conditions_only_ever_push_a_world_deeper() {
             }
         }
     }
-    let origin = super::origin_world(&worlds);
+    let origin = super::origin(&worlds);
     let mut shortest = vec![None; worlds.len()];
     shortest[origin] = Some(0);
     let mut queue = std::collections::VecDeque::from([origin]);
@@ -664,10 +678,10 @@ fn every_stage_the_server_can_name_is_something_this_app_can_say() {
 }
 
 #[test]
-fn no_route_is_walked_in_through_a_revisit_a_player_could_stand_off() {
+fn no_route_enters_through_a_revisit_a_player_could_stand_off() {
     let worlds = load();
     let routes = super::canonical_routes(&worlds);
-    let steps = super::walkable_steps(&worlds);
+    let steps = super::directed_steps(&worlds);
     let gate = |from: usize, to: usize| {
         steps[from]
             .iter()
@@ -677,7 +691,7 @@ fn no_route_is_walked_in_through_a_revisit_a_player_could_stand_off() {
     let stranded = |world: usize| {
         let mut at = world;
         while let Some(parent) = routes.parents[at] {
-            if gate(parent, at).is_some_and(|gate| !gate.onward()) {
+            if gate(parent, at).is_some_and(|gate| !gate.passable()) {
                 return true;
             }
             at = parent;
@@ -685,7 +699,7 @@ fn no_route_is_walked_in_through_a_revisit_a_player_could_stand_off() {
         false
     };
 
-    let walked_in: Vec<_> = routes
+    let entered_by_revisit: Vec<_> = routes
         .parents
         .iter()
         .enumerate()
@@ -696,14 +710,14 @@ fn no_route_is_walked_in_through_a_revisit_a_player_could_stand_off() {
         .collect();
     // Guards against a vacuous pass.
     assert_eq!(
-        walked_in
+        entered_by_revisit
             .iter()
             .map(|&world| worlds[world].title.as_str())
             .collect::<Vec<_>>(),
         ["Ember Terrace"]
     );
 
-    for world in walked_in {
+    for world in entered_by_revisit {
         let standing: Vec<_> = (0..worlds.len())
             .filter(|&from| gate(from, world).is_some_and(|gate| gate != super::Gate::Revisit))
             .filter(|&from| routes.depth[from].is_some() && !stranded(from))
@@ -712,14 +726,14 @@ fn no_route_is_walked_in_through_a_revisit_a_player_could_stand_off() {
         assert_eq!(
             standing,
             [] as [&str; 0],
-            "{} is walked in through a revisit",
+            "{} is entered through a revisit",
             worlds[world].title
         );
     }
 }
 
 #[test]
-fn every_canonical_step_is_walkable_where_the_panel_reads_it() {
+fn every_canonical_step_is_passable_where_the_panel_reads_it() {
     let worlds = load();
     let routes = super::canonical_routes(&worlds);
     let connections = super::connections(&worlds);
@@ -728,8 +742,8 @@ fn every_canonical_step_is_walkable_where_the_panel_reads_it() {
         let step = super::step_between(&connections, parent, world)
             .unwrap_or_else(|| panic!("{} is joined to no parent", worlds[world].title));
         assert!(
-            step.out.is_some(),
-            "{} is walked in from {} and no way there",
+            step.outgoing.is_some(),
+            "{} is entered from {} across no passable connection",
             worlds[world].title,
             worlds[parent].title
         );

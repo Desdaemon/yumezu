@@ -1,29 +1,5 @@
-//! Serves yumezu its world dump.
-//!
-//! The wiki explorer this replaces keeps a MySQL database, a scraper and a background worker; this
-//! keeps one JSON document, queried out of the wiki's Semantic MediaWiki store rather than scraped
-//! -- see [`smw`] -- and rebuilt from scratch, so there is nothing to reconcile.
-//!
-//! Effects, menu themes, wallpapers and the soundtrack are written in wiki prose, so their fields
-//! are published empty: none of the four says anything about how the worlds join up.
-//!
-//! The dump is kept current on the server's own clock: a sync runs every `--sync-every` hours, and
-//! `GET /data` is answered from the file whether or not one is running. A sync re-reads only the
-//! parts of the wiki whose pages have been edited; once a week one reads the whole of it instead of
-//! querying what has changed -- see [`FULL_EVERY`]. Until the first sync lands there is nothing to
-//! serve, so `/data` answers `503 needs update` and the client waits on `GET /pollUpdate`.
-//!
-//! ```text
-//! dreamweaver [--listen ADDR|PATH] [--data PATH] [--atlas DIR] [--sync-every HOURS]
-//! ```
-//!
-//! It also packs the worlds' pictures into the thumbnail atlas the app draws -- see [`atlas`].
-//!
-//! Besides the dump it answers four routes carrying what YNOproject knows about the player reading
-//! the page, put through because the page may not reach YNOproject directly. See [`relay`].
-//!
-//! `--listen` takes either a `host:port` or, so that nginx can reach it the other way its
-//! `proxy_pass` knows, the path of a Unix socket -- see [`Listen`].
+//! Serves yumezu the world dump, built from yume.wiki's Semantic MediaWiki store, plus the
+//! thumbnail atlas and a YNOproject relay; resyncs every `--sync-every` hours, fully once a week.
 
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::Path;
@@ -39,8 +15,7 @@ mod depth;
 mod model;
 mod next;
 mod progress;
-/// What the page reads about a player's own YNOproject account, put through to YNOproject. See
-/// [`relay::routes`].
+/// The web build's YNOproject account routes, relayed to YNOproject; see [`relay::routes`].
 mod relay;
 mod smw;
 mod store;
@@ -53,14 +28,12 @@ const DEFAULT_ATLAS: &str = "atlas";
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:5000";
 
-/// A pass that finds the wiki unmoved costs one small request, so this is set by how soon an edit
-/// should show. It is also the window each pass queries over, so a shorter one means more passes
-/// each covering less, not more of the wiki read.
+/// A sync that finds no edits costs one small request, so this is how soon an edit shows. A
+/// shorter interval splits the same wiki reading across more, smaller syncs.
 const SYNC_EVERY: u64 = 2;
 
-/// A soft sync takes the wiki's account of its own edits at its word, and an edit that account
-/// misses -- a template outside the watched namespace -- is missed for good, nothing querying that
-/// week again.
+/// A soft sync trusts the wiki's recent-changes list, which misses edits to templates outside the
+/// Yume 2kki namespace; the weekly full sync catches those.
 const FULL_EVERY: time::Duration = time::Duration::weeks(1);
 
 #[derive(Clone)]
@@ -107,10 +80,10 @@ const USAGE: &str =
     "dreamweaver [--listen ADDR|PATH] [--data PATH] [--atlas DIR] [--sync-every HOURS]";
 
 struct Options {
-    /// A `host:port` or a socket path; [`Listen`] is which.
+    /// Either `host:port` or a socket path; see [`Listen`].
     listen: String,
     data: String,
-    /// Holds the packed atlas and the wiki pictures it was packed from.
+    /// Holds the packed atlas and the source wiki pictures.
     atlas: String,
     sync_every: u64,
 }
@@ -127,8 +100,7 @@ impl Default for Options {
 }
 
 impl Options {
-    /// Hand-rolled: four switches would take more configuring through a parser crate than they
-    /// configure.
+    /// Hand-rolled: four switches do not justify a parser crate.
     fn read(&mut self, args: impl Iterator<Item = String>) -> Result<(), String> {
         let mut args = args;
         while let Some(switch) = args.next() {
@@ -154,13 +126,8 @@ impl Options {
     }
 }
 
-/// Keeps the dump current, for as long as the server runs: one sync every `--sync-every` hours.
-///
-/// Each sync is awaited before the next interval begins. Two at once would both build a dump, and
-/// the slower would publish over the newer.
-///
-/// The first is timed from the dump on disk rather than from startup, so restarting the server is
-/// not a way to make it re-read the wiki.
+/// One sync every `--sync-every` hours, each awaited so a slow sync cannot overwrite a newer one.
+/// The first is timed from the dump on disk, so restarting the server does not re-read the wiki.
 async fn refresh(server: Server, hours: u64) {
     let every = std::time::Duration::from_secs(hours * 3600);
     // Before the first sync: a restart is how a hand-set secret mark reaches the atlas.
@@ -174,7 +141,7 @@ async fn refresh(server: Server, hours: u64) {
                 pack_atlas(&server).await;
             }
             Ok(None) => tracing::info!("the wiki has not changed; the dump stands"),
-            // Debug names the field it could not read; Display does not.
+            // Debug names the unreadable field; Display does not.
             Err(error) => tracing::error!("sync failed: {error:?}"),
         }
         server.progress.done();
@@ -187,8 +154,7 @@ async fn pack_atlas(server: &Server) {
     server.atlas.pack(&server.http, &snapshot.dump).await;
 }
 
-/// How long a run waits before its first sync: whatever is left of the interval the dump it came up
-/// with was built in, and nothing at all for a run that came up with no dump.
+/// The rest of the interval since the dump on disk was built; zero when there is no dump.
 fn first_sync(previous: &model::Dump, every: std::time::Duration) -> std::time::Duration {
     let Some(built) = previous.last_update.as_deref().and_then(sync::parse_iso) else {
         return std::time::Duration::ZERO;
@@ -198,8 +164,7 @@ fn first_sync(previous: &model::Dump, every: std::time::Duration) -> std::time::
     every.saturating_sub(age.try_into().unwrap_or(every))
 }
 
-/// Split out so every way out -- nothing to do, a failed fetch, a published dump -- passes back
-/// through the same clearing up.
+/// Split out so every outcome (no change, a failed fetch, a published dump) reaches one cleanup.
 async fn build(server: &Server, fetched: &mut sync::Fetched) -> smw::Result<Option<usize>> {
     let previous = server.store.snapshot();
     let plan = match plan(server, &previous.dump).await {
@@ -217,11 +182,8 @@ async fn build(server: &Server, fetched: &mut sync::Fetched) -> smw::Result<Opti
     Ok(Some(server.store.publish(dump).dump.worlds.len()))
 }
 
-/// How much of the wiki this refresh should read, or `None` for one that need not run at all.
-///
-/// Only a sync with a dump to compare against, and a week not yet up, has a choice to make: it is
-/// stood down where nothing has changed, and widened to the whole wiki where the dump is older
-/// than the wiki remembers or the wiki answers nothing.
+/// How much of the wiki this sync should read, or `None` when nothing has changed. Everything
+/// without a previous dump, once a week, or when the wiki cannot say what changed.
 async fn plan(server: &Server, previous: &model::Dump) -> Option<sync::RefreshScope> {
     server.progress.at(progress::CHANGES);
     let Some(built) = previous
@@ -266,12 +228,8 @@ fn full_due(previous: &model::Dump) -> bool {
     }
 }
 
-/// nginx reaches an upstream by `proxy_pass http://127.0.0.1:5000` or by
-/// `proxy_pass http://unix:/run/dreamweaver.sock:`. A socket in a directory only nginx and this
-/// program can enter needs no loopback port left open.
-///
-/// The two are told apart by the `/`, no `host:port` having one -- not even an IPv6 literal, which
-/// brackets its colons instead.
+/// A TCP `host:port`, or a Unix socket path for nginx's `proxy_pass http://unix:...`, told apart
+/// by `/`, which no `host:port` contains, IPv6 literals included.
 enum Listen<'a> {
     Tcp(&'a str),
     Unix(&'a Path),
@@ -293,7 +251,7 @@ async fn serve(server: Server, options: Options) {
         .route("/data", get(data))
         .route("/data.json", get(data))
         .route("/pollUpdate", get(poll_update))
-        // The app's own paths for them, which shipped builds fetch from this host.
+        // The app's own atlas paths, which shipped builds fetch from this host.
         .route("/static/thumbnails.jpg", get(atlas_jpeg))
         .route("/static/unknown_location.png", get(placeholder_png))
         // YNOproject's game client calls this.
@@ -324,7 +282,7 @@ async fn serve(server: Server, options: Options) {
             };
             tracing::info!("listening on unix:{}", path.display());
             run(listener, app).await;
-            // A socket outlives its process; `bind` cleans up after every other exit.
+            // A socket file outlives the process; `bind` clears one left by a crash.
             if let Err(error) = std::fs::remove_file(path) {
                 tracing::warn!("cannot remove {}: {error}", path.display());
             }
@@ -332,11 +290,8 @@ async fn serve(server: Server, options: Options) {
     }
 }
 
-/// Opens the socket `--listen` named, clearing a stale one out of the way.
-///
-/// Made world-reachable: the default umask would let nothing but this program's own user connect,
-/// and nginx's user cannot be guessed. Who may connect is decided by the directory the socket sits
-/// in, which the host chooses along with the path.
+/// Opens the `--listen` socket, clearing a stale one; mode `0666`, so the enclosing directory
+/// decides who may connect.
 fn bind(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
     // Only a dead socket, so a mistyped `--listen` cannot delete a real file.
     if std::os::unix::net::UnixStream::connect(path).is_err()
@@ -349,7 +304,7 @@ fn bind(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
     Ok(listener)
 }
 
-/// Serves until Ctrl-C, whichever kind of door the requests come through.
+/// Serves until Ctrl-C, over TCP or a Unix socket.
 async fn run<L>(listener: L, app: axum::Router)
 where
     L: axum::serve::Listener,
@@ -365,11 +320,8 @@ where
     }
 }
 
-/// `GET /data` -- the dump, exactly as it sits on disk, or `503 needs update` before there is one.
-///
-/// An empty dump is never served: a client cannot tell it from a wiki with no worlds in it. A sync
-/// under way is no reason to withhold the dump standing, which a pass publishing nothing would
-/// hand back unchanged anyway.
+/// `GET /data` -- the dump as on disk, served during syncs too; `503 needs update` while the dump
+/// is empty, since a client cannot tell an empty dump from a wiki with no worlds.
 async fn data(State(server): State<Server>) -> axum::response::Response {
     let snapshot = server.store.snapshot();
     if snapshot.dump.worlds.is_empty() {
@@ -418,9 +370,7 @@ fn not_packed() -> axum::response::Response {
 }
 
 /// `GET /pollUpdate` -- what the sync is doing, in the reference implementation's own JSON.
-///
-/// `done` means no sync is running, not that there is a dump: a server between syncs answers
-/// `{"task": null, "done": true}` whether or not it has ever built one.
+/// `done` only means no sync is running, even on a server that has never built a dump.
 async fn poll_update(State(server): State<Server>) -> impl IntoResponse {
     let task = server.progress.task();
     axum::Json(serde_json::json!({ "task": task, "done": task.is_none() }))
@@ -429,7 +379,7 @@ async fn poll_update(State(server): State<Server>) -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     /// `rustls-no-provider` moves the choice of provider out of reqwest's features and into
-    /// [`super::http_client`], where the builder panics at run time rather than failing to compile.
+    /// [`super::http_client`], where the builder panics at runtime rather than failing to compile.
     #[test]
     fn the_client_has_a_crypto_provider() {
         super::http_client(reqwest::Client::builder());

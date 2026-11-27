@@ -4,8 +4,7 @@
 use super::*;
 
 const EDGE_RADIUS: f32 = 0.05;
-/// In world units, not a fraction of the edge, since connections stretch.
-/// Compare `NODE_LEAF_RADIUS` for scale.
+/// In world units, so dashes keep their length as connections stretch; compare `NODE_LEAF_RADIUS`.
 const EDGE_DASH_LENGTH: f32 = 1.0;
 /// Distance from one dash start to the next; the gap is the remainder.
 const EDGE_DASH_PERIOD: f32 = 3.0;
@@ -24,7 +23,7 @@ const PANORAMA_GLOW_RADIUS_TEXELS: f32 = 52.0;
 const PANORAMA_GLOW_FALLOFF: f32 = 2.2;
 /// Lp norm for glow distance: 1.5 gives the rounded-square shape of the game's panoramas.
 const PANORAMA_GLOW_NORM: f32 = 1.5;
-/// Dim blue, so it stays visible without competing with the edges.
+/// Dim blue: visible without competing with the edges.
 const PANORAMA_GLOW_COLOR: [f32; 3] = [3.0 / 255.0, 6.0 / 255.0, 42.0 / 255.0];
 /// Peak brightness per cell as a fraction of [`PANORAMA_GLOW_COLOR`]; irregular but tileable.
 const PANORAMA_CELL_PEAKS: [[f32; 4]; 4] = [
@@ -33,10 +32,9 @@ const PANORAMA_CELL_PEAKS: [[f32; 4]; 4] = [
     [0.90, 0.50, 0.70, 0.30],
     [0.40, 0.75, 0.35, 0.95],
 ];
-/// Tile size on screen in logical pixels, so the background keeps its scale on HiDPI displays.
+/// Tile size on screen in logical pixels, so the background keeps a constant scale on HiDPI.
 const PANORAMA_TILE_PIXELS: f32 = 260.0;
-/// Background parallax in tiles per unit of view direction x/y. Small, so the background reads as
-/// distant scenery rather than a decal.
+/// Background parallax in tiles per unit of view direction x/y; small, to read as distant scenery.
 const PANORAMA_PARALLAX: f32 = 0.12;
 /// Brightness of an edge into a leaf world; an edge into the world with the most descendants is
 /// 1.0. See [`edge_colors`].
@@ -46,7 +44,7 @@ const EDGE_LEAF_BRIGHTNESS: f32 = 0.6;
 const EDGE_LUMINANCE_EVENNESS: f32 = 0.5;
 /// Edges on the route back to the origin world.
 const ROUTE_COLOR: Srgba = Srgba::new(255, 242, 194, 255);
-/// Edges on the walked route home from the selected world; red to contrast with [`ROUTE_COLOR`].
+/// Edges on the route home from the selected world; red to contrast with [`ROUTE_COLOR`].
 const ROUTE_HOME_COLOR: Srgba = Srgba::new(255, 58, 74, 255);
 /// Brightness of everything outside the highlight.
 const DIMMED_BRIGHTNESS: f32 = 0.25;
@@ -62,7 +60,7 @@ const HORIZON_LINE_WIDTH: f32 = 0.12;
 /// Strength of the additive glow on the world of a hovered list row. Additive because a
 /// highlighted node is already full white.
 const HOVERED_ROW_BRIGHTNESS: f32 = 0.85;
-/// Gray, off the distance ramp: unreachable worlds have no distance, not a large one.
+/// Gray, off the distance ramp: unreachable worlds have no distance.
 const UNREACHED_COLOR: Srgba = Srgba::new(110, 110, 120, 255);
 /// Material whose fragment shader, `dash.frag`, cuts dashes out of a ribbon, so one instance
 /// covers a whole edge.
@@ -128,10 +126,10 @@ pub(super) fn entities(
     let worlds = &dump.worlds;
     let connections = world::connections(worlds);
     // One depth computation for both edge colors and DAG levels.
-    let routes = world::routes_from(&connections, world::origin_world(worlds));
+    let routes = world::routes_from(&connections, world::origin(worlds));
     let deepest = routes.depth.iter().flatten().copied().max().unwrap_or(0);
     let nexus = opening_room(worlds);
-    // Shells count from the Nexus, which the camera stands on, rather than from the game's start.
+    // Shells count from the Nexus, where the camera stands.
     let from_nexus = nexus.map(|nexus| world::routes_from(&connections, nexus));
     let shells = from_nexus
         .as_ref()
@@ -155,6 +153,7 @@ pub(super) fn entities(
     let Layout {
         arrangement,
         hub_repulsion,
+        pull_across_branches,
         link_reach,
     } = layout;
     let Solve {
@@ -200,8 +199,8 @@ pub(super) fn entities(
                 continue;
             }
             let to = step.world;
-            // Orient one-way edges in their walkable direction, so the dashes move that way.
-            let (from, to) = if step.out.is_none() && step.back.is_some() {
+            // Orient one-way edges in their passable direction, so the dashes move that way.
+            let (from, to) = if step.outgoing.is_none() && step.incoming.is_some() {
                 (to, from)
             } else {
                 (from, to)
@@ -210,7 +209,7 @@ pub(super) fn entities(
             graph.add_edge(
                 nodes[from],
                 nodes[to],
-                // Leads are fitted to the layout once the scene stands: see `set_masses_and_leads`.
+                // Leads are fitted to the finished layout: see `set_masses_and_leads`.
                 EdgeData {
                     user_data: step.one_way(),
                     ..Default::default()
@@ -222,11 +221,12 @@ pub(super) fn entities(
     }
 
     // Depth colors go on the edges; nodes show thumbnails.
+    let shares = depth_shares(&routes.depth);
     let depth_colors: Vec<_> = routes
         .depth
         .iter()
         .map(|depth| match depth {
-            Some(depth) => distance_color(*depth as f32 / deepest.max(1) as f32),
+            Some(depth) => distance_color(shares[*depth as usize]),
             None => UNREACHED_COLOR,
         })
         .collect();
@@ -262,7 +262,7 @@ pub(super) fn entities(
         },
         is_transparent: false,
     };
-    // Billboarded quads, not cubes: cube UVs would spread the image over six faces.
+    // Billboarded quads, so the whole image faces the camera.
     let thumbnails = Gm::new(
         RefilledMesh::new(ctx, &thumbnail_instances, &CpuMesh::square()),
         ColorMaterial::default(),
@@ -302,7 +302,7 @@ pub(super) fn entities(
         RefilledMesh::ribbon(ctx, &dash_instances, true),
         dash_material(),
     );
-    // The highlight overlay draws on top via a depth clear, not by disabling the depth test.
+    // The highlight overlay draws on top after a depth clear.
     let (highlight_thumbnail_instances, highlight_edge_instances) =
         (Instances::default(), Instances::default());
     let highlight_thumbnails = Gm::new(
@@ -322,18 +322,18 @@ pub(super) fn entities(
         dash_material(),
     );
 
-    let unknown = world_mask(worlds.len(), unvisited.iter().copied());
-    let untaken = untaken(&connections, &unknown);
-    let arrivals = Arrivals::new(
+    let concealed = world_mask(worlds.len(), unvisited.iter().copied());
+    let untaken = untaken(&connections, &concealed);
+    let graft = GraphGraft::new(
         &titles
             .iter()
             .map(|title| title.en.as_str())
             .collect::<Vec<_>>(),
-        &unknown,
+        &concealed,
         &routes.depth,
         before,
     );
-    let arriving = arrivals.arriving().is_some();
+    let arriving = graft.arriving().is_some();
 
     let mut data = AppEntities {
         graph,
@@ -368,6 +368,7 @@ pub(super) fn entities(
         edge_colors,
         node_radii,
         hub_repulsion,
+        pull_across_branches,
         link_reach,
         descendant_counts: descendants,
         connections,
@@ -403,17 +404,18 @@ pub(super) fn entities(
             colors: Some(Vec::new()),
             ..Default::default()
         },
-        detail: detail::Detail::new(
+        lod: lod::LodPictures::new(
             worlds.iter().map(|world| world.image.clone()).collect(),
             // Also needed when an arriving world's placeholder is shrinking away.
-            !unvisited.is_empty() || arrivals.turning(),
+            !unvisited.is_empty() || graft.turning(),
         ),
         dash_phase: 0.0,
         billboard: Mat4::identity(),
-        arrivals,
+        graft,
     };
     data.repaint();
     data.set_masses_and_leads();
+    data.fade_lines_by_depth();
     scatter(&mut data);
     // A rebuilt graph starts from the previous graph's positions.
     if let Some(before) = before {
@@ -428,15 +430,15 @@ impl AppEntities {
         self.recolored = true;
         let on_route = world_mask(self.titles.len(), self.highlighted());
         let highlighting = self.selected.is_some();
-        // Per world on the walked route, the next world.
-        let mut walked = vec![None; self.titles.len()];
+        // Per world on the route, the next world.
+        let mut next_on_route = vec![None; self.titles.len()];
         if matches!(
             self.selected,
             Some(Highlight::Route(_) | Highlight::Path(..))
         ) {
-            let walk = self.route();
-            for (at, &world) in walk.iter().enumerate() {
-                walked[world] = walk.get(at + 1).copied();
+            let route = self.route();
+            for (at, &world) in route.iter().enumerate() {
+                next_on_route[world] = route.get(at + 1).copied();
             }
         }
 
@@ -458,7 +460,7 @@ impl AppEntities {
             );
         }
 
-        let (routes, on_route, walked) = (&self.routes.parents, &on_route, &walked);
+        let (routes, on_route, next_on_route) = (&self.routes.parents, &on_route, &next_on_route);
         let (solid, dashed, base) = (
             self.edge_instances.colors.as_mut().unwrap(),
             self.dash_instances.colors.as_mut().unwrap(),
@@ -468,7 +470,7 @@ impl AppEntities {
             (&mut self.highlight_lines, &mut self.highlight_dashed);
         highlight_lines.clear();
         highlight_dashed.clear();
-        // Same order and split as [`Self::rebuild_instances`] and [`Self::march_dashes`].
+        // Same order and split as [`Self::rebuild_instances`] and [`Self::update_dashes`].
         let (mut edge, mut line, mut dash) = (0, 0, 0);
         self.graph.visit_edges(|a, b, data| {
             let (a, b) = (a.index().index(), b.index().index());
@@ -485,8 +487,10 @@ impl AppEntities {
                 }
                 // Edges within a layer are never tree edges, so they keep their depth color.
                 Some(Highlight::Layer(_)) if on_route[a] && on_route[b] => (base[edge], true),
-                // Checked before the tree-edge case, or a shortcut across the route would light up.
-                Some(_) if walked[a] == Some(b) || walked[b] == Some(a) => (ROUTE_HOME_COLOR, true),
+                // Checked before the tree-edge case, so a shortcut across the route stays dimmed.
+                Some(_) if next_on_route[a] == Some(b) || next_on_route[b] == Some(a) => {
+                    (ROUTE_HOME_COLOR, true)
+                }
                 // Paths do not follow the canonical tree.
                 Some(Highlight::Path(..)) => (dim(base[edge]), false),
                 Some(_) if step && on_route[a] && on_route[b] => (ROUTE_COLOR, true),
@@ -580,10 +584,10 @@ impl AppEntities {
         ]
         .into_iter()
         .flatten()
-        .chain(self.detail.drawn_highlighted(&self.highlight_nodes))
+        .chain(self.lod.drawn_highlighted(&self.highlight_nodes))
     }
 
-    /// Whether the overlay draws anything, i.e. whether its depth clear is needed.
+    /// Whether the overlay draws anything, and so needs a depth clear.
     pub(super) fn has_highlight_overlay(&self) -> bool {
         self.drawn_highlighted().next().is_some()
     }
@@ -609,7 +613,7 @@ impl AppEntities {
         self.graph.visit_nodes(|node| {
             let world = node.index().index();
             let position = world_pos(node.position(), self.sky_distances[world]);
-            let radius = self.node_radii[world] * self.arrivals.grown(world);
+            let radius = self.node_radii[world] * self.graft.grown(world);
             thumbnails.push(node_quad(position, billboard, radius));
         });
         self.thumbnail_instances.transformations = thumbnails;
@@ -618,14 +622,14 @@ impl AppEntities {
         self.billboard = billboard;
     }
 
-    /// Dash ribbons are rebuilt with the solid edges, not per frame: `DashMaterial` animates them
-    /// in the shader. On the 3D sky a connection between branches is drawn only when lit.
+    /// Dash ribbons are rebuilt with the solid edges; `DashMaterial` animates them in the shader.
+    /// On the 3D sky a connection between branches is drawn only when highlighted.
     fn rebuild_edges(&mut self) {
         let hides_crossings = self.on_sky();
         let branches = &self.branches;
         let (mut shown_edges, mut shown_dashes) = (Vec::new(), Vec::new());
         let radius = self.edge_radius();
-        let (arrivals, distances) = (&self.arrivals, &self.sky_distances);
+        let (graft, distances) = (&self.graft, &self.sky_distances);
         let dash_radius = radius * EDGE_DASH_WIDTH;
         let (edges, dashes, spans) = (
             &mut self.edge_instances.transformations,
@@ -644,7 +648,7 @@ impl AppEntities {
             let to = world_pos(b.position(), distances[b_world]);
             let dir = to - from;
             let span = dir.magnitude();
-            let grown = arrivals.grown(a_world).min(arrivals.grown(b_world));
+            let grown = graft.grown(a_world).min(graft.grown(b_world));
             let one_way = data.user_data;
             let radius = grown * if one_way { dash_radius } else { radius };
             // Center to center: the opaque thumbnails draw first and hide the edge ends.
@@ -679,16 +683,16 @@ impl AppEntities {
             .set_texture_transformations(self.dash_instances.texture_transformations.as_deref());
     }
 
-    /// Places the placeholder over every unvisited world, every frame. Copies the node quads, so it
-    /// matches their position, size and dimming, offset toward the camera to avoid z-fighting.
+    /// Places the placeholder over every unvisited world, every frame, as a copy of the node quad
+    /// offset toward the camera to avoid z-fighting.
     pub(super) fn place_unvisited(&mut self, context: &Context, camera: &Camera) {
-        if self.unvisited.is_empty() && !self.arrivals.turning() {
+        if self.unvisited.is_empty() && !self.graft.turning() {
             return;
         }
         let eye = camera.position();
         let nodes = &self.thumbnail_instances;
         let painted = nodes.colors.as_ref();
-        let wearing = self.unvisited.iter().copied().chain(self.arrivals.veiled());
+        let wearing = self.unvisited.iter().copied().chain(self.graft.veiled());
         let (transformations, colors) = (
             &mut self.unvisited_quads.transformations,
             self.unvisited_quads.colors.as_mut().unwrap(),
@@ -716,24 +720,32 @@ impl AppEntities {
             transformations.push(placed);
             colors.push(color);
         }
-        self.detail.place_unvisited(
+        self.lod.place_unvisited(
             context,
             &self.unvisited_quads,
             &self.highlight_unvisited_quads,
         );
     }
 
-    /// Advances the dash animation; runs every frame, even when the layout is settled.
-    pub(super) fn march_dashes(&mut self, dt: f32) {
+    /// See [`sky_line_fade`].
+    pub(super) fn fade_lines_by_depth(&mut self) {
+        let fade = sky_line_fade(self.arrangement);
+        self.edges.geometry.line_fade = fade;
+        self.dashes.geometry.line_fade = fade;
+        self.highlight_edges.geometry.line_fade = fade;
+        self.highlight_dashes.geometry.line_fade = fade;
+    }
+
+    /// Every frame, even when the layout is settled.
+    pub(super) fn update_dashes(&mut self, dt: f32) {
         // Wrapped at one period to keep f32 precision.
         self.dash_phase = (self.dash_phase + dt * EDGE_DASH_SPEED).rem_euclid(EDGE_DASH_PERIOD);
         self.dashes.material.phase = self.dash_phase;
         self.highlight_dashes.material.phase = self.dash_phase;
     }
 
-    /// Once the atlas loads, sets each thumbnail's UVs and gives egui a copy for the catalog.
-    /// A failed load retries after [`ATLAS_RETRIED_AFTER_SECONDS`] of frame time, so an idle app
-    /// does not retry.
+    /// Sets each thumbnail's UVs and gives egui a copy once the atlas loads; a failed load retries
+    /// after [`ATLAS_RETRIED_AFTER_SECONDS`] of frame time, so an idle app does not.
     pub(super) fn receive_atlas(&mut self, seconds: f32, context: &Context, egui: &egui::Context) {
         let loaded = match &mut self.atlas {
             Atlas::Settled => return,
@@ -778,8 +790,8 @@ impl AppEntities {
             .then_some(&self.thumbnails as &dyn Object)
     }
 
-    /// Places the glow quad on the hovered row's world: its node quad lifted in front of the detail
-    /// picture and the placeholder.
+    /// Places the glow quad on the hovered row's world: the node quad lifted in front of the
+    /// high-LoD quad and the placeholder.
     pub(super) fn aim_glow(&mut self, camera: &Camera) {
         let Some(world) = self.hovered_row else {
             return;
@@ -797,9 +809,8 @@ impl AppEntities {
         }
     }
 
-    /// Places the crosshair on the horizon at heading zero, out where no world reaches, at a fixed
-    /// size on screen whatever the zoom. Upright rather than billboarded: seen from the eye, its
-    /// stripe lies along the horizon and its tick along the meridian.
+    /// Places the crosshair on the horizon at heading zero, past every world, at a fixed screen
+    /// size. Upright, with the stripe along the horizon and the tick along the meridian.
     pub(super) fn aim_horizon_marker(&mut self, camera: &Camera) {
         let half_height = match camera.projection_type() {
             three_d_asset::ProjectionType::Perspective { field_of_view_y } => {
@@ -824,15 +835,18 @@ impl AppEntities {
         ready.then_some(&self.glow as &dyn Object)
     }
 
-    /// On-screen worlds drawn wider than [`detail::LEAVE_PIXELS`], nearest first, with their
-    /// quads: the input to [`detail::Detail::track`], which applies the hysteresis. Arriving
-    /// worlds are measured at full size, so the high-res image is ready from the first frame.
-    pub(super) fn magnified(&self, camera: &Camera, viewport: Viewport) -> Vec<detail::Magnified> {
+    /// On-screen worlds wider than [`lod::HI_LOD_EXIT_PIXELS`], nearest first, with their quads;
+    /// arriving worlds count at full size to have the high LoD ready.
+    pub(super) fn lod_candidates(
+        &self,
+        camera: &Camera,
+        viewport: Viewport,
+    ) -> Vec<lod::LodCandidate> {
         let billboard = billboard(camera);
         let forward = camera.view_direction();
         let colors = self.thumbnail_instances.colors.as_ref();
         let across = camera.right_direction().normalize();
-        let mut magnified: Vec<(f32, detail::Magnified)> = Vec::new();
+        let mut candidates: Vec<(f32, lod::LodCandidate)> = Vec::new();
         self.graph.visit_nodes(|node| {
             let world = node.index().index();
             let position = world_pos(node.position(), self.sky_distances[world]);
@@ -848,16 +862,16 @@ impl AppEntities {
                 return;
             }
             let full = self.node_radii[world];
-            let grown = self.arrivals.grown(world);
+            let grown = self.graft.grown(world);
             // Measured at full size, drawn at the current one.
             let width = drawn_width(camera, across, full, position, center);
-            if width < detail::LEAVE_PIXELS {
+            if width < lod::HI_LOD_EXIT_PIXELS {
                 return;
             }
             let radius = full * grown;
-            magnified.push((
+            candidates.push((
                 (position - camera.position()).magnitude2(),
-                detail::Magnified {
+                lod::LodCandidate {
                     world,
                     width,
                     transformation: lift_toward_eye(camera.position(), 1.0)
@@ -866,13 +880,13 @@ impl AppEntities {
                 },
             ));
         });
-        // Sorted by distance, not width: perspective makes corner nodes up to a third wider.
-        magnified.sort_by(|(a, _), (b, _)| a.total_cmp(b));
-        magnified.into_iter().map(|(_, it)| it).collect()
+        // Sorted by distance: perspective makes corner nodes up to a third wider.
+        candidates.sort_by(|(a, _), (b, _)| a.total_cmp(b));
+        candidates.into_iter().map(|(_, it)| it).collect()
     }
 }
 /// Background tile: a grid of soft blue glows, in the style of the game's panoramas. Linear f16:
-/// 8-bit linear bands at these brightnesses, and dithering would only trade bands for grain.
+/// 8-bit linear shows banding at these brightnesses.
 fn panorama_tile() -> CpuTexture {
     let cells = PANORAMA_TILE_TEXELS / PANORAMA_CELL_TEXELS;
     let mut data = Vec::with_capacity(PANORAMA_TILE_TEXELS * PANORAMA_TILE_TEXELS);
@@ -933,16 +947,15 @@ fn srgb_to_linear(channel: f32) -> f32 {
 }
 
 /// Background UV transform: fixed tile size in logical pixels, offset by [`PANORAMA_PARALLAX`]
-/// from the view direction (not position; not yaw/pitch, which would jump at wraparound).
+/// from the view direction, which stays continuous where yaw wraps.
 pub(super) fn panorama_transform(viewport: Viewport, device_pixel_ratio: f32, view: Vec3) -> Mat3 {
     let tile = PANORAMA_TILE_PIXELS * device_pixel_ratio;
     let drift = vec2(view.x, view.y) * PANORAMA_PARALLAX;
     Mat3::from_translation(drift)
         * Mat3::from_nonuniform_scale(viewport.width as f32 / tile, viewport.height as f32 / tile)
 }
-/// Color ramp for normalized depth: blue, cyan, green, yellow, red, magenta (5/6 of the hue
-/// wheel, so the ends differ). Explicit RGB stops keep interpolation saturated; the blue is
-/// lightened, since pure blue disappears against [`BACKGROUND_COLOR`].
+/// Depth color ramp over 5/6 of the hue wheel, blue to magenta. Explicit RGB stops keep
+/// interpolation saturated; the blue is lightened against [`BACKGROUND_COLOR`].
 fn distance_color(distance: f32) -> Srgba {
     const STOPS: [[f32; 3]; 6] = [
         [0.25, 0.35, 1.00],
@@ -958,6 +971,31 @@ fn distance_color(distance: f32) -> Srgba {
     let channel =
         |c: usize| ((STOPS[stop][c] + (STOPS[stop + 1][c] - STOPS[stop][c]) * blend) * 255.0) as u8;
     Srgba::new(channel(0), channel(1), channel(2), 255)
+}
+
+/// Each depth's place on the color ramp, by how many reachable worlds are shallower: crowded
+/// depths spread across most of the hues and the sparse deep ones share the last.
+fn depth_shares(depths: &[Option<u32>]) -> Vec<f32> {
+    let deepest = depths.iter().flatten().copied().max().unwrap_or(0) as usize;
+    let mut counts = vec![0u32; deepest + 1];
+    for &depth in depths.iter().flatten() {
+        counts[depth as usize] += 1;
+    }
+    // Each depth at the middle of the span of worlds at that depth.
+    let mut shallower = 0;
+    let middles: Vec<f32> = counts
+        .iter()
+        .map(|&count| {
+            let middle = shallower as f32 + count as f32 / 2.0;
+            shallower += count;
+            middle
+        })
+        .collect();
+    let (first, last) = (middles[0], middles[deepest]);
+    middles
+        .iter()
+        .map(|middle| (middle - first) / (last - first).max(f32::MIN_POSITIVE))
+        .collect()
 }
 
 /// Darkens a color outside the highlight.
@@ -976,9 +1014,8 @@ fn scale_brightness(color: Srgba, brightness: f32) -> Srgba {
     Srgba::new(scale(color.r), scale(color.g), scale(color.b), color.a)
 }
 
-/// Unselected edge colors: the depth color of the edge's source world, brightened by
-/// log(descendants of the target). The source is the tree parent, or for non-tree edges the
-/// shallower end.
+/// Unselected edge colors: the source's depth color, brightened by log(target's descendants). The
+/// source is the tree parent, or the shallower end of a non-tree edge.
 fn edge_colors(
     graph: &Graph,
     routes: &world::Routes,
@@ -1005,7 +1042,7 @@ fn edge_colors(
         };
         let to = if from == a { b } else { a };
         let reach = (descendants[to] as f32).ln_1p() / busiest.max(f32::MIN_POSITIVE);
-        // Never above 1: [`UNREACHED_COLOR`] is off the ramp and stays as it is.
+        // Never above 1: [`UNREACHED_COLOR`] is off the ramp and stays unchanged.
         let even = (floor / luminance(depth_colors[from]).max(f32::MIN_POSITIVE)).min(1.0);
         colors.push(scale_brightness(
             depth_colors[from],
@@ -1025,7 +1062,7 @@ fn white_instances(count: usize) -> Instances {
     }
 }
 
-/// The horizon marker: a short vertical tick across a longer horizontal stripe, on the `z = 0` plane.
+/// The horizon marker: a short vertical tick across a longer horizontal stripe, on `z = 0`.
 fn crosshair() -> CpuMesh {
     let rectangle = |half_width: f32, half_height: f32| {
         [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
@@ -1040,10 +1077,10 @@ fn crosshair() -> CpuMesh {
     }
 }
 
-/// Shrinks a quad toward the eye by `lifts` [`detail::LIFT`]s, which draws it on the same pixels in
-/// front of whatever it covers, at any distance.
+/// Shrinks a quad toward the eye by `lifts` [`lod::LIFT`]s: the same pixels, drawn in front of
+/// whatever the quad covers, at any distance.
 fn lift_toward_eye(eye: Vec3, lifts: f32) -> Mat4 {
-    let kept = 1.0 - detail::LIFT * lifts;
+    let kept = 1.0 - lod::LIFT * lifts;
     Mat4::from_translation(eye) * Mat4::from_scale(kept) * Mat4::from_translation(-eye)
 }
 

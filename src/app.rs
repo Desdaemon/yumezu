@@ -13,12 +13,13 @@ use winit::{
     window::{CursorIcon, Window},
 };
 
-mod arrivals;
+#[cfg(all(not(target_family = "wasm"), not(target_os = "android")))]
+mod app_update;
 mod camera;
-mod detail;
 mod download;
 mod fetch;
 mod frame;
+mod graft;
 mod graph;
 mod gui;
 mod guide;
@@ -28,6 +29,7 @@ mod japanese;
 mod layout;
 mod link;
 mod loading;
+mod lod;
 mod map;
 mod pacing;
 mod prelude;
@@ -39,15 +41,13 @@ mod store;
 mod text_agent;
 mod thumbnails;
 mod ui;
-#[cfg(all(not(target_family = "wasm"), not(target_os = "android")))]
-mod update;
 mod world;
 mod yno;
 
-use arrivals::*;
 use camera::*;
+use graft::*;
 use graph::*;
-use instanced::RefilledMesh;
+use instanced::{LineFade, RefilledMesh};
 use layout::*;
 use loading::*;
 use pacing::*;
@@ -74,9 +74,8 @@ pub(crate) fn use_android_app(app: winit::platform::android::activity::AndroidAp
 /// Not user-configurable: WebGL only takes on/off, and the browser picks the count.
 const MULTISAMPLES: u8 = 4;
 
-/// Whether MSAA is on; read only when the surface is created. MSAA over post-process AA: the
-/// graph is thin high-contrast lines, and post-process AA measured no cheaper on desktop and slower
-/// on the web build.
+/// Whether MSAA is on; read only when the surface is created. Post-process AA measured no cheaper
+/// on the graph's thin high-contrast lines on desktop, and slower on the web build.
 fn load_antialias_setting() -> bool {
     store::read_switch(ANTIALIAS).unwrap_or(true)
 }
@@ -86,7 +85,7 @@ fn save_antialias_setting(on: bool) {
 }
 
 /// Whether the camera follows the world under a hovered list row. Defaults to off when the user
-/// prefers reduced motion. See [`AppStatics::follow_hovered_row`].
+/// prefers reduced motion. See [`AppPersistent::follow_hovered_row`].
 fn load_row_follow_setting() -> bool {
     store::read_switch(ROW_FOLLOW).unwrap_or_else(|| !reduced_motion())
 }
@@ -118,33 +117,33 @@ fn reduced_motion() -> bool {
 pub(super) struct App {
     ctx: AppContext,
     data: Option<AppEntities>,
-    statics: AppStatics,
+    persistent: AppPersistent,
     /// Needs the GL context, so `None` until the window exists.
     overlay: Option<Overlay>,
     /// Source data for [`AppEntities`]. See [`Dump`].
     dump: Dump,
-    /// The YNO account; its progress filters the graph while the frontier switch is on. See
+    /// The YNO account, whose progress filters the graph while the frontier switch is on. See
     /// [`App::build`].
     yno: yno::Account,
     /// Progress through the secret key code. See [`world::Code`].
     code: world::Code,
-    /// Whether the code was entered; later dump fetches, retries included, keep its worlds.
+    /// Whether the code was entered; later dump fetches, retries included, keep the secret worlds.
     revealed: bool,
-    /// The previous graph, kept only between teardown and the rebuild that animates from it. See
+    /// The previous graph, kept only between teardown and the rebuild animating from the graph. See
     /// [`Before`].
     before: Option<Before>,
     building: Building,
     /// Selection saved across an Android suspend, which drops [`AppEntities`] (see
-    /// [`App::release`]). Restored on rebuild, and the camera re-frames it.
+    /// [`App::release`]). Restored and re-framed on rebuild.
     selected: Option<Highlight>,
-    /// World named in the URL; the first [`App::build`] turns it into a selection.
+    /// World named in the URL; the first [`App::build`] selects that world.
     opening_on: Option<String>,
-    /// Last loading-screen message, kept so it does not change during the fade-out. See
+    /// Last loading-screen message, held unchanged through the fade-out. See
     /// [`App::veil`].
     said: String,
     /// Loading-screen opacity, 1 to 0. Reset to 1 by every [`App::draw_loading`].
     veil: f32,
-    /// When the next frame is due; the event loop turns it into a wait. See [`Wanted`].
+    /// When the next frame is due; the event loop waits until then. See [`Wanted`].
     wanted: Wanted,
     frame_requested: bool,
     still_seconds: f32,
@@ -153,7 +152,7 @@ pub(super) struct App {
 
 struct AppEntities {
     graph: Graph,
-    /// Here, not in [`AppStatics`], so a rebuild drops it with the node index it refers to.
+    /// Here, not in [`AppPersistent`], so a rebuild drops the gesture with the node index held.
     gesture: Option<Gesture>,
     /// Kept so a layout restart continues the same random sequence.
     rng: Rng,
@@ -183,67 +182,69 @@ struct AppEntities {
     /// Right-button press position while held. Right drag pans and right click opens the menu;
     /// drag distance tells them apart.
     right_press: Option<PhysicalPoint>,
-    /// Open context menu; the UI closes it when an entry is chosen.
+    /// Open context menu; closed by the UI when an entry is chosen.
     menu: Option<ContextMenu>,
-    /// Unpressed cursor position in physical pixels, and the node hit-tested under it. `None`
-    /// outside the window, over the panel, and always on touch screens.
+    /// Unpressed cursor position in physical pixels, for the hover hit test. `None` outside the
+    /// window, over the panel, and always on touch screens.
     cursor: Option<PhysicalPoint>,
     hover: Option<usize>,
     /// World of the hovered list row, highlighted in the graph. See `Panel::hovered_row`.
     hovered_row: Option<usize>,
     /// The world row-follow moves toward; kept after the hover ends, cleared when the user moves
-    /// the camera. See [`AppStatics::follow_hovered_row`].
+    /// the camera. See [`AppPersistent::follow_hovered_row`].
     row_follow_target: Option<usize>,
-    /// Per world, its connections and their directions. Feeds the edge meshes and the panel.
+    /// Per world, the connections and their directions. Feeds the edge meshes and the panel.
     connections: Vec<Vec<world::Step>>,
     /// Node degree in the drawn graph. UI only.
     degrees: Vec<usize>,
     /// Up to `UNTAKEN_WORLDS` worlds with the most unexplored exits, most first. Empty without a
     /// frontier filter, which hides the list. See [`Highlight::Untaken`].
     untaken: Vec<usize>,
-    /// World the camera frames at startup, with its subtree; `None` if the dump lacks it, which
-    /// keeps the default camera pose. See [`opening_room`].
+    /// World the camera frames at startup, with the subtree; `None` in a dump without that world,
+    /// which keeps the default camera pose. See [`opening_room`].
     opening: Option<usize>,
-    /// Per world, the door out of the Nexus its route passes through. See [`branches`].
+    /// Per world, the first world on the route from the Nexus. See [`branches`].
     branches: Vec<Option<usize>>,
-    /// Per world, its depth from the Nexus, past the deepest for the unreachable. See
+    /// Per world, the depth from the Nexus, past the deepest for unreachable worlds. See
     /// [`shell_level`].
     shell_depths: Vec<f32>,
     pub(super) arrangement: Arrangement,
-    /// Per world, how deep it sits from the game's start, which the tree's planes count. Worlds
-    /// with no route from it go past the deepest.
+    /// Per world, the depth from the game's start, counted by the tree's planes. Unreachable
+    /// worlds go past the deepest.
     start_depths: Vec<f32>,
-    /// Per world, how many times farther than the sky it is drawn. See [`sky_distance`].
+    /// Per world, how many times farther than the sky the world is drawn. See [`sky_distance`].
     sky_distances: Vec<f32>,
     /// Whether the camera is moving to frame the selection; cleared on arrival or user input.
     framing: bool,
-    /// Whether the camera is going back to its opening view; cleared on arrival or user input.
-    /// See [`AppStatics::reset_view`].
+    /// Whether the camera is going back to the opening view; cleared on arrival or user input.
+    /// See [`AppPersistent::reset_view`].
     resetting_camera: bool,
-    /// Frame the whole route instead of its last world. Persists across selections.
+    /// Frame the whole route instead of the last world. Persists across selections.
     frame_route: bool,
     /// Connection colors before a selection dims them, so clearing one restores the distance ramp.
     edge_colors: Vec<Srgba>,
-    /// Per node, the half-height of its quad, from how much of the graph hangs off it.
+    /// Per node, the quad's half-height, from the size of the subtree.
     node_radii: Vec<f32>,
-    arrivals: Arrivals,
+    graft: GraphGraft,
     /// UI setting: how much subtree size adds to a node's repulsion. See [`node_mass`].
     hub_repulsion: f32,
-    /// UI setting: maximum edge length in layers. The simulation only stores it converted to
-    /// distance. Each arrangement keeps its own: see [`Arrangement::remembered_link_reach`].
+    /// UI setting. See [`Layout::pull_across_branches`].
+    pull_across_branches: bool,
+    /// UI setting: maximum edge length in layers. The simulation stores only the converted
+    /// distance. One per arrangement: see [`Arrangement::remembered_link_reach`].
     link_reach: f32,
     descendant_counts: Vec<u32>,
     /// Full-screen background, drawn first via [`apply_screen_material`]; a material, not a [`Gm`].
     backdrop: ColorMaterial,
     /// World thumbnails on billboard quads. Drawn once the atlas has loaded.
     thumbnails: Gm<RefilledMesh, ColorMaterial>,
-    /// Additive copy of the hovered row's thumbnail, drawn over its node while
+    /// Additive copy of the hovered row's thumbnail, drawn over the row's node while
     /// [`AppEntities::hovered_row`] is set. See [`AppEntities::aim_glow`].
     glow: Gm<Mesh, ColorMaterial>,
     /// A crosshair on the horizon at heading zero, for the eye to turn by on the 3D sky.
     horizon_marker: Gm<Mesh, ColorMaterial>,
     edges: Gm<RefilledMesh, ColorMaterial>,
-    /// One-way edges, drawn as animated dashes. See [`AppEntities::march_dashes`].
+    /// One-way edges, drawn as animated dashes. See [`AppEntities::update_dashes`].
     dashes: Gm<RefilledMesh, DashMaterial>,
     /// CPU-side instances; source for [`AppEntities::copy_highlighted_instances`].
     thumbnail_instances: Instances,
@@ -271,7 +272,7 @@ struct AppEntities {
     glowing: Option<usize>,
     /// Thumbnail atlas loading state. See [`Atlas`].
     atlas: Atlas,
-    /// The atlas as the versions tab uses it; `None` until loaded, or if loading failed.
+    /// The atlas for the versions tab; `None` until loaded, or if loading failed.
     sheet: Option<thumbnails::Sheet>,
     /// Atlas cell per world; `None` for unvisited worlds, which use the placeholder. See
     /// [`thumbnails::cells`].
@@ -279,11 +280,11 @@ struct AppEntities {
     /// Worlds drawn with the placeholder image. Empty without a frontier filter. See
     /// [`AppEntities::place_unvisited`].
     unvisited: Vec<usize>,
-    /// Their quads, offset toward the camera. Reused across frames to avoid reallocating.
+    /// Quads of `unvisited`, offset toward the camera. Reused across frames to avoid reallocating.
     unvisited_quads: Instances,
     highlight_unvisited_quads: Instances,
-    detail: detail::Detail,
-    /// Dash animation offset in world units; wrapped so it keeps f32 precision.
+    lod: lod::LodPictures,
+    /// Dash animation offset in world units; wrapped to keep f32 precision.
     dash_phase: f32,
     /// Billboard rotation at the last rebuild; a camera rotation triggers a rebuild.
     billboard: Mat4,
@@ -369,7 +370,7 @@ impl ApplicationHandler for App {
         // See [`App::request_a_frame`].
         let wants_a_frame = !matches!(event, WindowEvent::RedrawRequested);
         fig.handle_winit_window_event(&event);
-        // Whether egui consumed the event is decided in `Overlay::run`.
+        // Whether egui consumed the event is decided in `Overlay::update`.
         if let Some(overlay) = self.overlay.as_mut() {
             overlay
                 .gui
@@ -397,13 +398,13 @@ impl ApplicationHandler for App {
             }
             // A key held while focus is lost never gets a release event.
             WindowEvent::Focused(false) => {
-                self.statics.walk = Walk::default();
-                self.statics.focused = false;
+                self.persistent.keyboard_move = KeyboardMove::default();
+                self.persistent.focused = false;
             }
-            WindowEvent::Focused(true) => self.statics.focused = true,
+            WindowEvent::Focused(true) => self.persistent.focused = true,
             WindowEvent::Touch(touch) => {
                 // A second finger turns the gesture into a pinch.
-                if self.statics.touches.track(&touch)
+                if self.persistent.touches.track(&touch)
                     && let Some(data) = self.data.as_mut()
                 {
                     data.gesture = None;
@@ -436,7 +437,10 @@ impl App {
     /// Logs the camera pose as the `vec3` literals in [`App::new`], for picking the startup view.
     /// The layout is deterministic (see `scatter`), but only per dimension count.
     fn log_camera_pose(&self) {
-        let (eye, at) = (self.statics.camera.position(), self.statics.camera.target());
+        let (eye, at) = (
+            self.persistent.camera.position(),
+            self.persistent.camera.target(),
+        );
         let dimensions = self
             .data
             .as_ref()
@@ -462,13 +466,13 @@ impl App {
             vec3(0.0, 1.0, 0.0),
             degrees(FOV_Y_DEGREES),
             0.1,
-            // Past the outermost shell seen from the Nexus at its centre.
+            // Past the outermost shell seen from the Nexus at the centre.
             5000.0,
         );
         // Read before the control moves into place.
         let centre = camera.target();
         let control = OrbitControl::new(centre, 1.0, 3000.0);
-        // Fire and forget: the task stores its result where the app reads it.
+        // Fire and forget: the app reads the result the task stores.
         drop(fetch::spawn(world::load_pages()));
 
         Self {
@@ -479,13 +483,13 @@ impl App {
             code: world::Code::default(),
             revealed: false,
             before: None,
-            statics: AppStatics {
+            persistent: AppPersistent {
                 control,
                 camera,
                 panning: false,
                 cursor: CursorIcon::Default,
                 touches: Touches::default(),
-                walk: Walk::default(),
+                keyboard_move: KeyboardMove::default(),
                 row_follow_aim: centre,
                 focused: true,
             },
@@ -516,7 +520,7 @@ impl App {
         };
         let wctx = match WindowedContext::from_winit_window(window, surface) {
             Ok(wctx) => wctx,
-            // The browser blocks WebGL after its GPU process crashes, until it restarts.
+            // The browser blocks WebGL after a GPU process crash, until the browser restarts.
             #[cfg(target_family = "wasm")]
             Err(error @ three_d::WindowError::WebGL2NotSupported(_)) => {
                 log::error!("{error}");
@@ -537,7 +541,7 @@ impl App {
     }
 
     /// Builds the graph once the dump has loaded; [`App::draw`] retries until then. On Android,
-    /// every [`App::reset`] calls it, since a suspend drops the GL context.
+    /// every [`App::reset`] rebuilds, since a suspend drops the GL context.
     fn build(&mut self) {
         let Dump::Ready(dump) = &self.dump else {
             return;
@@ -561,7 +565,7 @@ impl App {
         let mut data = entities(dump, self.before.take().as_ref(), ctx);
         // Starting in 2D skips the toggle that would face the camera at the plane.
         if opening && data.dimensions() == Dimensions::Two {
-            self.statics.face_plane();
+            self.persistent.face_plane();
         }
 
         // An unknown world in the URL falls back to the default view.
@@ -582,13 +586,13 @@ impl App {
             match data.on_sky() {
                 true => {
                     if let Some(nexus) = data.nexus_bounds() {
-                        self.statics.stand_at(above(&nexus));
+                        self.persistent.stand_at(above(&nexus));
                         data.resetting_camera = true;
                     }
                 }
                 false => {
                     if let Some(bounds) = data.framing_bounds() {
-                        self.statics.snap_to_frame(&bounds);
+                        self.persistent.snap_to_frame(&bounds);
                         data.framing = true;
                     }
                 }
@@ -612,7 +616,7 @@ mod profile {
     }
 
     pub(super) fn pan_aside(
-        _statics: &mut super::camera::AppStatics,
+        _statics: &mut super::camera::AppPersistent,
         _data: &super::AppEntities,
     ) -> bool {
         false
@@ -644,8 +648,9 @@ mod profile {
     }
 }
 
-/// No-op [`update`] on web and Android, which update through a reload and the app store.
+/// No-op [`app_update`] on web and Android, which get app updates through a reload and the app
+/// store.
 #[cfg(any(target_family = "wasm", target_os = "android"))]
-mod update {
+mod app_update {
     pub(super) fn controls(_ui: &mut egui::Ui) {}
 }

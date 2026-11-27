@@ -3,36 +3,26 @@
 
 use super::*;
 
-/// This project's own `dreamweaver`, deployed. Fetched rather than compiled in, so a build is not a
-/// snapshot of the wiki -- worlds arrive weekly.
-///
-/// The reference explorer at `explorer.yume.wiki` answers the same two routes but is no fallback:
-/// it publishes no `cell`, so every world would wear the placeholder.
-///
-/// A local `dreamweaver` is reached through the page instead -- `just serve` proxies to it, see
-/// `Trunk.toml`. Only trunk serves `static/`, so a native build has no local host to fetch from.
+/// This project's deployed `dreamweaver`, fetched at runtime since worlds arrive weekly.
+/// `explorer.yume.wiki` serves the same routes without `cell`, leaving every world a placeholder.
 #[cfg(not(target_family = "wasm"))]
 const SERVER: &str = "https://explorer.yumemiru.dev";
 
-/// The prefix the page rewrites out of every picture address, fetching from its own host instead.
-///
-/// A page cannot fetch from the wiki directly: the edge answers a cross-origin request with a
-/// challenge page, and the browser sets `Origin` itself rather than honouring the header
-/// `detail::ORIGIN` carries. The page's own host is same-origin and proxies on to the wiki.
+/// The prefix the web build rewrites out of picture addresses, to fetch through the page's origin.
+/// The wiki's edge challenges cross-origin requests; the browser will not send `lod::ORIGIN`.
 #[cfg(target_family = "wasm")]
 const WIKI_IMAGES: &str = "https://yume.wiki/images/";
 
-/// Whole rather than the bare path the host sees, because these addresses reach the network
-/// through `reqwest` rather than the document, which has no page to resolve a bare path against.
+/// An absolute URL: `reqwest` has no document to resolve a bare path against.
 #[cfg(target_family = "wasm")]
 fn proxied_images() -> &'static str {
     static PROXIED_IMAGES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    PROXIED_IMAGES.get_or_init(|| format!("{}/img/", origin()))
+    PROXIED_IMAGES.get_or_init(|| format!("{}/img/", web_origin()))
 }
 
 /// The only host the page may fetch anything from unbidden.
 #[cfg(target_family = "wasm")]
-pub(crate) fn origin() -> &'static str {
+pub(crate) fn web_origin() -> &'static str {
     static ORIGIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     ORIGIN.get_or_init(|| {
         web_sys::window()
@@ -43,31 +33,21 @@ pub(crate) fn origin() -> &'static str {
     })
 }
 
-/// The host this run fetches from, which the page reads off itself.
-///
-/// A request straight at the server is cross-origin, which `dreamweaver` sends no
-/// `Access-Control-Allow-Origin` to allow, and mixed-content over https. So the page fetches from
-/// its own host under the same routes -- see the proxies in `Trunk.toml`.
-///
-/// Also where [`super::super::thumbnails`] reads the atlas from, which is why this is not private.
+/// The host the app fetches from; the web build uses the page's origin, proxied in `Trunk.toml`, as
+/// `dreamweaver` sends no `Access-Control-Allow-Origin` and https forbids mixed content.
 pub(crate) fn server() -> &'static str {
     #[cfg(not(target_family = "wasm"))]
     return SERVER;
     #[cfg(target_family = "wasm")]
-    return origin();
+    return web_origin();
 }
 
 fn url() -> String {
     format!("{}/data", server())
 }
 
-/// What the server says it is building, as the message to say about it.
-///
-/// A server rebuilding the dump says so rather than serving one it is about to replace, so the wait
-/// can be a minute. `GET /pollUpdate` is the reference route, which `dreamweaver` also answers.
-///
-/// `None` for anything this app has no words for -- a server between syncs, a host with no such
-/// route, the finer stages only the reference server names -- which all mean the plain wait.
+/// The message for the stage of a dump rebuild, which can take a minute, from `GET /pollUpdate`.
+/// `None` without a message: no rebuild under way, no such route, or a stage this app cannot name.
 pub async fn building() -> Option<&'static str> {
     let url = format!("{}/pollUpdate", server());
     let said = match fetch::client().get(&url).fetch_text().await {
@@ -101,11 +81,8 @@ pub(super) const STAGES: [(&str, &str); 4] = [
     ("prepareWorldData", "dump-task-assembling"),
 ];
 
-/// `Ok(None)` is the server saying it is building one, which is a wait rather than a failure --
-/// the request is also what starts that build. [`building`] is what to say meanwhile.
-///
-/// `Err` carries what to say on screen rather than panicking: a document off the network failing
-/// to resolve, or resolving into something else, is not worth taking the window down for.
+/// `Ok(None)` while the server builds the dump, which this request starts; see [`building`].
+/// `Err` carries the message to show when the dump cannot be fetched or parsed.
 pub async fn load(revealed: bool) -> Result<Option<Dump>, String> {
     let url = url();
     let Some(json) = dump(&url)
@@ -119,8 +96,7 @@ pub async fn load(revealed: bool) -> Result<Option<Dump>, String> {
         .map_err(|error| format!("{url} is not the expected world dump: {error}"))
 }
 
-/// `None` for a server that has no dump to send yet. Its own request rather than [`fetch::FetchExt`],
-/// the dump being the one document with an answer that is neither itself nor a failure.
+/// `None` for a server with no dump yet. Sent directly, as [`fetch::FetchExt`] fails on a 503.
 async fn dump(url: &str) -> Result<Option<String>, fetch::Error> {
     let response = fetch::client().get(url).send().await?;
     // The server is rebuilding.

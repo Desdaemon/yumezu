@@ -1,12 +1,5 @@
-//! Guards the instructions LLVM emits for the repulsion kernel.
-//!
-//! The kernel is safe Rust written in a way amenable to the auto-vectorizer. Nothing in the language
-//! enforces that, so a refactor, a profile change or a new compiler can quietly drop it back to
-//! one lane at a time -- the layout still looks right and the tests still pass, only slower. Each
-//! check builds the crate the way something really ships it and asserts on the LLVM IR.
-//!
-//! Every failure here is about speed, not correctness, and the fix may well be to delete the
-//! workaround the check is guarding once the compiler no longer needs it.
+//! Asserts that the repulsion kernel's LLVM IR stays vectorized across refactors and toolchain
+//! changes. A failure costs speed, not correctness; a fix may drop a stale workaround.
 
 // Drives a compiler, so host-only; `just test-wasm` runs the behaviour tests.
 #![cfg(not(target_family = "wasm"))]
@@ -16,9 +9,8 @@ use std::process::Command;
 
 /// The kernel compiled for one target and set of flags, as LLVM IR.
 ///
-/// The crate reaches the kernel only through a generic type, so an `rlib` on its own instantiates
-/// nothing: this builds a throwaway consumer that steps a graph and takes the IR of whichever
-/// compilation unit the definition landed in.
+/// The kernel is generic, so an `rlib` alone instantiates nothing; this builds a throwaway consumer
+/// that steps a graph and reads the IR of the compilation unit holding the definition.
 fn kernel_ir(target: Option<&str>, rustflags: &str, kernel: &str) -> Option<String> {
     let dir = scratch().join(match target {
         Some(target) => format!("codegen-{target}"),
@@ -59,7 +51,7 @@ pub extern "C" fn drive(graph: &mut ForceGraph, dt: f32) -> bool { graph.update(
     )
     .unwrap();
 
-    // Otherwise cargo calls the crate fresh and re-emits nothing.
+    // Cargo re-emits nothing for a crate considered fresh.
     let mut clean = Command::new(env!("CARGO"));
     clean
         .current_dir(&crate_dir)
@@ -83,7 +75,7 @@ pub extern "C" fn drive(graph: &mut ForceGraph, dt: f32) -> bool { graph.update(
     let output = cargo.output().expect("cargo");
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // A missing target skips locally but fails on CI, where skipping would check nothing.
+        // A missing target skips locally and fails on CI.
         let missing = target
             .is_some_and(|t| stderr.contains(&format!("the `{t}` target may not be installed")));
         if missing && std::env::var_os("CI").is_none() {
@@ -94,7 +86,7 @@ pub extern "C" fn drive(graph: &mut ForceGraph, dt: f32) -> bool { graph.update(
     }
 
     // Newest first: the scratch target directory keeps stale IR from earlier revisions.
-    let mut emitted: Vec<PathBuf> = walk(&dir.join("target"))
+    let mut emitted: Vec<PathBuf> = files_under(&dir.join("target"))
         .filter(|p| p.extension().is_some_and(|e| e == "ll"))
         .collect();
     emitted.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
@@ -112,27 +104,28 @@ pub extern "C" fn drive(graph: &mut ForceGraph, dt: f32) -> bool { graph.update(
     Some(define)
 }
 
-/// Somewhere to build the throwaway crate that is not the workspace target directory: the outer
-/// `cargo test` may still hold its lock.
+/// A build directory outside the workspace target directory, whose lock the outer `cargo test` may
+/// still hold.
 fn scratch() -> PathBuf {
     std::env::temp_dir().join("force_graph_3d-codegen")
 }
 
-fn walk(root: &Path) -> Box<dyn Iterator<Item = PathBuf>> {
+fn files_under(root: &Path) -> Box<dyn Iterator<Item = PathBuf>> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Box::new(std::iter::empty());
     };
     Box::new(entries.filter_map(Result::ok).flat_map(|e| {
         let path = e.path();
         if path.is_dir() {
-            walk(&path)
+            files_under(&path)
         } else {
             Box::new(std::iter::once(path))
         }
     }))
 }
 
-/// Mangled names prefix each path segment with its length, so `repulsion_on` misses `repulsion_on_avx2`.
+/// Mangled names prefix each path segment with the segment length, so `repulsion_on` misses
+/// `repulsion_on_avx2`.
 fn function(ir: &str, name: &str) -> Option<String> {
     let segment = format!("{}{name}", name.len());
     let start = ir
@@ -156,9 +149,8 @@ fn assert_vectorized(ir: &str, width: usize) {
     );
 }
 
-/// `clamp_symmetric`'s two variants are not interchangeable: each lowers to bare instructions on
-/// its own architecture and needs correcting after on the opposite one. A `cfg` reaching the wrong target is
-/// silent and costs about a tenth of the loop.
+/// Each `clamp_symmetric` variant lowers to bare instructions only on the matching architecture; a
+/// `cfg` reaching the wrong target is silent and costs about a tenth of the loop.
 #[track_caller]
 fn assert_clamp_is_ieee(ir: &str, expected: bool) {
     // `f32::max`/`f32::min` lower to `maximumnum`/`minimumnum`; `maxnum`/`minnum` are equivalent.
@@ -227,11 +219,9 @@ fn the_lane_loop_vectorizes_with_avx2() {
     assert_clamp_is_ieee(&ir, false);
 }
 
-/// Vectorizing the lane loop needs the unroller to widen it to `LANES` first, and both
-/// size-optimizing levels turn the unroller off, so the workspace manifest has to compile this
-/// crate for speed. Either arrangement does: a speed level for the whole `min` profile, or one for
-/// this package alone, which takes effect only with LTO off because both LTO modes run the
-/// vectorizers after linking at the top-level setting.
+/// Vectorizing the lane loop needs the unroller to widen the loop to `LANES`, and both size levels
+/// disable the unroller. So the `min` profile needs a speed level, or this package does with LTO
+/// off: both LTO modes run the vectorizers after linking, at the top-level setting.
 #[test]
 fn the_shipping_profile_builds_this_crate_for_speed() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");

@@ -1,30 +1,19 @@
-//! What the page reads about a player's own YNOproject account, put through to YNOproject.
-//!
-//! The page cannot reach YNOproject itself: that host allows exactly one origin -- its own site --
-//! and the credential it answers to is a cookie, which a script may neither read nor set by hand.
-//!
-//! The one thing done beyond forwarding is the sign-in's cookie, which YNOproject issues for its
-//! own domain and a browser would therefore refuse to keep. See [`resettled`].
-//!
-//! The cost is that a signed-in request goes through this host, so this host sees the session. That
-//! is why the native builds reach YNOproject directly instead.
-//!
-//! Only the routes the app uses, rather than a path forwarding whatever it is given: an open relay
-//! to someone else's API is not something to run by accident.
+//! YNOproject's account routes relayed for the web build, which YNOproject's origin rule blocks;
+//! a fixed route list that rehosts the session cookie. Native builds call YNOproject directly.
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 
-/// One host per game, and this app draws exactly one.
+/// YNOproject's Yume 2kki API; one host per game.
 const API: &str = "https://api.ynoproject.net/2kki/api";
-/// Where signing in goes, which is a service of its own rather than a route of [`API`]'s.
+/// The sign-in service, separate from [`API`].
 const AUTH: &str = "https://auth.ynoproject.net";
 /// The cookie YNOproject's sign-in issues, and the only one carried in either direction.
 const SESSION: &str = "auth";
 
-/// Merged into the server's own router. No state of its own: a relay keeps nothing.
+/// Merged into the server's own router; stateless.
 pub fn routes<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
     axum::Router::new()
         .route("/yno/info", get(info))
@@ -33,23 +22,19 @@ pub fn routes<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
         .route("/ynoauth/forget", post(forget))
 }
 
-/// `GET /yno/info` -- who the session belongs to, and everywhere they have been. The one route
-/// that carries the session, being the one that wants it.
+/// `GET /yno/info` -- who the session belongs to and every location they have visited; the only
+/// route that sends the session.
 async fn info(headers: HeaderMap) -> Response {
     forward(&format!("{API}/info"), session(&headers)).await
 }
 
-/// `GET /yno/gamelocations` -- every place YNOproject knows, by id.
-///
-/// The same document for everybody, so it is fetched without a session.
+/// `GET /yno/gamelocations` -- every location YNOproject knows, by id; fetched without a session.
 async fn locations() -> Response {
     forward(&format!("{API}/gamelocations"), None).await
 }
 
-/// `POST /ynoauth/login` -- a name and a password for a session.
-///
-/// The body is passed through as it arrived, being a form this host has no business reading, and
-/// so is the answer but for the cookie: see [`resettled`].
+/// `POST /ynoauth/login` -- a name and a password for a session. Request and response pass through
+/// unread, but for the session cookie: see [`resettled`].
 async fn login(headers: HeaderMap, body: Bytes) -> Response {
     let content_type = headers
         .get(header::CONTENT_TYPE)
@@ -85,10 +70,8 @@ async fn login(headers: HeaderMap, body: Bytes) -> Response {
     response
 }
 
-/// `POST /ynoauth/forget` -- takes back the copy of the session this origin was given.
-///
-/// Not YNOproject's own sign-out: signing out of a map should not sign someone out of the game
-/// they are playing in another browser tab.
+/// `POST /ynoauth/forget` -- clears this origin's copy of the session. YNOproject's sign-out is
+/// left alone, so the user stays signed in to the game in another browser tab.
 async fn forget() -> Response {
     (
         [(
@@ -100,7 +83,7 @@ async fn forget() -> Response {
         .into_response()
 }
 
-/// Status and body as they came back: a failure upstream is for the page to read and say.
+/// Status and body passed through unchanged, so the page reports upstream failures.
 async fn forward(url: &str, session: Option<HeaderValue>) -> Response {
     let mut request = client().get(url);
     if let Some(session) = session {
@@ -124,8 +107,7 @@ async fn forward(url: &str, session: Option<HeaderValue>) -> Response {
     }
 }
 
-/// [`SESSION`] and nothing else: the page's origin may carry cookies of its own, and none of them
-/// are YNOproject's business.
+/// The [`SESSION`] cookie alone; the page's origin may carry unrelated cookies.
 fn session(headers: &HeaderMap) -> Option<HeaderValue> {
     let sent = headers.get(header::COOKIE)?.to_str().ok()?;
     let session = sent
@@ -136,13 +118,8 @@ fn session(headers: &HeaderMap) -> Option<HeaderValue> {
     HeaderValue::from_str(&format!("{SESSION}={session}")).ok()
 }
 
-/// One `Set-Cookie` from YNOproject, made keepable by whatever browser is reading this page.
-///
-/// `Domain` is dropped, which is the whole point: without the attribute the cookie belongs to
-/// whichever origin served it. `Path` is forced to the root, the page fetching under paths of its
-/// own, and everything else is left as YNOproject wrote it.
-///
-/// `None` for a cookie that is not the session.
+/// YNOproject's session `Set-Cookie`, rehosted: `Domain` dropped so the cookie belongs to this
+/// origin, `Path` forced to `/`, the rest as written. `None` for any other cookie.
 fn resettled(cookie: &str) -> Option<HeaderValue> {
     let mut parts = cookie.split(';');
     let pair = parts.next()?.trim();
@@ -164,8 +141,7 @@ fn resettled(cookie: &str) -> Option<HeaderValue> {
     HeaderValue::from_str(&resettled).ok()
 }
 
-/// Built once and handed out by the clone: it keeps a connection pool, so the second question of a
-/// sign-in reuses the first one's socket.
+/// Built once and cloned, so every request shares one connection pool.
 fn client() -> reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT
@@ -178,7 +154,7 @@ fn client() -> reqwest::Client {
 
 #[cfg(test)]
 mod tests {
-    /// A browser keeps a cookie only for the domain that served it.
+    /// A browser keeps a cookie only for the serving domain.
     #[test]
     fn a_session_is_resettled_on_whoever_served_it() {
         let resettled = super::resettled(
@@ -187,12 +163,12 @@ mod tests {
         .expect("the session is passed on");
         assert_eq!(
             resettled.to_str().unwrap(),
-            // No domain, so it belongs to whoever served it.
+            // No `Domain`: the serving origin owns the cookie.
             "auth=s3cr3t; Path=/; Max-Age=2592000; HttpOnly; Secure; SameSite=None"
         );
     }
 
-    /// Whatever else the sign-in sets is not the session and is nothing to hand on.
+    /// Cookies other than the session are dropped.
     #[test]
     fn nothing_but_the_session_is_passed_on() {
         assert!(super::resettled("othercookie=whatever; Path=/").is_none());

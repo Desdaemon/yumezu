@@ -1,13 +1,5 @@
-//! The overlay's own half of the window: the input egui is given, and the painter that draws what
-//! it returns.
-//!
-//! Hand-paired from [`egui_winit::State`] and [`egui_glow::Painter`] rather than taken from either
-//! crate above them. `three_d`'s own `GUI` drops egui's [`egui::PlatformOutput`], which leaves an
-//! input method nowhere to reach; `eframe` wants the window, the context and the loop, which the
-//! 3D renderer that draws first already owns.
-//!
-//! The page has no winit input method at all: its `set_ime_allowed` is empty and it never sends
-//! [`winit::event::WindowEvent::Ime`]. See [`super::text_agent`].
+//! egui input through `egui_winit` and drawing through `egui_glow`, paired by hand: `three_d`'s
+//! `GUI` drops [`egui::PlatformOutput`], which `egui_winit` and the web build's `text_agent` read.
 
 use winit::{event::WindowEvent, event_loop::ActiveEventLoop, window::Window};
 
@@ -15,13 +7,13 @@ pub(crate) struct Gui {
     ctx: egui::Context,
     state: egui_winit::State,
     painter: egui_glow::Painter,
-    /// Carried from [`Gui::run`] to [`Gui::paint`]: the paint must happen inside the render
+    /// Carried from [`Gui::update`] to [`Gui::paint`]: the paint must happen inside the render
     /// target the 3D scene was written to.
     shapes: Vec<egui::epaint::ClippedShape>,
     textures: egui::TexturesDelta,
     pixels_per_point: f32,
-    /// How long egui is content to wait before it is drawn again: zero while something in the
-    /// panel is animating, [`Duration::MAX`] when the overlay would come out identical.
+    /// egui's repaint delay: zero while the panel animates, [`Duration::MAX`] while the overlay is
+    /// unchanged.
     repaint_after: std::time::Duration,
     #[cfg(target_family = "wasm")]
     agent: super::text_agent::TextAgent,
@@ -71,19 +63,19 @@ impl Gui {
         self.repaint_after
     }
 
-    /// The caller passes the event to the 3D scene regardless: whether the overlay took it is
-    /// settled after layout by [`egui::Context::wants_pointer_input`].
+    /// The caller also passes the event to the 3D scene: whether the overlay consumed the event is
+    /// known after layout, from [`egui::Context::wants_pointer_input`].
     pub(crate) fn on_window_event(&mut self, window: &Window, event: &WindowEvent) {
         let _ = self.state.on_window_event(window, event);
     }
 
-    pub(crate) fn run(&mut self, window: &Window, run_ui: impl FnMut(&mut egui::Ui)) {
+    pub(crate) fn update(&mut self, window: &Window, build_ui: impl FnMut(&mut egui::Ui)) {
         #[cfg(target_family = "wasm")]
         self.agent.lend_focus(&mut self.state);
 
         let input = self.state.take_egui_input(window);
         // This app opens only the root viewport.
-        let output = self.ctx.run_ui(input, run_ui);
+        let output = self.ctx.run_ui(input, build_ui);
         self.repaint_after = output
             .viewport_output
             .get(&egui::ViewportId::ROOT)
@@ -99,10 +91,8 @@ impl Gui {
         self.textures.append(output.textures_delta);
     }
 
-    /// Must be called inside the write callback of the render target the scene was drawn to, so
-    /// the overlay lands over it.
-    ///
-    /// Answers with the draw calls it made, egui painting one per clipped primitive.
+    /// Call inside the write callback of the scene's render target, so the overlay lands over the
+    /// scene. Returns the draw call count, one per clipped primitive.
     pub(crate) fn paint(&mut self, window: &Window) -> usize {
         let shapes = std::mem::take(&mut self.shapes);
         let mut textures = std::mem::take(&mut self.textures);
@@ -121,8 +111,8 @@ impl Gui {
         primitives.len()
     }
 
-    /// A call rather than a `Drop` because on a phone the context holding the buffers goes away
-    /// first. See `App::suspended`.
+    /// An explicit call, since on a phone the GL context holding the buffers is lost first. See
+    /// `App::suspended`.
     pub(crate) fn destroy(&mut self) {
         self.painter.destroy();
     }

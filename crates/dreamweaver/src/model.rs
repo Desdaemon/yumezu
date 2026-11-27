@@ -1,20 +1,15 @@
-//! What a world is, as the dump publishes it.
-//!
-//! `data.json` is an interface with a reader on the other side, so the field names and the nesting
-//! are the reference implementation's and the serde renames are what keep them that way.
+//! The dump's schema; the serde renames keep the reference implementation's field names.
 
 use crate::smw;
 
 use serde::{Deserialize, Serialize};
 
 /// The wiki's own connection bitfield and the shape a connection is published in, both from
-/// [`yumezu_routing`], so the program that draws the dump reads what this one writes.
+/// [`yumezu_routing`], so yumezu reads exactly what dreamweaver writes.
 pub use yumezu_routing::{ConnType, Connection, TypeParams};
 
-/// What one of the wiki's connection attributes means, as a flag and whatever words come with it.
-///
-/// `None` for a word this does not know: an unrecognised attribute leaves the connection exactly as
-/// walkable as it was, so the wiki growing its vocabulary is not fatal.
+/// What one of the wiki's connection attributes means, as a flag and any words.
+/// `None` for an unknown attribute, which leaves the connection's gates unchanged.
 pub fn conn_type(attribute: &str, connection: &smw::Connection) -> Option<(ConnType, Wording)> {
     {
         let plain = |flag| Some((flag, Wording::None));
@@ -50,8 +45,8 @@ pub fn conn_type(attribute: &str, connection: &smw::Connection) -> Option<(ConnT
     }
 }
 
-/// The wiki writes these as instructions -- "Requires to have seen the first four endings." -- and
-/// the dump publishes the bare condition a reader shows beside a route.
+/// "Requires to have seen the first four endings." as the bare condition the dump publishes:
+/// "Have seen the first four endings".
 fn condition(sentence: &str) -> String {
     let trimmed = sentence
         .strip_prefix("Requires ")
@@ -67,18 +62,18 @@ fn condition(sentence: &str) -> String {
     }
 }
 
-/// What the wiki says about one of a connection's conditions, if it says anything.
+/// What the wiki says about one of a connection's conditions, if anything.
 pub enum Wording {
-    /// The flag is the whole of what there is to say.
+    /// The flag alone, without words.
     None,
     /// The wiki's own English words.
     Words(String),
-    /// English words this program can also give in Japanese, which is only ever the four seasons.
+    /// English words with a Japanese translation: only the four seasons.
     Translated(String),
 }
 
 impl Wording {
-    /// The words, and their Japanese where there is a Japanese to give.
+    /// The words, and their Japanese translation where one exists.
     pub fn published(&self) -> Option<(String, Option<String>)> {
         match self {
             Wording::None => None,
@@ -97,10 +92,8 @@ impl Wording {
     }
 }
 
-/// Exactly as the reference implementation's `/data` answers it.
-///
-/// The empty lists are not oversights: effects, menu themes, wallpapers and soundtrack entries are
-/// prose rather than store entries. Kept so a reader written against the reference dump works.
+/// The reference implementation's `/data` schema. Effects, menu themes, wallpapers and soundtrack
+/// entries are wiki prose rather than store entries, so are published empty.
 #[derive(Serialize, Deserialize, Default)]
 pub struct Dump {
     #[serde(rename = "worldData")]
@@ -125,8 +118,8 @@ pub struct Dump {
     /// When this dump was built, ISO 8601.
     #[serde(rename = "lastUpdate")]
     pub last_update: Option<String>,
-    /// When the whole wiki was last read without first querying what had changed. A soft sync
-    /// carries this over rather than moving it.
+    /// When the whole wiki was last read without first querying what had changed; a soft sync
+    /// keeps the previous value.
     #[serde(rename = "lastFullUpdate")]
     pub last_full_update: Option<String>,
     /// Always false: the reference implementation lets an operator edit the wiki through the
@@ -150,8 +143,8 @@ pub struct Author {
     pub name_jp: Option<String>,
 }
 
-/// [`World::id`] is the world's place in the published list rather than a database key: the reader
-/// indexes straight into the array with a [`Connection::target_id`].
+/// [`World::id`] is the world's index in the published list, which [`Connection::target_id`]
+/// indexes.
 impl yumezu_routing::World for World {
     fn title(&self) -> &str {
         &self.title
@@ -171,10 +164,9 @@ pub struct World {
     pub title: String,
     #[serde(rename = "titleJP")]
     pub title_jp: Option<String>,
-    /// Empty rather than absent for a world the wiki credits to nobody: the reader groups by it.
+    /// Empty, never absent, for a world credited to nobody: the reader groups worlds by author.
     pub author: String,
-    /// Steps from the starting room along connections a player can walk unconditionally. See
-    /// `depth`.
+    /// Steps from the starting room along unconditional connections. See `depth`.
     pub depth: i32,
     /// Steps along any connection at all, however conditional.
     #[serde(rename = "minDepth")]
@@ -200,9 +192,8 @@ pub struct World {
     #[serde(rename = "verGaps")]
     pub ver_gaps: Option<Vec<VerGap>>,
     pub removed: bool,
-    /// Set for the debug room and whatever else an operator has marked as a spoiler. Published
-    /// rather than acted on: the world stays in the dump and the numbering, and the client leaves
-    /// it out.
+    /// Set for the debug room and any world an operator marks as a spoiler. A secret world stays
+    /// in the dump and the numbering; the client leaves the world out.
     pub secret: bool,
     pub connections: Vec<Connection>,
 }
@@ -235,7 +226,7 @@ pub fn dream_tree() -> Dump {
             id,
             cell: Some(id),
             title: place.title.to_owned(),
-            // Every optional field is set somewhere, so the round trip covers it.
+            // Every optional field is set somewhere, so the round trip covers each.
             title_jp: (id % 2 == 0).then(|| format!("\u{68a6}{id}")),
             author: "Yumemiru".to_owned(),
             depth: 0,

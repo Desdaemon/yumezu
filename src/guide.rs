@@ -1,5 +1,5 @@
-//! First-run panel naming the controls: the keys are invisible and the rocker is two unlabelled
-//! arrows, so nothing on screen can announce itself.
+//! Panel naming the controls, shown the first time the app opens: the keys are invisible and the
+//! rocker is two unlabelled arrows, so nothing on screen can announce itself.
 
 use super::prelude::*;
 
@@ -10,7 +10,7 @@ const WIDTH: f32 = 320.0;
 
 pub(super) struct Guide {
     open: bool,
-    /// Separate from `open`: the tick governs later runs, not this one.
+    /// Separate from `open`: the tick governs later sessions, not this one.
     dismissed: bool,
 }
 

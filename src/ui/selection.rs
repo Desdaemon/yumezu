@@ -1,13 +1,10 @@
-//! What the panel says about whatever is lit: the world itself, the ways on from it, the walk
-//! taken to reach it, and the lists a highlight names. See [`Panel::selection`].
+//! The panel for the highlighted world: the world, the ways onward, the route that led there,
+//! and the lists a highlight names. See [`Panel::selection`].
 
 use super::*;
 
-/// The line down the left of a walk: a stop per world in the order they are walked, hollow where
-/// the walk starts and solid where it arrives.
-///
-/// Drawn over the rows rather than between them, the height of a row not being known until it has
-/// been laid out. `stops` is in the order they are drawn, top first.
+/// The line down the left of a route: a stop per world, hollow at the origin, solid at the arrival.
+/// Drawn over the rows once layout has set their heights. `stops` is top first.
 fn rail(ui: &egui::Ui, stops: &[egui::Rect]) {
     let color = ui.visuals().text_color();
     let stroke = egui::Stroke::new(RAIL_LINE, color);
@@ -15,7 +12,7 @@ fn rail(ui: &egui::Ui, stops: &[egui::Rect]) {
     let at = |row: &egui::Rect| egui::pos2(row.left() + RAIL_WIDTH / 2.0, row.center().y);
     for (nth, pair) in stops.windows(2).enumerate() {
         let (mut from, to) = (at(&pair[0]), at(&pair[1]));
-        // Every other stop is solid and drawn after the line, covering its end.
+        // The line starts at the hollow origin's rim; the solid stops, drawn after, cover the rest.
         if nth == 0 {
             from.y += RAIL_END;
         }
@@ -30,26 +27,24 @@ fn rail(ui: &egui::Ui, stops: &[egui::Rect]) {
     }
 }
 
-/// The world a set of directions would run to or from: whatever is lit, which is what makes two
-/// worlds out of one right-click. `None` while that is this world or nothing at all.
+/// The highlighted world, at the other end of directions from `world`; `None` when nothing is
+/// highlighted or `world` is.
 fn other_end(read: &PanelData, world: usize) -> Option<usize> {
     read.selected
         .and_then(Highlight::world)
         .filter(|&other| other != world)
 }
 
-/// What a world in a walk does when it is pressed.
+/// What pressing a world on a route does.
 enum Rows {
-    /// Traces its own route home, which is what a route is read down to find.
+    /// Traces the pressed world's route home.
     Traced,
-    /// Nothing. The ways between two worlds are gone the moment something else is selected, so a
-    /// reader following one down cannot be made to lose it by pressing what they are reading.
+    /// Nothing: selecting another world would drop the directions being read.
     Pointed,
 }
 
 impl Panel {
-    /// The step back to the world the route came through is left out, the route above already
-    /// naming it.
+    /// Leaves out the step back to the route's previous world, which the route above names.
     fn forward_connections(&mut self, ui: &mut egui::Ui, read: &PanelData, world: usize) {
         let data = read.data;
         let parent = data.routes.parents[world];
@@ -64,19 +59,19 @@ impl Panel {
         ui.label(t!("forward-connections", count = ways.len()));
         for step in ways {
             let lit = Highlight::Connection(world, step.world);
-            // For a two-way connection, the way out.
+            // For a two-way connection, the exit.
             let conditions = step
-                .out
+                .outgoing
                 .as_ref()
-                .or(step.back.as_ref())
-                .map(world::glyphs)
+                .or(step.incoming.as_ref())
+                .map(world::conditions_glyphs)
                 .unwrap_or_default();
             let title = data.titles[step.world].show();
             let row = ui.add(
                 Tile::new(read.selected == Some(lit), title)
-                    .leading(world::arrow(step))
+                    .leading(world::direction_icon(step))
                     .trailing(conditions)
-                    .hover(walk_of(step)),
+                    .hover(passage_sentence(step)),
             );
             if row.hovered() {
                 self.hovered_row = Some(step.world);
@@ -95,8 +90,8 @@ impl Panel {
         let mut lit = None;
         ui.horizontal(|ui| {
             ui.strong(data.titles[world].show());
-            // An unvisited world's page would name what this withholds.
-            if data.titles[world].known()
+            // The wiki page would reveal an unvisited world's withheld name.
+            if data.titles[world].is_searchable()
                 && ui
                     .button(ICON_OPEN_IN_NEW)
                     .on_hover_text(t!("menu-open-wiki"))
@@ -121,7 +116,7 @@ impl Panel {
                 lit = Some(Highlight::Connection(parent, world));
             }
         });
-        if speaking_japanese() && data.titles[world].known() {
+        if speaking_japanese() && data.titles[world].is_searchable() {
             ui.horizontal(|ui| {
                 ui.label(t!("world-english-name"));
                 let link = world::wiki_url(&data.titles[world].en);
@@ -157,10 +152,8 @@ impl Panel {
         self.lit = self.lit.or(lit.map(Some));
     }
 
-    /// Every list of worlds in the panel is drawn through here, so all of them point alike. The
-    /// exception is [`Self::forward_connections`], whose rows are connections.
-    ///
-    /// [`Self::hovered_row`] is written rather than merged: egui hovers at most one row at a time.
+    /// A row of any panel list of worlds, so all lists answer hover and click alike.
+    /// Overwrites [`Self::hovered_row`]: egui hovers at most one row at a time.
     pub(super) fn world_row(
         &mut self,
         ui: &mut egui::Ui,
@@ -177,8 +170,8 @@ impl Panel {
         row
     }
 
-    /// A right-click on a world, offering the two ways between it and whatever is lit. Nothing
-    /// where there is no second world, an empty menu reading as a broken one.
+    /// A right-click menu on a world's row, with directions to and from the highlighted world.
+    /// No menu without a second world: an empty menu looks broken.
     pub(super) fn with_directions(&mut self, row: &egui::Response, read: &PanelData, world: usize) {
         if other_end(read, world).is_none() {
             return;
@@ -193,8 +186,8 @@ impl Panel {
             });
     }
 
-    /// The two ways between a world and whatever is lit, and whether one of them was taken. The
-    /// other end is named in the hover, a title being longer than a menu is wide.
+    /// Directions to and from the highlighted world, answering whether either was chosen.
+    /// The hover names the other world, since a title is wider than the menu.
     pub(super) fn directions_menu(
         &mut self,
         ui: &mut egui::Ui,
@@ -225,30 +218,31 @@ impl Panel {
         taken
     }
 
-    /// The worlds a walk goes through, origin first, each with what the step onto it demands.
-    /// `walk` is arrival first, as [`AppEntities::route`] answers it.
-    ///
-    /// What a step demands is read off the world before it in this walk rather than off the
-    /// canonical parent: the same thing for a route home, not for a way between two other worlds.
-    fn walked(&mut self, ui: &mut egui::Ui, read: &PanelData, walk: &[usize], rows: Rows) {
+    /// A route's worlds, origin first, each with what the step onto that world demands.
+    /// `route` is arrival first; each step starts at the prior world in `route`.
+    fn route_rows(&mut self, ui: &mut egui::Ui, read: &PanelData, route: &[usize], rows: Rows) {
         let data = read.data;
-        let mut stops = Vec::with_capacity(walk.len());
-        for (at, &world) in walk.iter().enumerate().rev() {
-            let from = walk.get(at + 1).copied();
+        let mut stops = Vec::with_capacity(route.len());
+        for (at, &world) in route.iter().enumerate().rev() {
+            let from = route.get(at + 1).copied();
             let conditions = from
                 .and_then(|from| world::step_conditions(&data.connections, data.hub, from, world))
                 .filter(|step| step.gate != Gate::Free);
-            // Both directions named, as among the ways on; the escape home is no listed connection.
-            let walked = from.and_then(|from| world::step_between(&data.connections, from, world));
+            // Both directions, as in forward connections; `None` for the unlisted escape home.
+            let step_onto =
+                from.and_then(|from| world::step_between(&data.connections, from, world));
             let row = ui.horizontal(|ui| {
-                // Left clear for the line, drawn once rows settle.
+                // Room for the rail, drawn after layout.
                 ui.add_space(RAIL_WIDTH);
-                let leading = conditions.as_ref().map(world::glyphs).unwrap_or_default();
+                let leading = conditions
+                    .as_ref()
+                    .map(world::conditions_glyphs)
+                    .unwrap_or_default();
                 let title = data.titles[world].show();
                 let mut tile = Tile::new(false, title).leading(leading);
-                if let Some(hover) = walked
-                    .map(walk_of)
-                    .or_else(|| conditions.as_ref().map(world::sentences))
+                if let Some(hover) = step_onto
+                    .map(passage_sentence)
+                    .or_else(|| conditions.as_ref().map(world::conditions_display))
                 {
                     tile = tile.hover(hover);
                 }
@@ -269,11 +263,8 @@ impl Panel {
         rail(ui, &stops);
     }
 
-    /// The ways between two worlds a reader can pick between, in a window of its own rather than the selection window,
-    /// which reads the one being walked.
-    ///
-    /// Nothing where there is one way or none: an alternative is what this offers. Closing it
-    /// drops the directions, there being nothing left to pick between.
+    /// A window listing the alternative ways between two worlds, apart from the selection window.
+    /// Shown only for more than one way; closing the window drops the directions.
     pub(super) fn directions(&mut self, ui: &mut egui::Ui, read: &PanelData) {
         let data = read.data;
         let Some(Highlight::Path(from, to)) = read.selected.filter(|_| data.ways.len() > 1) else {
@@ -293,22 +284,22 @@ impl Panel {
         .show(ui.ctx(), |ui| {
             let (mut named, mut above): (Vec<usize>, &[usize]) = (Vec::new(), &[]);
             for (at, way) in data.ways.iter().enumerate() {
-                let connections = way.walk.len() - 1;
-                // Ways of a class share a tail, so what is peculiar to one starts where it parts.
+                let connections = way.worlds.len() - 1;
+                // A way shares leading worlds with the one above; the distinct part follows them.
                 let parts = way
-                    .walk
+                    .worlds
                     .iter()
                     .zip(above)
                     .position(|(here, there)| here != there)
                     .unwrap_or(above.len())
                     .max(1);
-                let onward = way.walk.get(parts..).unwrap_or_default();
+                let onward = way.worlds.get(parts..).unwrap_or_default();
                 let apart = onward
                     .iter()
                     .find(|world| !named.contains(world))
                     .or(onward.first());
                 named.extend(apart);
-                above = &way.walk;
+                above = &way.worlds;
                 ui.horizontal(|ui| {
                     if ui
                         .selectable_label(at == data.way, t!("way-length", count = connections))
@@ -316,13 +307,13 @@ impl Panel {
                     {
                         self.way = Some(at);
                     }
-                    for pair in way.walk.windows(2) {
+                    for pair in way.worlds.windows(2) {
                         let step =
                             world::step_conditions(&data.connections, data.hub, pair[0], pair[1])
                                 .filter(|step| step.gate != Gate::Free);
                         if let Some(step) = &step {
-                            ui.label(world::glyphs(step))
-                                .on_hover_text(world::sentences(step));
+                            ui.label(world::conditions_glyphs(step))
+                                .on_hover_text(world::conditions_display(step));
                         }
                     }
                     if let Some(&apart) = apart {
@@ -336,7 +327,7 @@ impl Panel {
         }
     }
 
-    /// Down the right of a wide window, beside the graph rather than over the list that chose it.
+    /// Down the right of a wide window, beside the graph and clear of the list.
     pub(super) fn selection_window(
         &mut self,
         ui: &mut egui::Ui,
@@ -377,7 +368,7 @@ impl Panel {
                     };
                     self.refit |= ui.button(icon).on_hover_text(hint).clicked();
                 });
-                self.walked(ui, read, &read.route, Rows::Traced);
+                self.route_rows(ui, read, &read.route, Rows::Traced);
             }
             Highlight::Path(from, world) => {
                 self.world_info(ui, data, world);
@@ -393,9 +384,9 @@ impl Panel {
                     origin = data.titles[from].show()
                 ));
                 // Pressing would select the world and drop the ways between the two.
-                self.walked(ui, read, &read.route, Rows::Pointed);
+                self.route_rows(ui, read, &read.route, Rows::Pointed);
             }
-            // Lists the ways on from the world it leaves.
+            // Lists the forward connections of the connection's source world.
             Highlight::Connection(at, far) => {
                 self.world_info(ui, data, at);
                 let step = world::step_between(&data.connections, at, far)
@@ -403,7 +394,7 @@ impl Panel {
                 self.forward_connections(ui, read, at);
                 ui.separator();
                 ui.horizontal(|ui| {
-                    ui.label(world::arrow(step));
+                    ui.label(world::direction_icon(step));
                     if ui
                         .link(data.titles[far].show())
                         .on_hover_text(t!("trace-route"))
@@ -412,7 +403,7 @@ impl Panel {
                         self.chosen = Some(far);
                     }
                 });
-                ui.label(walk_of(step));
+                ui.label(passage_sentence(step));
             }
             Highlight::Descendants(world) => {
                 self.world_info(ui, data, world);
@@ -497,14 +488,13 @@ impl Panel {
     }
 }
 
-/// What a connection can be walked, in a sentence. The two directions are named apart, a connection
-/// being free one way and locked the other.
-fn walk_of(step: &world::Step) -> String {
-    let said = |conditions: &world::Conditions| match world::sentences(conditions) {
-        said if said.is_empty() => t!("walk-freely"),
+/// How a connection can be passed, in a sentence naming each direction, since the two can differ.
+fn passage_sentence(step: &world::Step) -> String {
+    let said = |conditions: &world::Conditions| match world::conditions_display(conditions) {
+        said if said.is_empty() => t!("passage-freely"),
         said => said,
     };
-    match (step.out.as_ref(), step.back.as_ref()) {
+    match (step.outgoing.as_ref(), step.incoming.as_ref()) {
         (
             Some(Conditions {
                 gate: Gate::Free, ..
@@ -512,21 +502,21 @@ fn walk_of(step: &world::Step) -> String {
             Some(Conditions {
                 gate: Gate::Free, ..
             }),
-        ) => t!("walk-free-both"),
+        ) => t!("passage-free-both"),
         (
             Some(Conditions {
                 gate: Gate::DeadEnd,
                 ..
             }),
             _,
-        ) => t!("walk-dead-end"),
+        ) => t!("passage-dead-end"),
         (
             Some(Conditions {
                 gate: Gate::Isolated,
                 ..
             }),
             _,
-        ) => t!("walk-isolated"),
+        ) => t!("passage-isolated"),
         (
             Some(Conditions {
                 gate: Gate::Locked, ..
@@ -535,7 +525,7 @@ fn walk_of(step: &world::Step) -> String {
                 gate: Gate::Free, ..
             })
             | None,
-        ) => t!("walk-locked-out"),
+        ) => t!("passage-locked-out"),
         (
             Some(Conditions {
                 gate: Gate::Free, ..
@@ -544,22 +534,22 @@ fn walk_of(step: &world::Step) -> String {
             Some(Conditions {
                 gate: Gate::Locked, ..
             }),
-        ) => t!("walk-locked-back"),
-        (Some(out), Some(back)) => t!("walk-both", out = said(out), back = said(back)),
+        ) => t!("passage-locked-back"),
+        (Some(out), Some(back)) => t!("passage-both", out = said(out), back = said(back)),
         (
             Some(Conditions {
                 gate: Gate::Free, ..
             }),
             None,
-        ) => t!("walk-one-way"),
-        (Some(out), None) => t!("walk-out-only", out = said(out)),
+        ) => t!("passage-one-way"),
+        (Some(out), None) => t!("passage-out-only", out = said(out)),
         (
             None,
             Some(Conditions {
                 gate: Gate::Free, ..
             }),
-        ) => t!("walk-no-entry"),
-        (None, Some(back)) => t!("walk-back-only", back = said(back)),
-        (None, None) => t!("walk-none"),
+        ) => t!("passage-no-entry"),
+        (None, Some(back)) => t!("passage-back-only", back = said(back)),
+        (None, None) => t!("passage-none"),
     }
 }

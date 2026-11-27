@@ -1,5 +1,5 @@
 //! Where a world, an author or a release is written up, on either wiki. The dump carries no page
-//! addresses, so every one of these is built from a name the way the wiki that holds it would.
+//! addresses, so each is built from a name by the hosting wiki's rules.
 
 use super::*;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
@@ -55,17 +55,15 @@ pub(crate) fn query_encoded(value: &str) -> String {
     utf8_percent_encode(value, QUERY_ESCAPED).to_string()
 }
 
-/// The dump carries no page address, only image ones, so this is built from the title the way the
-/// wiki builds it.
+/// A world's yume.wiki page, built from the title as the wiki builds page names.
 pub fn wiki_url(title: &str) -> String {
     format!("https://yume.wiki/2kki/{}", page_encoded(title))
 }
 
-/// A different wiki with pages of its own rather than a translation of the English one.
+/// The Japanese wiki, written independently of the English one.
 const YUME2KKI_T: &str = "https://wikiwiki.jp/yume2kki-t/";
 
-/// YNOproject's list of what that wiki calls each place, which is what the game's own client
-/// addresses it by.
+/// YNOproject's list of the Japanese wiki's page name per place, as the game's client links them.
 const YNOLOCATIONS: &str =
     "https://raw.githubusercontent.com/ynoproject/ynolocations/refs/heads/master/2kki/ja.json";
 
@@ -76,10 +74,8 @@ type Pages = std::collections::HashMap<String, String>;
 /// Empty until [`load_pages`] has answered.
 static PAGES: std::sync::OnceLock<Pages> = std::sync::OnceLock::new();
 
-/// Started beside the dump rather than on the first Japanese link: a window opened after the click
-/// has passed is a popup the browser blocks. A link clicked in the first moment of a run is
-/// addressed without the list, which is right for all but the few dozen worlds in it -- hence also
-/// the warning on failure.
+/// Fetched with the dump: a window opened after an awaited fetch is a popup the browser blocks.
+/// Until the list arrives, links use the bare title, wrong only for the few dozen listed worlds.
 pub async fn load_pages() {
     let pages = match fetch::client().get(YNOLOCATIONS).fetch_text().await {
         Ok(json) => parse_pages(&json),
@@ -95,9 +91,7 @@ pub async fn load_pages() {
     let _ = PAGES.set(pages);
 }
 
-/// The list names places by map rather than by world, nested several ways -- one place, several,
-/// or a different one per map it leads on from. None of that matters, so it is walked rather than
-/// modelled.
+/// The list nests places by map in several shapes, which the parser traverses without modelling.
 pub(super) fn parse_pages(json: &str) -> Pages {
     let mut pages = Pages::new();
     let Ok(list) = serde_json::from_str::<serde_json::Value>(json) else {
@@ -138,8 +132,8 @@ fn collect_url_titles(value: &serde_json::Value, pages: &mut Pages) {
     }
 }
 
-/// The page an unlisted name is written up on: a world names one of its areas after itself and the
-/// area, and only the world has a page. The colon is where the wiki's own `Locationbox` cuts.
+/// The page an unlisted name is written up on: an area is named `World: Area`, and only the
+/// world has a page. The colon is where the wiki's own `Locationbox` cuts.
 fn area_page(title: &str) -> &str {
     title.split([':', '：']).next().unwrap_or(title)
 }
@@ -169,8 +163,7 @@ pub fn author_url(author: &str) -> String {
     format!("https://yume.wiki/Category:{}", page_encoded(author))
 }
 
-/// The Japanese wiki tags a world's page with its author's name rather than giving each author a
-/// page, so what there is to open is the search for the tag.
+/// The search for an author's tag; the Japanese wiki tags world pages by author.
 pub fn yume2kki_t_author_url(author: &str) -> String {
     // A query, so a space stays a space rather than a page name's underscore.
     format!(
@@ -179,7 +172,7 @@ pub fn yume2kki_t_author_url(author: &str) -> String {
     )
 }
 
-/// A release name as both wikis break it down: `0.129c patch 27` is release 129, revision `c`,
+/// A release name broken down as both wikis do: `0.129c patch 27` is release 129, revision `c`,
 /// patch 27. `None` for the handful of names from the game's first years written some other way.
 struct ReleaseName {
     number: u32,
@@ -211,13 +204,13 @@ fn read_release(name: &str) -> Option<ReleaseName> {
 
 const VERSION_HISTORY: &str = "https://yume.wiki/2kki/Version_History";
 
-/// The English wiki files five releases to a page, named for the range it holds and counting down.
-/// Its patches share their release's section, so a patch opens where it was applied.
+/// The English wiki files five releases to a page, named for the page's range and counting down.
+/// A patch shares the section of the release the patch applies to.
 pub fn version_url(name: &str) -> String {
     let Some(release) = read_release(name) else {
         return VERSION_HISTORY.to_owned();
     };
-    // The first ninety releases share two pages, and the regular run starts with a page of six.
+    // The exceptions to five a page: 0–89, 90–99 and 100–105 get a page each.
     let (high, low) = match release.number {
         0..=89 => (89, 0),
         90..=99 => (99, 90),
@@ -240,9 +233,8 @@ pub fn version_url(name: &str) -> String {
 /// The Japanese wiki's own history page, which is the ten most recent releases and nothing else.
 const UPDATE_HISTORY: &str = "ゆめ２っき更新履歴";
 
-/// Where each of that wiki's past-updates pages starts, highest first, by the code its anchors are
-/// numbered with. A page is cut when it grows too long rather than at a round release, so there is
-/// nothing to compute these from.
+/// Where each of the Japanese wiki's past-updates pages starts, highest first, by anchor code.
+/// The wiki splits a page once the page grows too long, so the starts cannot be computed.
 const PAST_UPDATES: [(u32, &str); 12] = [
     (1294, "11"),
     (1280, "10"),
@@ -258,9 +250,8 @@ const PAST_UPDATES: [(u32, &str); 12] = [
     (0, "00"),
 ];
 
-/// The Japanese wiki anchors a release by number and revision run together -- `0.129d` is `ver1294`
-/// -- and gives most patches an anchor of their own. A patch it does not name lands at the top of
-/// the right page.
+/// The Japanese wiki anchors a release by number and revision joined, `0.129d` as `ver1294`, and
+/// most patches too; an unanchored patch lands at the top of the right page.
 pub fn yume2kki_t_version_url(name: &str) -> String {
     let Some(release) = read_release(name) else {
         return format!("{YUME2KKI_T}{}", page_encoded(UPDATE_HISTORY));

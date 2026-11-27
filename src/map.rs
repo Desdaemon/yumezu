@@ -1,13 +1,10 @@
-//! The wiki's floor plans for a world -- see [`super::world::World::maps`].
-//!
-//! Read next to the graph rather than in place of it, so they get a window that can be moved and
-//! resized and stays open across selections. Some run to a few thousand pixels of corridors, hence
-//! [`egui::Scene`]. Worlds whose floors the wiki drew separately get a tab per map.
+//! The wiki's floor plans for a world, in a movable window with a tab per map and
+//! [`egui::Scene`] to pan large ones.
 
 use egui_material_icons::icons::{ICON_CLOSE_FULLSCREEN, ICON_FIT_SCREEN, ICON_OPEN_IN_FULL};
 use three_d::renderer::CpuTexture;
 
-use super::{detail, fetch, i18n::t, thumbnails, world};
+use super::{fetch, i18n::t, lod, thumbnails, world};
 
 // Fixed: egui keys window position by id, so a title-derived id would recentre per world.
 const ID: &str = "world map";
@@ -22,40 +19,37 @@ pub(super) struct Maps {
     sizing: Sizing,
 }
 
-/// egui keeps a window's position and size under its id and nowhere else, so maximizing overwrites
-/// the only record of where it was.
+/// egui stores a window's rect only under the window's id, so maximizing overwrites the old rect.
 #[derive(Clone, Copy)]
 enum Sizing {
     /// Moved and resized by hand, which is where the window opens.
     Free,
     Full(egui::Rect),
-    /// The one frame it takes to put the window back: egui's memory of it is the maximized rect by
-    /// now, so the old one is forced on it once.
+    /// One frame forcing the old rect back over the maximized rect in egui's memory.
     Restoring(egui::Rect),
 }
 
 struct Open {
     world: usize,
-    /// The window's title. A map's caption names its tab instead.
+    /// The window's title. Tabs show map captions instead.
     title: String,
     sheets: Vec<Sheet>,
-    /// Always a sheet that exists: only the tabs move it.
+    /// Always a valid map index: only the tabs change the index.
     at: usize,
 }
 
 struct Sheet {
     label: String,
     picture: Picture,
-    /// In the picture's own pixels, per map, so stepping through the tabs and back leaves each one
-    /// where it was left. Empty until the picture resolves, which [`egui::Scene`] reads as "no view
-    /// yet".
+    /// The view in picture pixels, per map, so switching tabs keeps each view. Empty until the
+    /// picture resolves, which [`egui::Scene`] reads as "no view yet".
     at: egui::Rect,
 }
 
 enum Picture {
     Loading(fetch::Pending<Option<CpuTexture>>),
     Ready(egui::TextureHandle),
-    /// Kept rather than dropped: a window left open would otherwise fetch again every frame.
+    /// Kept, so an open window does not refetch every frame.
     Missing,
 }
 
@@ -80,7 +74,7 @@ impl Maps {
                 .iter()
                 .map(|map| Sheet {
                     label: map.label.clone(),
-                    picture: Picture::Loading(detail::load(map.url.clone())),
+                    picture: Picture::Loading(lod::fetch_picture(map.url.clone())),
                     at: egui::Rect::ZERO,
                 })
                 .collect(),
@@ -88,8 +82,7 @@ impl Maps {
         });
     }
 
-    /// `insets` is what the system's own furniture covers, which matters only to the maximized
-    /// window -- the one size this picks rather than the reader.
+    /// `insets` is the area the system bars cover, which only the maximized window avoids.
     pub(super) fn show(&mut self, ctx: &egui::Context, insets: super::ui::Insets) {
         let Some(open) = &mut self.open else {
             return;
@@ -136,7 +129,7 @@ impl Sizing {
 }
 
 impl Open {
-    /// Returns whether the window was told to go to or come out of the whole screen.
+    /// Returns whether maximizing was toggled.
     fn show(&mut self, ui: &mut egui::Ui, full: bool) -> bool {
         if self.sheets.is_empty() {
             ui.label(t!("map-none"));
@@ -204,7 +197,7 @@ impl Sheet {
                 let size = texture.size_vec2();
                 let scene = egui::Scene::new().zoom_range(ZOOM).max_inner_size(size);
                 let shown = scene.show(ui, &mut self.at, |ui| {
-                    // The scene's transform fits it; fitting here too would shrink it twice.
+                    // The scene's transform already fits the picture.
                     ui.add(egui::Image::new((texture.id(), size)).fit_to_original_size(1.0));
                 });
                 if refit || shown.response.double_clicked() {
@@ -215,8 +208,8 @@ impl Sheet {
     }
 }
 
-/// The view holding the whole picture, which [`egui::Scene`] letterboxes into however wide or tall
-/// the window happens to be. The picture is added at the origin, so this is where it lands.
+/// The view holding the whole picture at the origin, which [`egui::Scene`] letterboxes into the
+/// window.
 fn fits(texture: &egui::TextureHandle) -> egui::Rect {
     egui::Rect::from_min_size(egui::Pos2::ZERO, texture.size_vec2())
 }

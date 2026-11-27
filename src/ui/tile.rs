@@ -1,15 +1,10 @@
-//! The row every list in the panel is built out of, and the hold that stands in for a hover on a
-//! touch screen. See [`Tile`].
+//! The row every list in the panel is built out of, and the long press that stands in for a hover
+//! on a touch screen. See [`Tile`].
 
 use super::*;
 
-/// A row of a list, built the way a list tile is: something leading it, what it says, something
-/// trailing it, and all of it one press the width of the list.
-///
-/// [`egui::Ui::selectable_label`] is as wide as its own text and as tall as a line, so a thumb aims
-/// at a word and a reader cannot see how far a row reaches. Anything set beside it in an
-/// [`egui::Ui::horizontal`] is a widget of its own answering no press, so a row that reads as one
-/// thing behaves as three; here they are atoms of the row itself.
+/// A list tile: leading atoms, a title and trailing atoms, all one button the width of the list.
+/// The whole row answers a press, and a thumb can see how far the row reaches.
 pub(super) struct Tile<'a> {
     selected: bool,
     leading: egui::Atoms<'a>,
@@ -39,11 +34,8 @@ impl<'a> Tile<'a> {
         self
     }
 
-    /// What a pointer reads by hovering the row, and a finger by holding it.
-    ///
-    /// Not [`egui::Response::on_hover_text`] on the row after the fact, which draws the text where
-    /// the hand is. Here it is put on the far side of the row and stood off far enough to be read
-    /// past a fingertip. See [`HOVER_FINGER_GAP`].
+    /// The text a pointer reads by hovering the row, and a finger by holding the row.
+    /// On a touch screen, drawn [`HOVER_FINGER_GAP`] clear of the fingertip.
     pub(super) fn hover(mut self, text: impl Into<egui::WidgetText>) -> Self {
         self.hover = Some(text.into());
         self
@@ -80,7 +72,7 @@ impl egui::Widget for Tile<'_> {
         if !touch {
             return row.on_hover_text(hover);
         }
-        // A click ends its own peek; only a hold past a click keeps the text.
+        // A click releases the hover text; only a press held past a click keeps the text.
         if row.clicked() {
             release_hover(ui.ctx());
             return row;
@@ -124,11 +116,8 @@ impl egui::Widget for Tile<'_> {
     }
 }
 
-/// Whether the finger on this row has been there long enough, and stayed near enough to where it
-/// landed, to be reading what the row is rather than pressing it.
-///
-/// Timed here rather than left to [`egui::Tooltip::should_show_tooltip`], which restarts its wait
-/// on every movement and by default refuses unless the pointer is still. A hand never is.
+/// Whether the finger has rested long enough, near where the press landed, to be reading the row.
+/// [`egui::Tooltip::should_show_tooltip`] restarts on any movement, and a finger never keeps still.
 fn held_long_enough(row: &egui::Response) -> bool {
     row.ctx.input(|input| {
         let pointer = &input.pointer;
@@ -143,18 +132,13 @@ fn held_long_enough(row: &egui::Response) -> bool {
     })
 }
 
-/// The row whose hover text a finger called up, where that row was, and where along it the finger
-/// landed.
-///
-/// egui closes a tooltip as soon as the pointer leaves, which on a touch screen is the instant the
-/// finger lifts. Held here across frames instead and let go by [`release_held_hover`]. The rect
-/// tells a press meant for the text from any other, and `at` keeps the text where the finger was.
+/// The row whose hover text a finger called up, with the row's rect and the press position.
+/// Kept across frames until [`release_held_hover`]: egui closes a tooltip as the finger lifts.
 #[derive(Clone, Copy)]
 struct HeldHover {
     tile: egui::Id,
     row: egui::Rect,
-    /// Where the finger came down, across the row. Taken once, from where the press started: read
-    /// afresh every frame it would shiver along with the hand.
+    /// Where the finger came down across the row, fixed at the press origin to keep the text still.
     at: f32,
 }
 
@@ -170,11 +154,8 @@ fn release_hover(ctx: &egui::Context) {
     ctx.data_mut(|data| data.remove::<HeldHover>(egui::Id::new(HELD_HOVER_ID)));
 }
 
-/// Let a held hover go on the first press that lands off its row.
-///
-/// Once per frame and before anything is drawn, rather than from the row holding it: the press
-/// that starts a hold on another row is one of the presses this drops, and a tooltip still
-/// claiming the layer would keep that row's own from opening.
+/// Releases a held hover on the first press that lands off the held row.
+/// Called once per frame before drawing, so a hold on another row finds the tooltip layer free.
 pub(super) fn release_held_hover(ctx: &egui::Context) {
     let Some(held) = held_hover(ctx) else { return };
     let pressed = ctx.input(|input| {

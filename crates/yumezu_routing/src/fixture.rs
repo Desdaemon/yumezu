@@ -1,12 +1,5 @@
-//! An invented world tree for the tests of both programs that read a dump.
-//!
-//! The wiki's own `data.json` is the wiki's to distribute and is not in the tree. This is here
-//! rather than in either program because the two hold their worlds in different types and need the
-//! same graph under them: each maps this into its own.
-//!
-//! Each of these is load-bearing for a test, so an edit here costs one there: a free route and a
-//! shorter conditional one to the same world, a world reachable only through a condition naming
-//! itself, a connection only one side lists, and a world the hub does not touch.
+//! An invented world tree for both programs' tests; the wiki's `data.json` is not ours to ship.
+//! Every feature in the table is load-bearing for a test.
 //!
 //! ```text
 //!     0  Urotsuki's Room      -> 1, 2, 3, and 12 behind a condition
@@ -17,7 +10,7 @@
 //!     5  Sunken Orchard       -> 7
 //!     6  Static Shoreline     -> 7 behind a condition
 //!     7  Marzipan Road        -> 8, and 9 as a dead end
-//!     8  Clockwork Dunes      -> 10 unlocking its far side, 14 behind a condition
+//!     8  Clockwork Dunes      -> 10 unlocking the far side, 14 behind a condition
 //!     9  Violet Aquifer       -> nothing
 //!     10 Chalk Observatory    -> 8 locked, 11 one way
 //!     11 Hollow Carnival      -> 12, 14
@@ -29,7 +22,7 @@
 
 use crate::{ConnType, Connection, TypeParams, World};
 
-/// A world of the tree: the wiki's English title, and what it lists as its own connections.
+/// A world of the tree: the wiki's English title, and the connections the world lists.
 pub struct Place {
     pub title: &'static str,
     pub connections: Vec<Connection>,
@@ -135,7 +128,7 @@ pub fn dream_tree() -> Vec<Place> {
             ],
         ),
         ("Hollow Carnival", vec![free(12), free(14)]),
-        // Only a player already in Ember Terrace can meet it: `Gate::Revisit`.
+        // Met only by a player already in Ember Terrace: `Gate::Revisit`.
         (
             "Glass Aviary",
             vec![cond(13, "having been to Ember Terrace")],

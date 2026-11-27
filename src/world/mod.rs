@@ -1,12 +1,5 @@
-//! The Yume 2kki world graph, as published by yume.wiki and served to this app as `data.json` by
-//! `dreamweaver`. See [`load`].
-//!
-//! The dump carries far more per world than a layout needs, so only the fields the visualization
-//! draws are deserialized.
-//!
-//! The dump itself is here. What the app makes of it is beside it: [`mod@conditions`] reads a
-//! connection's conditions out, [`links`] addresses the wiki pages, and [`net`] fetches from the
-//! server.
+//! The Yume 2kki world graph from `dreamweaver`'s `data.json`; only the drawn fields are
+//! deserialized. See [`load`].
 
 mod conditions;
 mod links;
@@ -19,9 +12,9 @@ pub use links::*;
 pub use net::*;
 
 use serde::Deserialize;
-use yumezu_routing::walkable_steps;
+use yumezu_routing::directed_steps;
 pub use yumezu_routing::{
-    Conditions, Connection, Demand, Gate, Routes, Step, Way, connections, hub_world, origin_world,
+    Conditions, Connection, Demand, Gate, Routes, Step, Way, connections, hub_world, origin,
     routes_from, step_between, step_conditions, ways,
 };
 
@@ -33,8 +26,7 @@ use super::prelude::*;
 pub struct Dump {
     #[serde(rename = "worldData")]
     pub worlds: Vec<World>,
-    /// Newest first. Most added no world at all, so the catalog is built out of
-    /// [`Dump::versions`] rather than this directly.
+    /// Newest first. Most added no world, so the catalog lists [`Dump::versions`] instead.
     #[serde(rename = "versionInfoData")]
     releases: Vec<Release>,
     /// Read only for the Japanese names: who made what is settled by the worlds themselves, in
@@ -44,8 +36,7 @@ pub struct Dump {
     /// When the dump was built, ISO 8601.
     #[serde(rename = "lastUpdate", default)]
     pub last_update: Option<String>,
-    /// When the wiki was last read whole rather than only where it had changed: a dump can be
-    /// fresh and still be missing an edit an incremental read did not cover.
+    /// When the wiki was last read in full: an incremental read can miss an edit.
     #[serde(rename = "lastFullUpdate", default)]
     pub last_full_update: Option<String>,
 }
@@ -59,15 +50,14 @@ struct Credit {
 
 #[derive(Clone, Deserialize)]
 pub struct World {
-    /// As the wiki's English pages name it, which is also what its page is at. See [`wiki_url`].
+    /// The English wiki's name for the world, which is also the page name. See [`wiki_url`].
     pub title: String,
-    /// As the game itself names it, which the dump publishes for all but a few dozen worlds.
+    /// The game's own name for the world, published for all but a few dozen worlds.
     #[serde(rename = "titleJP")]
     title_jp: Option<String>,
     pub author: String,
-    /// Where the wiki serves this world's picture from, at the size the wiki holds it. Packed into
-    /// the atlas by `dreamweaver`, and fetched again once the view outruns the atlas. See
-    /// `detail`.
+    /// The wiki's URL for this world's full-size picture, packed into the atlas by `dreamweaver`
+    /// and fetched by `lod` as the high LoD once the view outgrows the atlas.
     #[serde(rename = "filename")]
     pub image: String,
     /// `None` for the few worlds the wiki does not date. See [`Dump::versions`].
@@ -79,30 +69,21 @@ pub struct World {
     map_url: Option<String>,
     #[serde(rename = "mapLabel")]
     map_label: Option<String>,
-    /// Whether the dump says a reader is not meant to be shown this world. Read only by [`hide`],
-    /// which takes those worlds out before anything else sees the dump.
+    /// Whether the dump hides this world from the user. Read only by [`hide`], which drops such
+    /// worlds on load.
     #[serde(default)]
     secret: bool,
     pub connections: Vec<Connection>,
-    /// Its cell in the thumbnail atlas, as the server hands it out: once, and never moved, so an
-    /// atlas packed before this world existed is still right about the worlds it holds. Read
-    /// through [`World::cell`].
-    ///
-    /// `None` from a server old enough not to publish one, which costs that run its thumbnails
-    /// rather than giving every world somebody else's.
+    /// This world's cell in the thumbnail atlas, assigned once and never moved, so an older atlas
+    /// stays right. Read through [`World::cell`]; `None` from a server too old to publish cells.
     #[serde(default)]
     cell: Option<usize>,
-    /// Whether the player has never stood here, in a run showing only where they have been. Drawn
-    /// because it touches one they have, so it wears the placeholder and has no page to open. See
-    /// [`Dump::showing`].
+    /// Unvisited, in a view of visited worlds: drawn as a neighbour of one, with the placeholder
+    /// and no page to open. See [`Dump::showing`].
     #[serde(skip)]
-    unknown: bool,
+    concealed: bool,
 }
 
-/// What a world the player has not been to is called instead of its name.
-///
-/// Held rather than built where it is read, because [`Title::show`] hands out a borrow that a
-/// message built on the spot would not outlive. One slot per language.
 /// The entries `needle` matches, best first, or every entry where nothing is typed: a prefix beats
 /// a substring and an exact name beats both.
 pub fn ranked_matches<'a>(
@@ -126,6 +107,8 @@ pub fn ranked_matches<'a>(
     hits.into_iter().map(|(_, _, entry)| entry).collect()
 }
 
+/// The name shown for an unvisited world, one slot per language. Stored, since [`Title::show`]
+/// returns a borrow that a message built on the spot would not outlive.
 fn unvisited() -> &'static str {
     static ENGLISH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     static JAPANESE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -136,22 +119,22 @@ fn unvisited() -> &'static str {
     held.get_or_init(|| t!("unvisited-location"))
 }
 
-/// Both names are kept rather than the one on screen: the wiki's own pages are named in English
-/// whatever the language, and a reader may know a world by either.
+/// Both names are kept: the wiki's pages are named in English whatever the language, and the
+/// user may know a world by either.
 pub struct Title {
     /// Always there, and always what [`wiki_url`] is given.
     pub en: String,
     jp: Option<String>,
-    /// Whether the names are held back, for a world the player has not been to. Both are still
+    /// Whether the names are held back, for an unvisited world. Both are still
     /// carried, and neither is shown, searched, or opened.
-    unknown: bool,
+    concealed: bool,
 }
 
 impl Title {
     /// Read rather than stored, so choosing a language renames every world on screen without
     /// anything being rebuilt.
     pub fn show(&self) -> &str {
-        if self.unknown {
+        if self.concealed {
             return unvisited();
         }
         match &self.jp {
@@ -161,12 +144,12 @@ impl Title {
     }
 
     /// Whether this world may be named, searched for, and looked up.
-    pub fn known(&self) -> bool {
-        !self.unknown
+    pub fn is_searchable(&self) -> bool {
+        !self.concealed
     }
 
-    /// The two wikis name their pages after their own name for a world, so a name is only ever
-    /// looked up on the wiki that wrote it.
+    /// Each wiki names a page by that wiki's own name for the world, so each name opens on the
+    /// wiki that wrote the name.
     pub fn wiki_url(&self) -> String {
         match &self.jp {
             Some(jp) if i18n::speaking_japanese() => yume2kki_t_url(jp),
@@ -176,7 +159,7 @@ impl Title {
 
     /// English first. What a search reads, whichever is shown.
     pub fn names(&self) -> impl Iterator<Item = &str> {
-        let named = !self.unknown;
+        let named = !self.concealed;
         [
             named.then_some(self.en.as_str()),
             self.jp.as_deref().filter(|_| named),
@@ -188,7 +171,7 @@ impl Title {
 
 pub struct Map {
     /// The wiki's own caption, a sentence ("Map of Blood World") rather than a name. On a world
-    /// with several maps it is the only thing saying which part each covers.
+    /// with several maps, the caption alone says which part each covers.
     pub label: String,
     pub url: String,
 }
@@ -208,18 +191,18 @@ impl World {
         Title {
             en: self.title.clone(),
             jp: self.title_jp.clone(),
-            unknown: self.unknown,
+            concealed: self.concealed,
         }
     }
 
-    /// `None` for a world the player has not been to, which wears the atlas's placeholder, and for
-    /// one the dump gives no cell.
+    /// `None` for an unvisited world, drawn as the atlas's placeholder, and for a world without a
+    /// cell.
     pub fn cell(&self) -> Option<usize> {
-        self.cell.filter(|_| !self.unknown)
+        self.cell.filter(|_| !self.concealed)
     }
 
-    /// In the order the wiki lists them, and empty for the few hundred worlds it has drawn none of.
-    /// The two lists are zipped rather than trusted to be in step: an uncaptioned map would panic.
+    /// In the wiki's order; empty for the few hundred worlds the wiki has no map of.
+    /// The two lists are zipped, so an uncaptioned map cannot panic.
     pub fn maps(&self) -> Vec<Map> {
         let (Some(urls), Some(labels)) = (&self.map_url, &self.map_label) else {
             return Vec::new();
@@ -238,24 +221,24 @@ impl World {
 #[derive(Clone, Deserialize)]
 struct Release {
     name: String,
-    /// ISO 8601, of which only the day is ever shown. `None` where the wiki does not date it.
+    /// ISO 8601, of which only the day is ever shown. `None` for an undated release.
     #[serde(rename = "releaseDate")]
     date: Option<String>,
 }
 
 /// A release that added at least one world: what the catalog lists.
 pub struct Version {
-    /// As the version history names it, or as the worlds do for a release it has no entry for.
+    /// The version history's name, or the worlds' name for a release missing from the history.
     pub name: String,
-    /// `YYYY-MM-DD`, empty where the dump does not date it.
+    /// `YYYY-MM-DD`, empty for an undated release.
     pub released: String,
     /// In world order.
     pub worlds: Vec<usize>,
 }
 
 impl Version {
-    /// Where the release is written up, which is a section of a page on either wiki rather than a
-    /// page of its own. See [`version_url`] and [`yume2kki_t_version_url`].
+    /// The section of a wiki page where the release is written up. See [`version_url`] and
+    /// [`yume2kki_t_version_url`].
     pub fn wiki_url(&self) -> String {
         if i18n::speaking_japanese() {
             yume2kki_t_version_url(&self.name)
@@ -265,10 +248,9 @@ impl Version {
     }
 }
 
-/// Both wikis list one person's whole body of work but in different shapes, so which to open is
-/// [`Author::wiki_url`]'s to answer rather than the caller's.
+/// The two wikis list an author's work in different shapes; [`Author::wiki_url`] picks the page.
 pub struct Author {
-    /// The English one addresses their page; either one finds them.
+    /// The English name addresses the author's page; either name finds the author.
     pub name: Title,
     /// In world order.
     pub worlds: Vec<usize>,
@@ -306,8 +288,7 @@ impl Code {
         }
     }
 
-    /// Whatever was half typed, dropped: the keys have gone to a box on the panel, where they are
-    /// somebody's search rather than this.
+    /// Drops a half-typed code once the keys go to a text box on the panel.
     pub fn forget(&mut self) {
         self.at = 0;
     }
@@ -318,9 +299,7 @@ impl Code {
 }
 
 /// Drops the worlds the dump marks secret, and renumbers what is left.
-///
-/// A connection names the world it leads to by index, so taking one out moves every index above it.
-/// Done where the dump becomes the app's, so nothing downstream sees those worlds.
+/// Runs on load, so nothing downstream sees those worlds.
 fn hide(worlds: &mut Vec<World>, revealed: bool) {
     if revealed {
         return;
@@ -335,10 +314,7 @@ fn hide(worlds: &mut Vec<World>, revealed: bool) {
 }
 
 /// Keeps the worlds `keep` says yes to, renumbers what is left, and drops every connection to a
-/// world that has gone.
-///
-/// The one place a world leaves the graph, so the renumbering is written once however many reasons
-/// there are to drop one.
+/// world that has gone. The one place a world leaves the graph.
 fn retain(worlds: &mut Vec<World>, keep: &[bool]) {
     let mut kept = 0;
     let at: Vec<Option<usize>> = keep
@@ -377,8 +353,8 @@ fn same_release(name: &str) -> String {
 }
 
 impl Dump {
-    /// The dump is the yardstick rather than YNOproject's own catalog, which records rooms the wiki
-    /// keeps no world for, so the count comes out under what YNOproject would say.
+    /// Counted against the dump, so the count runs below YNOproject's, which includes rooms the
+    /// wiki has no world for.
     pub fn visited(&self, visited: &std::collections::HashSet<String>) -> usize {
         self.worlds
             .iter()
@@ -386,17 +362,8 @@ impl Dump {
             .count()
     }
 
-    /// The same dump cut back to the worlds a player has stood in and the ones a step beyond.
-    ///
-    /// `visited` is titles as the wiki writes them, which is how YNOproject names the places it
-    /// records a player having been; the name is the only thing the two lists share.
-    ///
-    /// The worlds a step beyond are the steps the player could take, so a connection that cannot be
-    /// walked that way leads nowhere. Kept as places rather than worlds, so the graph says there is
-    /// something there without saying what. See [`World::unknown`].
-    ///
-    /// A whole dump rather than a mask, taking a world out renumbering every connection above it --
-    /// the reason [`hide`] rebuilds rather than skips. One copy per press of the button.
+    /// The dump cut back to the visited worlds and, unnamed, those one step onward: see
+    /// [`World::concealed`]. `visited` holds wiki titles, the only names shared with YNOproject.
     pub fn showing(&self, visited: &std::collections::HashSet<String>) -> Dump {
         let been: Vec<bool> = self
             .worlds
@@ -404,7 +371,7 @@ impl Dump {
             .map(|world| visited.contains(&world.title))
             .collect();
         let mut shown = been.clone();
-        for (from, onward) in walkable_steps(&self.worlds).into_iter().enumerate() {
+        for (from, onward) in directed_steps(&self.worlds).into_iter().enumerate() {
             if !been[from] {
                 continue;
             }
@@ -428,8 +395,8 @@ impl Dump {
             if been {
                 continue;
             }
-            world.unknown = true;
-            // The captions and the full picture would name the world.
+            world.concealed = true;
+            // The captions and the high-LoD picture would name the world.
             world.image = String::new();
             world.map_url = None;
             world.map_label = None;
@@ -444,10 +411,8 @@ impl Dump {
         }
     }
 
-    /// The releases that added worlds, newest first, each carrying what it added.
-    ///
-    /// Ordered by the version history, the only ordering the dump gives: version names do not sort.
-    /// The handful of releases the worlds name but the history does not know go last, undated.
+    /// The releases that added worlds, each with the worlds added, newest first by the version
+    /// history, as names do not sort. Releases missing from the history go last, undated.
     pub fn versions(&self) -> Vec<Version> {
         let rank: std::collections::HashMap<String, (usize, &Release)> = self
             .releases
@@ -495,10 +460,8 @@ impl Dump {
         versions
     }
 
-    /// Everyone credited, each carrying their worlds, and, per world, which of them made it.
-    ///
-    /// Busiest first, because only the first few are shown with nothing typed. Ties break by name,
-    /// so the order is fixed rather than however the worlds happened to be listed.
+    /// Every credited author with their worlds, and each world's author index.
+    /// Busiest first, as an empty search shows only the first few; ties break by name.
     pub fn authors(&self) -> (Vec<Author>, Vec<usize>) {
         // The dump repeats the English name for most people.
         let jp: std::collections::HashMap<&str, &str> = self
@@ -517,7 +480,7 @@ impl Dump {
                     name: Title {
                         en: by.author.clone(),
                         jp: jp.get(by.author.as_str()).map(|&name| name.to_owned()),
-                        unknown: false,
+                        concealed: false,
                     },
                     worlds: Vec::new(),
                 });
@@ -543,9 +506,9 @@ impl Dump {
     }
 }
 
-/// For the tests, which have only a dump in hand: a run walks the connections it already built for
-/// the lines it draws.
+/// For the tests, which have only a dump in hand: the app traverses the connections already built
+/// for drawing the lines.
 #[cfg(test)]
 pub fn canonical_routes(worlds: &[World]) -> Routes {
-    routes_from(&connections(worlds), origin_world(worlds))
+    routes_from(&connections(worlds), origin(worlds))
 }

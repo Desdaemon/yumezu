@@ -1,4 +1,4 @@
-//! What the force simulation is given, and the conversion between its units and the
+//! What the force simulation is given, and the conversion between simulation units and the
 //! rendering space. See [`Layout`] and [`Layout::parameters`].
 
 use super::*;
@@ -6,49 +6,35 @@ use super::*;
 /// Side of the cube, centred on the origin, that nodes are scattered over at the start of a
 /// layout, in simulation units.
 const SPAWN_EXTENT: f32 = 1000.0;
-/// World units per simulation unit: [`world_pos`] multiplies by it, [`sim_pos`] divides.
-///
-/// Simulation coordinates are pixel-sized, so a graph a thousand of them across has to stand in
-/// front of a camera that measures in tens.
-///
-/// "World" here is the rendering space, not one of the game's worlds -- which is what the name
-/// means everywhere else in this file.
+/// Rendering-space units per pixel-sized simulation unit; "world" in [`world_pos`] and
+/// [`sim_pos`] means this rendering space, not a game world.
 const SIM_TO_WORLD: f32 = 0.012;
 /// The smallest node the graph draws, and the radius every other size and mass is read against.
 pub(super) const NODE_LEAF_RADIUS: f32 = 1.1;
-/// The size of a world with [`NODE_HUB_DESCENDANTS`] worlds behind it, and with
-/// [`NODE_LEAF_RADIUS`] one of the two anchors a logarithmic curve is drawn through.
-///
-/// Not a cap: the curve passes through this anchor rather than stopping at it, so the origin, with
-/// the whole game behind it, is larger still.
+/// Radius of a world with [`NODE_HUB_DESCENDANTS`] descendants. With [`NODE_LEAF_RADIUS`], an
+/// anchor of the logarithmic size curve, which continues past this to larger hubs.
 pub(super) const NODE_HUB_RADIUS: f32 = 1.7;
-/// Mass of a world of [`NODE_LEAF_RADIUS`]. [`node_mass`] scales every bigger world up from it.
+/// Mass of a world of [`NODE_LEAF_RADIUS`]. [`node_mass`] scales larger worlds up from this.
 const NODE_BASE_MASS: f32 = 21.0;
-/// How much of a world's size settles how hard it pushes, until the panel's knob is dragged. At
-/// `0.0` every world pushes alike, at `1.0` the push follows the size.
+/// Default weight of size in repulsion: at `0.0` every world repels alike, at `1.0` by size.
 const HUB_REPULSION_DEFAULT: f32 = 0.83;
 
 const FORCE_CHARGE: f32 = 1800.0;
 const FORCE_CHARGE_2D: f32 = 10000.0;
 pub(super) const SETTLE_AFTER: f32 = 32.0;
 
-/// Where on the descendant counts [`NODE_HUB_RADIUS`] sits, and so how quickly the sizes climb.
-///
-/// The two radii are near each other on purpose: a wider range is more than the layout can hold
-/// without the hubs eating their neighbours.
+/// Descendant count at [`NODE_HUB_RADIUS`], which sets how quickly sizes grow. The two radii
+/// stay close: a wider range makes hubs overlap their neighbours.
 pub(super) const NODE_HUB_DESCENDANTS: f32 = 4.0;
-/// How much of a world's size goes into how far its connections may stretch, on top of the reach
-/// every connection has and of the hub push. See [`edge_reach`] and
-/// [`Arrangement::default_link_reach`].
-///
-/// A hub seats a crowd of connections where a leaf seats one or two, so one ceiling for both packs
-/// that crowd into the sphere a single connection gets.
-///
-/// Half of the size difference rather than all of it, the sizes spanning more than threefold: a
-/// ceiling following them the whole way would put the origin's children as far out as it is meant
-/// to stop them going. The hub push scales what is left, a fixed ceiling only being pressed into
-/// harder as that knob goes up.
+/// Share of a world's extra size, times the hub push, added to how far the world's connections
+/// may stretch: a hub's crowd of connections needs more room than a leaf's few. See [`edge_reach`].
 const HUB_REACH: f32 = 0.5;
+/// In the radial arrangements, the subtree size whose patch one connection length spans; a lead
+/// grows with the square root of the subtree, as a patch's width does. See [`edge_lead`].
+const PATCH_WORLDS_PER_LEAD: f32 = 16.0;
+/// How many times longer a one-way connection's lead is than a two-way one's inside a branch,
+/// so a chute still reads as a long line. See [`edge_lead`].
+const ONE_WAY_LEAD: f32 = 2.5;
 /// The 3D unit of length outside the tree, in simulation units: what a connection's lead and
 /// the push's reach are measured in. See [`SKY_SHELLS`].
 const DAG_LEVEL_DISTANCE: f32 = 4000.0;
@@ -58,32 +44,31 @@ const DAG_LEVEL_DISTANCE_2D: f32 = 6000.0;
 const TREE_LEVEL_DISTANCE: f32 = 1300.0;
 /// Distance between the [`Arrangement::FlatTree`]'s depth rows, in simulation units.
 const TREE_LEVEL_DISTANCE_2D: f32 = 1900.0;
-/// How far the sky every world but the Nexus sits on in the orbital arrangement is from the
-/// Nexus, in [`DAG_LEVEL_DISTANCE`]s. Sized so the worlds have about as much room each as in the busy rings.
+/// Distance from the Nexus to the orbital arrangement's sky, which holds every other world, in
+/// [`DAG_LEVEL_DISTANCE`]s: about as much room per world as in the busy rings.
 const SKY_SHELLS: f32 = 3.0;
-/// How many times farther each depth past the first is drawn than the one before it on the 3D
-/// sky, and so how much smaller it looks from the Nexus. See [`sky_distance`].
-const SKY_DISTANCE_STEP: f32 = 1.1;
+/// How many times farther than the sky the first depth is drawn on the 3D sky. See
+/// [`sky_distance`].
+const SKY_NEAREST_DISTANCE: f32 = 1.3;
+/// How much farther than the first each depth is drawn on the 3D sky, per e-fold of depth: the
+/// shallow depths, which hold most of the worlds, sit the farthest apart.
+const SKY_DEPTH_SPREAD: f32 = 0.5;
+/// How far past the first depth a line on the 3D sky dims to 1/e brightness, in skies.
+const SKY_LINE_FADE_LENGTH: f32 = 1.6;
 /// How many rings or shells out from the Nexus keep the whole spacing between them: the
 /// shared core, which holds most of the worlds and most of the connections between branches.
 const CORE_SHELLS: f32 = 4.0;
 /// The gap between shells past [`CORE_SHELLS`], as a fraction of the spacing. The
 /// deep worlds are few and mostly in chains, which need less room.
 const OUTER_SHELL_GAP: f32 = 0.5;
-/// How far a world may sit from its shell per microstep of slack, in simulation units.
-///
-/// Two worlds across: a step of one leaves the worlds it separates touching. Read off the node
-/// sizes rather than written as a number, which those have outgrown more than once.
+/// How far a world may sit from the shell per microstep of slack, in simulation units: the width
+/// of two leaf worlds, so one step leaves the separated worlds touching.
 const DAG_LEVEL_MICROSTEP: f32 = 4.0 * NODE_LEAF_RADIUS / SIM_TO_WORLD;
-/// How many [`DAG_LEVEL_MICROSTEP`]s of slack a flat layer has -- a count, not a distance.
-///
-/// A layer in two dimensions is a line, with nowhere for the overflow but on top of itself. The
-/// band has to stay well under [`DAG_LEVEL_DISTANCE_2D`] or the layers meet.
+/// How many [`DAG_LEVEL_MICROSTEP`]s of slack a flat layer has, to spread a crowded line; the
+/// band must stay well under [`DAG_LEVEL_DISTANCE_2D`] so the layers stay apart.
 const DAG_LEVEL_SLACK_MICROSTEPS_2D: f32 = 3.0;
-/// How far a world's push reaches when radial, as a multiple of the shell spacing.
-///
-/// Short, so a connection with lead left is not pushed taut: the branch patches spread the worlds,
-/// and the push only keeps neighbours apart.
+/// How far a world's push reaches when radial, as a multiple of the shell spacing. Short: the
+/// branch patches spread the worlds, and the push only keeps neighbours apart.
 const REPULSION_RANGE_SHELLS: f32 = 0.25;
 const ARRANGEMENT: &str = "arrangement";
 /// Read only, for a store written before [`ARRANGEMENT`].
@@ -91,17 +76,15 @@ const DIMENSIONS: &str = "dimensions";
 /// Read only, for a store written before [`ARRANGEMENT`].
 const LAYERED: &str = "layered";
 const HUB_REPULSION: &str = "hub-push";
-/// Followed by the arrangement's name: each keeps its own.
+const PULL_ACROSS_BRANCHES: &str = "pull-across-branches";
+/// Key prefix, followed by the arrangement's name: one link reach per arrangement.
 const LINK_REACH: &str = "link-reach-";
 
-/// How far the hub push can be taken either way. Its middle is [`HUB_REPULSION_DEFAULT`].
-pub(super) const HUB_REPULSION_RANGE: std::ops::RangeInclusive<f32> = 0.5..=1.5;
+/// How far the hub push can be taken either way from [`HUB_REPULSION_DEFAULT`].
+pub(super) const HUB_REPULSION_RANGE: std::ops::RangeInclusive<f32> = 0.5..=20.0;
 
-/// How far the link reach can be taken either way, in layers. See
-/// [`Arrangement::default_link_reach`].
-///
-/// The low end is under one layer, which pulls a connected pair into one clump; the high end is
-/// past the radius the busiest layer spreads to, which is no ceiling at all.
+/// Bounds of the link reach, in layers: from a pull that clumps connected pairs to past the
+/// busiest layer's radius, which is no limit. See [`Arrangement::default_link_reach`].
 pub(super) const LINK_REACH_RANGE: std::ops::RangeInclusive<f32> = 0.5..=6.0;
 /// The simulation parameters a [`Layout`] decides.
 pub(super) struct Solve {
@@ -126,7 +109,7 @@ pub(super) enum Arrangement {
     Free,
     /// In space, on planes across y by depth from the game's start, held by the forces alone.
     Tree,
-    /// On one sky around the Nexus, each drawn farther out the deeper it is. See [`sky_distance`].
+    /// On one sky around the Nexus, deeper worlds drawn farther out. See [`sky_distance`].
     Orbital,
 }
 
@@ -141,7 +124,7 @@ impl Arrangement {
         }
     }
 
-    /// Whether each world is held to a layer set by its depth.
+    /// Whether each world is held to a layer set by depth.
     pub(super) fn layered(self) -> bool {
         match self {
             Self::Flat | Self::Free => false,
@@ -149,8 +132,8 @@ impl Arrangement {
         }
     }
 
-    /// Whether each world is held at a distance from the Nexus by its depth, in its branch's patch
-    /// and on loose leads. See [`edge_lead`].
+    /// Whether each world is held at a distance from the Nexus set by depth, inside the branch's
+    /// patch and on loose leads. See [`edge_lead`].
     pub(super) fn radial(self) -> bool {
         match self {
             Self::Radial | Self::Orbital => true,
@@ -158,11 +141,8 @@ impl Arrangement {
         }
     }
 
-    /// How much lead a connection has before it goes taut, as a multiple of the layer spacing,
-    /// until the panel's knob is dragged. See [`SimulationParameters::link_distance_max`].
-    ///
-    /// Long in the tree, whose planes are close and whose connections run across them; short on
-    /// the sky, where the branch patches and not the connections spread the worlds.
+    /// Default length a connection stretches before going taut, in layer spacings: long in the
+    /// tree, whose planes are close; short on the sky, where branch patches spread the worlds.
     fn default_link_reach(self) -> f32 {
         match self {
             Self::Flat | Self::FlatTree | Self::Free => 2.0,
@@ -199,7 +179,7 @@ impl Arrangement {
         }
     }
 
-    /// From a store written before there was one setting: the two switches it had.
+    /// From a store written before [`ARRANGEMENT`], which held two switches.
     fn from_switches(dimensions: Dimensions, layered: bool) -> Self {
         match (dimensions, layered) {
             (Dimensions::Two, false) => Self::Flat,
@@ -210,16 +190,16 @@ impl Arrangement {
     }
 }
 
-/// How the person has chosen to have the graph laid out.
-///
-/// Together because they are one decision in several parts, and a rebuild carrying only some of
-/// them would put the person somewhere they never chose. See [`Before`] and
-/// [`Layout::remembered`].
+/// The user's layout choices, kept together so a rebuild carries all of them. See [`Before`]
+/// and [`Layout::remembered`].
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct Layout {
     pub(super) arrangement: Arrangement,
-    /// How much of a world's size settles how hard it pushes. See [`node_mass`].
+    /// Weight of size in a world's repulsion. See [`node_mass`].
     pub(super) hub_repulsion: f32,
+    /// Whether connections between the Nexus's branches pull in the radial arrangements. See
+    /// [`edge_lead`].
+    pub(super) pull_across_branches: bool,
     /// How far a connection may stretch, in layers, in this arrangement. See
     /// [`Arrangement::default_link_reach`].
     pub(super) link_reach: f32,
@@ -230,14 +210,14 @@ impl Default for Layout {
         Self {
             arrangement: Arrangement::Orbital,
             hub_repulsion: HUB_REPULSION_DEFAULT,
+            pull_across_branches: false,
             link_reach: Arrangement::Orbital.default_link_reach(),
         }
     }
 }
 
 impl Layout {
-    /// Each part read on its own, so a store written by a version that knew fewer of them still
-    /// gives up the ones it has.
+    /// Reads each part separately, so a store from an older version still yields the parts present.
     pub(super) fn remembered() -> Self {
         let fallback = Self::default();
         let stored = store::read(ARRANGEMENT);
@@ -257,6 +237,8 @@ impl Layout {
             arrangement,
             hub_repulsion: store::read_clamped(HUB_REPULSION, HUB_REPULSION_RANGE)
                 .unwrap_or(fallback.hub_repulsion),
+            pull_across_branches: store::read_switch(PULL_ACROSS_BRANCHES)
+                .unwrap_or(fallback.pull_across_branches),
             link_reach: arrangement.remembered_link_reach(),
         }
     }
@@ -264,13 +246,13 @@ impl Layout {
     pub(super) fn remember(&self) {
         store::write(ARRANGEMENT, Some(self.arrangement.stored()));
         store::write(HUB_REPULSION, Some(&self.hub_repulsion.to_string()));
+        store::write_switch(PULL_ACROSS_BRANCHES, self.pull_across_branches);
         let link_reach = format!("{LINK_REACH}{}", self.arrangement.stored());
         store::write(&link_reach, Some(&self.link_reach.to_string()));
     }
 
-    /// Two dimensions is not the same layout flattened: a crowd on one plane can only go sideways,
-    /// so the layers close up and the push is turned far higher. A connection's reach follows the
-    /// same spacing.
+    /// In two dimensions a crowd can only spread sideways, so the layers sit farther apart and the
+    /// push is far stronger. A connection's reach follows the layer spacing.
     pub(super) fn parameters(&self) -> Solve {
         let (spacing, slack, charge) = match self.arrangement {
             Arrangement::Flat | Arrangement::Radial => (
@@ -313,11 +295,8 @@ impl Rng {
         self.next_u32() as f32 / u32::MAX as f32
     }
 }
-/// Scatters every node and stops it dead, restarting the layout: into its branch's patch of its
-/// shell when radial, over the spawn volume otherwise.
-///
-/// Both switches start over: a planar graph gives every pair the same z, so the repulsion along
-/// that axis is exactly zero and picking the dimension back up leaves it flat forever.
+/// Restarts the layout, scattering each node at rest into the branch's patch of the shell when
+/// radial, else over the spawn volume. Switching to 3D needs this: a flat graph has no z repulsion.
 pub(super) fn scatter(data: &mut AppEntities) {
     let planar = data.dimensions() == Dimensions::Two;
     let spacing =
@@ -361,9 +340,8 @@ pub(super) fn scatter(data: &mut AppEntities) {
     });
 }
 
-/// Which layer a world at `depth` is held to, in layer spacings: on the sky when orbital, one
-/// plane a depth in the tree, otherwise on rings or shells one apart through the core and closer
-/// together past it.
+/// The layer a world at `depth` is held to, in layer spacings: the sky when orbital, one plane per
+/// depth in the tree, else rings or shells one apart through the core and closer past the core.
 pub(super) fn shell_level(depth: f32, arrangement: Arrangement) -> f32 {
     match (arrangement, depth > 0.0) {
         (Arrangement::Orbital, true) => SKY_SHELLS,
@@ -373,7 +351,7 @@ pub(super) fn shell_level(depth: f32, arrangement: Arrangement) -> f32 {
     }
 }
 
-/// The gap between the shell at `depth` and the one inside it, in layer spacings: what a
+/// The gap between the shell at `depth` and the next shell in, in layer spacings: what a
 /// connection's lead is scaled by. One throughout on the sky, where there are no shells.
 pub(super) fn shell_gap(depth: f32, arrangement: Arrangement) -> f32 {
     match arrangement {
@@ -382,17 +360,31 @@ pub(super) fn shell_gap(depth: f32, arrangement: Arrangement) -> f32 {
     }
 }
 
-/// How many times farther than the sky a world at `depth` is drawn from the Nexus: its direction
-/// comes from the layout on the sky, its distance from its depth, as a star's does.
+/// How many times farther than the sky a world at `depth` is drawn from the Nexus: direction from
+/// the layout on the sky, distance from depth, as with a star.
 pub(super) fn sky_distance(depth: f32, arrangement: Arrangement) -> f32 {
     match arrangement {
-        Arrangement::Orbital => SKY_DISTANCE_STEP.powf((depth - 1.0).max(0.0)),
+        Arrangement::Orbital => {
+            SKY_NEAREST_DISTANCE * (1.0 + SKY_DEPTH_SPREAD * depth.max(1.0).ln())
+        }
         _ => 1.0,
     }
 }
 
-/// Per world, the door out of the Nexus its route passes through, or `None` for the Nexus and for
-/// worlds it has no route to.
+/// On the 3D sky, lines dim with distance from the Nexus, and so toward their deeper end.
+pub(super) fn sky_line_fade(arrangement: Arrangement) -> Option<LineFade> {
+    let sky = SKY_SHELLS * DAG_LEVEL_DISTANCE * SIM_TO_WORLD;
+    match arrangement {
+        Arrangement::Orbital => Some(LineFade {
+            whole_within: sky * sky_distance(1.0, arrangement),
+            e_fold_length: sky * SKY_LINE_FADE_LENGTH,
+        }),
+        _ => None,
+    }
+}
+
+/// Per world, the first world on the route from the Nexus, or `None` for the Nexus and
+/// unreachable worlds.
 pub(super) fn branches(routes: &world::Routes, nexus: usize) -> Vec<Option<usize>> {
     (0..routes.parents.len())
         .map(|mut world| {
@@ -407,13 +399,13 @@ pub(super) fn branches(routes: &world::Routes, nexus: usize) -> Vec<Option<usize
         .collect()
 }
 
-/// Whether a connection joins two branches, or the Nexus or a world it has no route to.
+/// Whether a connection joins two branches, or touches the Nexus or an unreachable world.
 pub(super) fn crosses_branches(branches: &[Option<usize>], from: usize, to: usize) -> bool {
     branches[from] != branches[to] || branches[from].is_none()
 }
 
 /// A rectangle of the sphere's equal-area map: `u` runs round the longitude and `v` up the
-/// height, both from 0 to 1, so a patch's area is its share of the sphere.
+/// height, both from 0 to 1, so a patch's area is a share of the sphere.
 #[derive(Clone, Copy)]
 struct Patch {
     u: f32,
@@ -422,8 +414,8 @@ struct Patch {
     height: f32,
 }
 
-/// Per world standing for a branch, the patch of the sphere its branch is laid out in, sized by how
-/// many worlds the branch holds. Planar, every patch is a whole-height slice: an arc of the ring.
+/// Per branch's first world, the patch of the sphere the branch is laid out in, sized by the
+/// branch's world count. Planar, every patch is a whole-height slice: an arc of the ring.
 fn branch_patches(branches: &[Option<usize>], planar: bool) -> Vec<Option<Patch>> {
     let mut sizes = vec![0usize; branches.len()];
     for &branch in branches.iter().flatten() {
@@ -446,7 +438,7 @@ fn branch_patches(branches: &[Option<usize>], planar: bool) -> Vec<Option<Patch>
     patches
 }
 
-/// A treemap: halves the branches by size and the patch in proportion, across its longer side.
+/// A treemap: halves the branches by size and the patch in proportion, across the longer side.
 fn split_into_patches(
     branches: &[(usize, usize)],
     patch: Patch,
@@ -499,53 +491,43 @@ fn split_into_patches(
     split_into_patches(&branches[cut..], second, planar, patches);
 }
 
-/// What one connection's lead is in a layout: how far it may stretch, as a multiple of what every
-/// connection is allowed, and how hard it pulls before then. See [`edge_reach`].
+/// A connection's lead: how far the connection may stretch, as a multiple of the shared reach,
+/// and how hard the connection pulls before then. See [`edge_reach`].
 ///
-/// Radial, a connection hangs loose until its lead runs out, and one between two branches has no
-/// lead at all: the branch patches, not the connections, decide where a branch sits. The lead
-/// is scaled by `lead_scale`: the 2D ring gap at the deeper end, or on the 3D sky how small the
-/// pair looks from the Nexus.
+/// Radial, a connection hangs loose within a lead spanning the patch of the bigger end's
+/// `descendants`, scaled by `lead_scale`: the 2D ring gap, or the pair's apparent size on the 3D
+/// sky. Connections across branches stretch freely, as one-way connections do outside a branch;
+/// inside a branch, a one-way lead is [`ONE_WAY_LEAD`] times longer.
 pub(super) fn edge_lead(
     one_way: bool,
     crosses_branches: bool,
     radius: f32,
+    descendants: u32,
     hub_repulsion: f32,
     radial: bool,
     lead_scale: f32,
 ) -> (f32, f32) {
-    match (radial, crosses_branches) {
-        (true, true) => (f32::INFINITY, 0.0),
-        (true, false) => (edge_reach(one_way, radius, hub_repulsion) * lead_scale, 0.0),
-        (false, _) => (edge_reach(one_way, radius, hub_repulsion), 1.0),
+    let patch = ((1 + descendants) as f32 / PATCH_WORLDS_PER_LEAD).sqrt() * lead_scale;
+    match (radial, crosses_branches, one_way) {
+        (true, true, _) => (f32::INFINITY, 0.0),
+        (true, false, false) => (patch, 0.0),
+        (true, false, true) => (patch * ONE_WAY_LEAD, 0.0),
+        (false, _, false) => (edge_reach(radius, hub_repulsion), 1.0),
+        (false, _, true) => (f32::INFINITY, 1.0),
     }
 }
 
-/// How far one connection may stretch, as a multiple of what every connection is allowed.
-///
-/// A one-way connection -- a chute, a warp, a door that does not open back -- joins two worlds a
-/// step apart to walk and nowhere near each other on the map, so it is left to stretch. Every
-/// other is held: a leaf's to the reach itself, a hub's to more of it. See [`HUB_REACH`].
-///
-/// Read off the drawn size for the same reason [`node_mass`] is: a second measure of how much
-/// hangs off a world would be one more place for the two to disagree.
-fn edge_reach(one_way: bool, radius: f32, hub_repulsion: f32) -> f32 {
-    if one_way {
-        return f32::INFINITY;
-    }
+/// How far one connection may stretch, as a multiple of the shared reach: a leaf's exactly the
+/// reach, a hub's more. Read off the drawn radius, as [`node_mass`] is. See [`HUB_REACH`].
+fn edge_reach(radius: f32, hub_repulsion: f32) -> f32 {
     1.0 + HUB_REACH * hub_repulsion * (radius / NODE_LEAF_RADIUS - 1.0)
 }
 
-/// How hard a world of a given radius pushes its neighbours away, `hub_repulsion` mixing between
-/// one mass for everything and the mass a solid ball of that radius would have.
+/// How hard a world of `radius` pushes neighbours away, `hub_repulsion` mixing between one mass
+/// for all and the mass of a solid ball of that radius.
 ///
-/// At zero every world repels alike and the sizes are drawn on top of a layout spaced for the
-/// smallest of them, so the hubs sit over their neighbours.
-///
-/// The cube is chosen for the room it makes rather than for the physics -- nothing integrates a
-/// mass as inertia here. What a mass settles is a distance, the square root of the two masses'
-/// product; cubed, that is the radii to the power of one and a half, which opens the hubs out well
-/// past the width of the pictures on them, where a linear mass would barely clear them.
+/// The cube is for spacing: masses set a distance of `sqrt(m1 * m2)`, so radius to the power 1.5,
+/// which opens hubs out past the width of their pictures.
 pub(super) fn node_mass(radius: f32, hub_repulsion: f32) -> f32 {
     NODE_BASE_MASS * (1.0 + hub_repulsion * ((radius / NODE_LEAF_RADIUS).powi(3) - 1.0))
 }

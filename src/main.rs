@@ -15,7 +15,7 @@ pub(crate) use app::i18n;
 
 #[allow(unused)]
 pub fn main() {
-    // The page and the phone install their own logger in `lib.rs`.
+    // The web build and Android install their own logger in `lib.rs`.
     #[cfg(all(not(target_family = "wasm"), not(target_os = "android")))]
     env_logger::init();
     run(winit::event_loop::EventLoop::new().unwrap());

@@ -1,13 +1,11 @@
-//! Flat octree behind the Barnes-Hut repulsion pass.
-//!
-//! Cells live in parallel arrays and refer to each other by index, so a build reuses the
-//! allocations from the previous step and a traversal walks indices instead of pointers.
+//! Flat octree for the Barnes-Hut repulsion pass; cells are parallel arrays linked by index, so
+//! each `Octree::build` reuses the previous allocations.
 
 use crate::LANES;
 
-/// The group one tree walk serves: walk count against interaction-list length. A 4000-node graph
-/// at the default opening angle costs 3.5 ms per step at 8 bodies, 2.2 ms at 32, 2.5 ms at 64. A
-/// multiple of [`LANES`], so a leaf's bodies fill whole iterations of the repulsion kernel.
+/// Trades traversal count against interaction-list length: a 4000-node graph at the default
+/// opening angle costs 3.5 ms per step at 8 bodies, 2.2 ms at 32, 2.5 ms at 64. A multiple of
+/// [`LANES`], so a leaf's bodies fill whole iterations of the repulsion kernel.
 const LEAF_CAPACITY: usize = LANES * 4;
 /// Coincident bodies would subdivide forever. At this depth the leaf keeps them all instead.
 const MAX_DEPTH: u32 = 20;
@@ -22,7 +20,7 @@ pub(crate) struct Bodies<'a> {
     pub mass: &'a [f32],
 }
 
-/// The bodies copied into [`Octree::order`]'s order, so a leaf's run is contiguous.
+/// The bodies copied into [`Octree::order`]'s order, so a leaf's span is contiguous.
 #[derive(Default)]
 pub(crate) struct SortedBodies {
     pub x: Vec<f32>,
@@ -40,7 +38,7 @@ impl SortedBodies {
     }
 }
 
-/// A cell that stopped subdividing, with the box its bodies span.
+/// A cell that stopped subdividing, with the bounding box of the bodies.
 pub(crate) struct Leaf {
     pub start: u32,
     pub end: u32,
@@ -58,11 +56,11 @@ pub(crate) struct Octree {
     width: Vec<f32>,
     /// All [`NO_CHILD`] for a leaf.
     children: Vec<[u32; 8]>,
-    /// `(start, count)` into `order`: a cell owns one contiguous run of bodies. Kept for internal
-    /// cells too, so the traversal can recognize the ones enclosing the node it gathers for.
+    /// `(start, count)` into `order`: a cell owns one contiguous span of bodies. Kept for internal
+    /// cells too, so the traversal can recognize cells enclosing the query leaf.
     bodies: Vec<(u32, u32)>,
     pub leaves: Vec<Leaf>,
-    /// Live body slots, ordered so that every leaf owns one contiguous run.
+    /// Live body slots, ordered so that every leaf owns one contiguous span.
     pub order: Vec<u32>,
     pub sorted: SortedBodies,
     partition_scratch: Vec<u32>,
@@ -70,8 +68,8 @@ pub(crate) struct Octree {
 }
 
 impl Octree {
-    /// Over every slot with mass: a massless slot neither exerts nor feels a force, so leaving it
-    /// out also keeps the root cube tight around the live nodes.
+    /// Over every slot with mass: a massless slot neither exerts nor feels a force, and skipping
+    /// massless slots keeps the root cube tight around the live nodes.
     pub fn build(&mut self, bodies: Bodies) {
         self.com_x.clear();
         self.com_y.clear();
@@ -122,7 +120,7 @@ impl Octree {
         self.octant_scratch = scratch.octants;
     }
 
-    /// Aggregates bottom-up: a leaf sums its bodies, an internal cell its children.
+    /// Aggregates bottom-up: a leaf sums the bodies, an internal cell the children.
     fn build_cell(
         &mut self,
         order: &mut [u32],
@@ -172,7 +170,7 @@ impl Octree {
         cell as u32
     }
 
-    /// A leaf's run of `order` is final, so this is where its bodies are copied into place.
+    /// A leaf's span of `order` is final, so the bodies are copied into place here.
     fn build_leaf(&mut self, cell: usize, order: &[u32], offset: u32, bodies: Bodies) {
         let (start, end) = (offset as usize, offset as usize + order.len());
         let (mut total, mut cx, mut cy, mut cz) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
@@ -222,14 +220,12 @@ impl Octree {
     /// Collects the bodies and cell aggregates everything inside the box `lo..hi` interacts with,
     /// together with the force each entry may contribute.
     ///
-    /// A cell stands in for its bodies once its width subtends less than `theta` from the whole
-    /// box, measured from the nearest corner, so the list is valid for every node in the box and
-    /// one walk serves a leaf's worth of nodes.
+    /// A cell replaces the bodies inside once the cell width subtends less than `theta` from the
+    /// nearest point of the box, so one traversal serves every node in the leaf.
     ///
-    /// `query` is the leaf the box was measured from. Its own bodies must reach the kernel as
-    /// bodies, never folded into an aggregate: only an exactly zero offset makes a node's pull on
-    /// itself zero, and an aggregate standing in for it sits a rounding error away, which the
-    /// softened inverse square turns into a full-strength kick.
+    /// `query` is the leaf the box comes from. The query's bodies reach the kernel as bodies: only
+    /// an exactly zero offset cancels a node's self-pull, and the softened inverse square turns an
+    /// aggregate's rounding error into a full-strength kick.
     pub fn gather(&self, query: &Leaf, theta: f32, force_max: f32, out: &mut Interactions) {
         out.clear();
         if self.width.is_empty() {

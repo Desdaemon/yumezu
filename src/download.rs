@@ -1,7 +1,4 @@
-//! Which package this browser has a platform for, and the bar offering it.
-//!
-//! Only on the page: a run that is already the app has nothing to offer, and the platforms with no
-//! package here are offered nothing rather than something they cannot run.
+//! The release package for this browser's platform, offered in a bar; web build only.
 
 use egui_material_icons::MaterialIcon;
 use egui_material_icons::icons::{
@@ -10,15 +7,14 @@ use egui_material_icons::icons::{
 
 use super::prelude::*;
 
-/// The releases page rather than a package: `.github/workflows/release.yml` stamps every asset
-/// with the version that built it, so no address stays pointed at the newest.
+/// The releases page: `.github/workflows/release.yml` stamps each asset with a version, so no
+/// asset URL stays the newest.
 pub(super) const RELEASES: &str = "https://github.com/Desdaemon/yumezu/releases/latest";
 
 // The value is always empty.
 const DISMISSED: &str = "download-dismissed";
 
-/// A platform `.github/workflows/release.yml` builds a package for. See [`Platform::detected`],
-/// which is how anything gets one.
+/// A platform `.github/workflows/release.yml` builds a package for; see [`Platform::detected`].
 #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
 #[derive(Clone, Copy)]
 pub(super) enum Platform {
@@ -29,7 +25,7 @@ pub(super) enum Platform {
 }
 
 impl Platform {
-    /// Spelled the same in every language, which is why these are here rather than in `locales/`.
+    /// Spelled the same in every language, so kept out of `locales/`.
     pub(super) fn name(self) -> &'static str {
         match self {
             Self::Windows => "Windows",
@@ -48,15 +44,14 @@ impl Platform {
         }
     }
 
-    /// `None` for an iPhone, a Chromebook, an agent saying nothing recognisable, and off the page
-    /// entirely. Nothing rests on the answer: an agent that lies is offered a package it can
-    /// ignore.
+    /// `None` for an iPhone, a Chromebook, an unrecognised user agent, and off the web build. A
+    /// wrong guess only offers a package the user can ignore.
     pub(super) fn detected() -> Option<Self> {
         #[cfg(target_family = "wasm")]
         {
             let navigator = web_sys::window()?.navigator();
             let agent = navigator.user_agent().ok()?;
-            // Android before Linux, whose name it also carries.
+            // Android before Linux, since Android user agents also name Linux.
             if agent.contains("Android") {
                 return Some(Self::Android);
             }
@@ -78,8 +73,7 @@ impl Platform {
 }
 
 pub(super) struct Offer {
-    /// What the bar is offering, and `None` where there is no bar: nothing to offer, or an offer
-    /// already answered.
+    /// The offered platform; `None` without a bar: nothing to offer, or the offer answered.
     platform: Option<Platform>,
 }
 
@@ -90,8 +84,8 @@ impl Offer {
         }
     }
 
-    /// The bar stands off the top of the safe area, not of the window, which on a phone sits
-    /// under the status bar; the foot is the message box's.
+    /// The bar sits at the top of the safe area, below a phone's status bar; the bottom belongs to
+    /// the message box.
     pub(super) fn show(&mut self, ctx: &egui::Context, insets: super::ui::Insets) {
         let Some(platform) = self.platform else {
             return;

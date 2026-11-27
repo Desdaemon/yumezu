@@ -116,7 +116,11 @@ reset-camera = 視点をリセット
 hub-push = ハブの反発
 hub-push-hint = 値が大きいほど、接続の多いマップが周囲から遠ざかります
 link-reach = 接続の長さ
-link-reach-hint = つながった2つのマップが離れられる距離を階層数で表します。配置ごとに別々に保存されます。一方通行の接続はこの制限を受けません
+link-reach-hint = つながった2つのマップが離れられる距離を階層数で表します。配置ごとに別々に保存されます。一方通行の接続はさらに長く伸びます
+pull-across-branches = 枝をまたいで引き寄せる
+restart-layout = 配置をやり直す
+restart-layout-hint = マップを散らばらせて、もう一度落ち着くまで動かします
+pull-across-branches-hint = 放射と天球の配置で、ネクサスの別々の扉から行けるマップ同士の接続も互いを引き寄せます
 ui-scale = UIの大きさ
 antialias = 輪郭をなめらかに
 antialias-hint = グラフの輪郭をなめらかにします。フレームレートがディスプレイに届かないときは、
@@ -131,15 +135,15 @@ clear-cache-hint = 起動をまたいで保存したマップの画像を消去�
 clear-cache-clearing = 消去中...
 clear-cache-done = ダウンロードを消去しました
 clear-cache-failed = ダウンロードを消去できませんでした
-update-check = 更新を確認
-update-check-hint = このビルドより新しいリリースがあるかGitHubに問い合わせます
-update-checking = 確認中...
-update-current = これが最新のリリースです
-update-ready = { $version } が利用できます
-update-install = インストール
-update-installing = ダウンロード中...
-update-installed = インストールしました。次回の起動から反映されます。
-update-failed = 更新を取得できませんでした
+app-update-check = 更新を確認
+app-update-check-hint = このビルドより新しいリリースがあるかGitHubに問い合わせます
+app-update-checking = 確認中...
+app-update-current = これが最新のリリースです
+app-update-ready = { $version } が利用できます
+app-update-install = インストール
+app-update-installing = ダウンロード中...
+app-update-installed = インストールしました。次回の起動から反映されます。
+app-update-failed = 更新を取得できませんでした
 stamp = { $year }/{ $month }/{ $day } { $hour }:{ $minute }
 
 last-update = データ更新: { $when }
@@ -173,7 +177,7 @@ unvisited-location = 未訪問の場所
 github-link = GitHubで見る
 download-for = {$platform}版をダウンロード
 
-## Controls guide, shown on first run.
+## Controls guide, shown the first time the app opens.
 
 guide-title = 操作方法
 guide-inputs = 入力
@@ -271,17 +275,17 @@ effect-dice = サイコロ
 
 ## Connection direction.
 
-walk-freely = 自由に通行
-walk-free-both = 両方通行です。
-walk-one-way = 一方通行です。
-walk-no-entry = ここからは入れません。
-walk-none = 現在は通行できません。
-walk-dead-end = メインエリアからは入れません。
-walk-isolated = メインエリアにつながりません。
-walk-locked-out = 反対側の入口から解除できます。
-walk-locked-back = 反対側の入口からこの領域への通行を解除します。
-walk-both =
+passage-freely = 自由に通行
+passage-free-both = 両方通行です。
+passage-one-way = 一方通行です。
+passage-no-entry = ここからは入れません。
+passage-none = 現在は通行できません。
+passage-dead-end = メインエリアからは入れません。
+passage-isolated = メインエリアにつながりません。
+passage-locked-out = 反対側の入口から解除できます。
+passage-locked-back = 反対側の入口からこの領域への通行を解除します。
+passage-both =
     ここから: { $out }
     ここへ: { $back }。
-walk-out-only = ここからのみ: { $out }
-walk-back-only = ここへのみ: { $back }
+passage-out-only = ここからのみ: { $out }
+passage-back-only = ここへのみ: { $back }

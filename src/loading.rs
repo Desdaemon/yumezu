@@ -1,44 +1,27 @@
-//! The stretch at the start of a run with a window on screen and nothing to draw in it. See
-//! [`Dump`] and [`App::draw_loading`].
+//! The loading screen, drawn whenever the window has no graph: at launch and while one is rebuilt.
+//! See [`Dump`] and [`App::draw_loading`].
 
 use super::*;
 
-/// How long the loading frame takes to fade off the graph behind it. See [`App::veil`].
+/// How long the loading screen takes to fade out over the graph. See [`App::veil`].
 pub(super) const LOADING_FADE_SECONDS: f32 = 0.5;
 
-/// How often the server is polled for what it is building, while there is nothing to draw. A stage
-/// lasts tens of seconds, so this is how soon a change is said, not how closely it is followed.
+/// How often the server is polled for build progress while there is no graph. A stage lasts tens
+/// of seconds, so this only bounds how late a stage change shows.
 const BUILDING_POLLED_EVERY_SECONDS: f32 = 1.0;
-/// How long a run waits before fetching the dump again, after the server said it is building one.
-///
-/// Longer than the poll above because this one is not for the screen: nothing about the wait looks
-/// different for having tried, and the server is being polled about its progress anyway.
+/// How long to wait before fetching the dump again while the server builds one; longer than the
+/// progress poll, which already reports the wait.
 const DUMP_POLLED_EVERY_SECONDS: f32 = 3.0;
-/// How long a run waits before trying again, after the dump could not be had at all.
-///
-/// Much longer than the wait above, which waits on a server that answered, where this is a host
-/// that is not there. Still short enough to pick up a server coming back while someone is
-/// watching.
+/// How long to wait before retrying after the dump fetch failed outright: longer than the waits
+/// above, short enough to see a server come back.
 const DUMP_RETRIED_AFTER_SECONDS: f32 = 10.0;
 
-/// The dump, at whatever stage of arriving it has reached.
-///
-/// It comes off the network rather than out of the binary, so there is a stretch at the start of a
-/// run with a window on screen and nothing to draw in it: see [`App::draw_loading`].
-///
-/// There is no state for having given up: every reason a dump fails to arrive is one that passes,
-/// and none is worth a window the person has to close and open again.
-///
-/// Kept once it arrives rather than dropped into the entities built from it, a phone rebuilding
-/// those every time the app comes back to the screen. See [`App::release`].
+/// The dump through each stage of arrival; every failure is retried. Kept once built, since a
+/// phone rebuilds the entities on every return to the foreground; see [`App::release`].
 pub(super) enum Dump {
     Loading(fetch::Pending<Result<Option<world::Dump>, String>>),
-    /// Not this time, and this many seconds until the run tries again.
-    ///
-    /// Two things put a run here: the server building a dump rather than serving one it is about
-    /// to replace, which is `why: None`, or the fetch coming to nothing, where `why` is what went
-    /// wrong. Hence the two waits, [`DUMP_POLLED_EVERY_SECONDS`] and
-    /// [`DUMP_RETRIED_AFTER_SECONDS`].
+    /// Seconds until the next try. `why` is `None` while the server builds a dump (see
+    /// [`DUMP_POLLED_EVERY_SECONDS`]), or else the failure (see [`DUMP_RETRIED_AFTER_SECONDS`]).
     Waiting {
         why: Option<String>,
         until: f32,
@@ -46,14 +29,11 @@ pub(super) enum Dump {
     Ready(world::Dump),
 }
 
-/// What the server says it is building, for the loading frame to say instead of the plain wait.
-///
-/// A server with no dump yet answers the fetch with `needs update` rather than a document, so the
-/// fetch cannot say how the wait is going. Polled on its own clock, one request at a time. See
-/// [`world::building`].
+/// The server's build stage for the loading screen, since the dump fetch only answers
+/// `needs update`. Polled on a separate clock, one request at a time. See [`world::building`].
 #[derive(Default)]
 pub(super) struct Building {
-    /// The name of the message the last answer named.
+    /// The message name from the last answer.
     task: Option<&'static str>,
     pending: Option<fetch::Pending<Option<&'static str>>>,
     /// Seconds until the next poll. Starts at zero, so the first frame of a wait polls.
@@ -61,7 +41,7 @@ pub(super) struct Building {
 }
 
 impl Building {
-    fn tick(&mut self, seconds: f32) {
+    fn update(&mut self, seconds: f32) {
         if let Some(pending) = &self.pending {
             if let Some(said) = pending.take() {
                 let moved_on = said.is_some() && said != self.task;
@@ -81,7 +61,7 @@ impl Building {
         }
     }
 
-    /// The stage the server named, or the plain wait.
+    /// The stage the server named, or the generic wait message.
     fn says(&self) -> String {
         match self.task {
             Some(said) => super::i18n::format(said, None),
@@ -91,8 +71,8 @@ impl Building {
 }
 
 impl App {
-    /// Takes in a dump that has arrived and builds the graph out of it, or settles how long this
-    /// run waits before trying again. Does nothing until the fetch in flight answers.
+    /// Builds the graph from an arrived dump, or schedules the next try. Does nothing until the
+    /// pending fetch answers.
     pub(super) fn receive_dump(&mut self) {
         let Some(loaded) = (match &self.dump {
             Dump::Loading(pending) => pending.take(),
@@ -118,11 +98,8 @@ impl App {
         };
         self.build();
     }
-    /// The frame drawn while there is no graph: the background, and a word about why. The whole of
-    /// the app until the dump lands, however many tries that takes.
-    ///
-    /// Everything the overlay usually reads is built out of the dump, so only the one message is
-    /// laid out, over the background the graph is drawn on so the window does not change colour.
+    /// The loading screen, the whole app until the dump arrives: one message over the graph's
+    /// background, so the window colour does not change.
     pub(super) fn draw_loading(&mut self) {
         self.veil = 1.0;
         let ctx = self.ctx.wctx.as_ref().unwrap();
@@ -134,7 +111,7 @@ impl App {
             self.dump,
             Dump::Loading(_) | Dump::Waiting { why: None, .. }
         ) {
-            self.building.tick(seconds);
+            self.building.update(seconds);
         }
         if let Dump::Waiting { until, .. } = &mut self.dump {
             *until -= seconds;
@@ -148,21 +125,21 @@ impl App {
             Dump::Waiting { why: Some(_), .. } => t!("dump-failed"),
             _ => self.building.says(),
         };
-        // The frame keeps spinning, because it will retry either way.
+        // The spinner keeps turning on failure, since a retry follows.
         let failed = match &self.dump {
             Dump::Waiting { why, .. } => why.as_deref(),
             _ => None,
         };
-        // The fade after this frame carries this line out.
+        // Kept for the fade-out once the graph arrives.
         self.said = says.clone();
         let overlay = self.overlay.as_mut().unwrap();
         overlay.gui.context().set_zoom_factor(overlay.ui_scale);
-        // As in `Overlay::run`: the Japanese face is not compiled in.
+        // As in `Overlay::update`: the Japanese face is not compiled in.
         let context = overlay.gui.context().clone();
         overlay.japanese.serve(&context);
         overlay
             .gui
-            .run(window, |ui| loading_frame(ui.ctx(), &says, failed, 1.0));
+            .update(window, |ui| loading_frame(ui.ctx(), &says, failed, 1.0));
         let screen = frame_input.screen();
         screen.clear(ClearState::color_and_depth(
             BACKGROUND_COLOR[0],
